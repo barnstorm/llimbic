@@ -15,7 +15,6 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	# 1 game-minute per real-second at time_scale=1.0
-	# delta is in seconds, we want minutes per second
 	var minutes_elapsed: float = delta * time_scale
 	var hours_elapsed: float = minutes_elapsed / 60.0
 	var old_hour: float = current_hour
@@ -26,6 +25,7 @@ func _process(delta: float) -> void:
 		current_day += 1
 		day_changed.emit(current_day)
 
+	# Emit time_changed every half-hour (game time)
 	if int(old_hour * 2) != int(current_hour * 2):
 		time_changed.emit(current_hour)
 
@@ -37,3 +37,6 @@ func get_time_string() -> String:
 	if display_h == 0:
 		display_h = 12
 	return "%d:%02d %s" % [display_h, m, period]
+
+func get_day_string() -> String:
+	return "Day " + str(current_day)

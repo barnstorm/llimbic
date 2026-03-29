@@ -28,3 +28,33 @@
 ### NPC names and roles
 - Edith (Baker), Roland (Guard), Ivy (Herbalist), Felix (Courier)
 - Greta (Blacksmith), Mabel (Gossip), Aldric (Farmer), Hugo (Innkeeper)
+
+## Task 3: NPC AI & Town Life
+
+### Architecture
+- NPCBrain (RefCounted) orchestrates Layer1, Layer2, Layer3, and MemorySystem per NPC
+- All layer classes are RefCounted, instantiated from GDScript via `load().new()`
+- InferenceClient autoload manages async HTTP to localhost:8420; gracefully degrades if server is down
+- Layer 1 runs every physics tick (pure GDScript drives/tendencies)
+- Layer 2 fires every 0.5s (emotion vector projection via HTTP)
+- Layer 3 fires on game-time intervals (~30 game-minutes, plan chunking via HTTP)
+- Social propagation pulses every 5 real seconds, checks NPC pairs within 64px
+
+### What worked
+- Direct property access on RefCounted instances works fine from NPC controller (no casting needed)
+- Debug overlay built programmatically with ColorRect bars + heatmap cells; updates every _process
+- Plan chunk timing: game-hours converted to ~8-30 real seconds for playable pacing
+- `Input.action_press()` in SceneTree test scripts does NOT propagate to node `_input()` handlers — must directly set overlay state in test harness
+- NPCs use `add_to_group("npcs")` in `_ready()` for easy lookup by social propagation and debug overlay
+
+### Technical details
+- Layer3Executive.LOCATIONS maps 16 town location names to world pixel positions
+- ROLE_CONFIG defines home, work, and default daily schedule per role (4-7 chunks each)
+- 27-dim GoEmotions vector: indices 0-11 positive, 12-22 negative, 23-26 cognitive/neutral
+- Valence computed from positive vs negative sum ratio
+- Social propagation cooldown: 300 real seconds per NPC pair
+- NPC speech bubble: Label child on CharacterBody2D, shown for 4 seconds after dialogue
+
+### Autoloads
+- GameManager, NavigationManager, InferenceClient — all registered in project.godot
+- Access pattern: iterate `get_tree().root.get_children()` and match by `.name`

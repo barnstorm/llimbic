@@ -17,6 +17,7 @@ window/stretch/aspect="expand"
 
 GameManager="*res://scripts/game_manager.gd"
 NavigationManager="*res://scripts/navigation_manager.gd"
+InferenceClient="*res://scripts/inference_client.gd"
 
 [rendering]
 

@@ -1,5 +1,5 @@
 extends CharacterBody2D
-## res://scripts/npc_controller.gd — NPC wandering with AStar2D pathfinding
+## res://scripts/npc_controller.gd — NPC with three-layer AI, plan-driven movement
 
 @export var npc_name: String = ""
 @export var role: String = ""
@@ -9,22 +9,45 @@ extends CharacterBody2D
 @onready var sprite: AnimatedSprite2D = $AnimatedSprite2D
 @onready var name_label: Label = $NameLabel
 
+var brain: RefCounted = null  # NPCBrain
+
 var _nav_manager: Node = null
+var _game_manager: Node = null
+var _inference_client: Node = null
 var _nav_ready: bool = false
 var _current_path: PackedVector2Array = PackedVector2Array()
 var _path_index: int = 0
-var _idle_timer: float = 0.0
 var _facing: String = "down"
 
-enum State { IDLE, WALKING }
+enum State { IDLE, WALKING, ARRIVED, TALKING }
 var _state: int = State.IDLE
 
+var _arrived_timer: float = 0.0
+var _arrived_duration: float = 0.0
+var _chunk_start_time: float = 0.0
+
+# Speech bubble
+var _speech_label: Label = null
+var _speech_timer: float = 0.0
+
+# Valence indicator (colored circle above head)
+var _valence_indicator: Node2D = null
+
+# Layer 2 update timer
+var _l2_timer: float = 0.0
+
+# Nearby NPC tracking
+var _nearby_npc_count: int = 0
+
 func _ready() -> void:
-	# Find NavigationManager autoload
+	# Find autoloads
 	for child in get_tree().root.get_children():
 		if child.name == "NavigationManager":
 			_nav_manager = child
-			break
+		elif child.name == "GameManager":
+			_game_manager = child
+		elif child.name == "InferenceClient":
+			_inference_client = child
 
 	if _nav_manager:
 		if _nav_manager.has_signal("navigation_ready"):
@@ -39,12 +62,44 @@ func _ready() -> void:
 	if character_sheet_path != "":
 		_setup_sprite_frames(character_sheet_path)
 
-	# Start with a random idle delay
-	_idle_timer = randf_range(0.5, 2.0)
+	# Initialize brain
+	var BrainScript: GDScript = load("res://scripts/npc_brain.gd")
+	brain = BrainScript.new()
+	brain.setup(npc_name, role)
+	brain.set_autoloads(_inference_client, _game_manager)
+
+	# Create speech bubble label
+	_speech_label = Label.new()
+	_speech_label.name = "SpeechBubble"
+	_speech_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_speech_label.position = Vector2(-60, -55)
+	_speech_label.size = Vector2(120, 40)
+	_speech_label.add_theme_font_size_override("font_size", 10)
+	_speech_label.add_theme_color_override("font_color", Color.WHITE)
+	_speech_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+	_speech_label.add_theme_constant_override("shadow_offset_x", 1)
+	_speech_label.add_theme_constant_override("shadow_offset_y", 1)
+	_speech_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	_speech_label.visible = false
+	add_child(_speech_label)
+
+	# Create valence indicator (a small circle drawn as a ColorRect)
+	_valence_indicator = Node2D.new()
+	_valence_indicator.name = "ValenceIndicator"
+	_valence_indicator.position = Vector2(0, -45)
+	_valence_indicator.visible = false
+	add_child(_valence_indicator)
+
+	# Add to npcs group for easy lookup
+	add_to_group("npcs")
+
+	# Start first plan chunk
 	_state = State.IDLE
+	_pick_plan_destination()
 
 func _on_nav_ready() -> void:
 	_nav_ready = true
+	_pick_plan_destination()
 
 func _setup_sprite_frames(sheet_path: String) -> void:
 	var sheet: Texture2D = load(sheet_path)
@@ -87,30 +142,77 @@ func _setup_sprite_frames(sheet_path: String) -> void:
 func _physics_process(delta: float) -> void:
 	if not _nav_ready:
 		return
+	if brain == null:
+		return
+
+	# Count nearby NPCs
+	_nearby_npc_count = 0
+	for npc in get_tree().get_nodes_in_group("npcs"):
+		if npc != self and global_position.distance_to(npc.global_position) < 64.0:
+			_nearby_npc_count += 1
+
+	# Layer 1: every tick
+	brain.update_layer1(delta, global_position, _nearby_npc_count)
+
+	# Layer 2: medium cadence
+	_l2_timer += delta
+	if _l2_timer >= 0.5:
+		_l2_timer = 0.0
+		brain.update_layer2(delta)
+
+	# Layer 3: triggered by game time (handled via plan checks)
+	var hour: float = 6.0
+	if _game_manager:
+		hour = _game_manager.current_hour
+	brain.update_layer3(hour)
+
+	# Speech bubble timer
+	if _speech_timer > 0.0:
+		_speech_timer -= delta
+		if _speech_timer <= 0.0 and _speech_label:
+			_speech_label.visible = false
+			if _state == State.TALKING:
+				_state = State.IDLE
+				_pick_plan_destination()
 
 	match _state:
 		State.IDLE:
-			_idle_timer -= delta
-			if _idle_timer <= 0.0:
-				_pick_new_destination()
+			_pick_plan_destination()
 		State.WALKING:
 			_follow_path(delta)
+		State.ARRIVED:
+			_arrived_timer -= delta
+			if _arrived_timer <= 0.0:
+				brain.on_chunk_completed()
+				_state = State.IDLE
+		State.TALKING:
+			velocity = Vector2.ZERO
+			if sprite and sprite.sprite_frames:
+				var idle_name: String = "idle_" + _facing
+				if sprite.animation != StringName(idle_name):
+					sprite.play(StringName(idle_name))
 
-func _pick_new_destination() -> void:
-	if _nav_manager == null:
-		_idle_timer = 2.0
+func _pick_plan_destination() -> void:
+	if not _nav_ready or _nav_manager == null or brain == null:
 		return
 
-	var target_tile: Vector2i = _nav_manager.get_random_walkable_tile()
-	var target_world: Vector2 = _nav_manager.tile_to_world(target_tile)
+	var target_world: Vector2 = brain.get_target_position()
+	# Add some randomness to avoid all NPCs going to exact same pixel
+	target_world += Vector2(randf_range(-16, 16), randf_range(-16, 16))
+
 	_current_path = _nav_manager.get_nav_path(global_position, target_world)
 
 	if _current_path.size() < 2:
-		_idle_timer = randf_range(1.0, 3.0)
+		# Can't path there — try again soon
+		_state = State.IDLE
+		brain.on_path_blocked()
+		# Fall back: advance to next chunk
+		brain.on_chunk_completed()
 		return
 
-	_path_index = 1  # Skip first point (current position)
+	_path_index = 1
 	_state = State.WALKING
+	brain.layer1.start_task()
 
 func _follow_path(delta: float) -> void:
 	if _path_index >= _current_path.size():
@@ -146,10 +248,49 @@ func _follow_path(delta: float) -> void:
 
 func _arrive() -> void:
 	velocity = Vector2.ZERO
-	_state = State.IDLE
-	_idle_timer = randf_range(2.0, 5.0)
+	_state = State.ARRIVED
 	_current_path = PackedVector2Array()
 	_path_index = 0
+
 	if sprite and sprite.sprite_frames:
 		var idle_name: String = "idle_" + _facing
 		sprite.play(StringName(idle_name))
+
+	# Determine how long to stay based on plan chunk
+	var chunk: Dictionary = brain.layer3.get_current_chunk()
+	var duration_hours: float = chunk.get("duration", 2.0)
+	# Convert game hours to real seconds: 1 game-minute = 1 real-second (at time_scale=1)
+	# duration is in game-hours, so duration * 60 game-minutes = duration * 60 real-seconds
+	# That's way too long for gameplay. Scale it down: each plan chunk lasts 10-30 real seconds
+	_arrived_duration = clampf(duration_hours * 5.0, 8.0, 30.0)
+	_arrived_timer = _arrived_duration
+
+	brain.on_arrived_at_destination()
+
+func interact_with_player() -> void:
+	## Called by InteractionSystem when player presses interact near this NPC
+	if _state == State.TALKING:
+		return
+	_state = State.TALKING
+	velocity = Vector2.ZERO
+
+	brain.on_player_interaction(_on_dialogue_received)
+
+func _on_dialogue_received(success: bool, data: Dictionary) -> void:
+	var utterance: String = data.get("utterance", "...")
+	show_speech(utterance)
+
+func show_speech(text: String) -> void:
+	if _speech_label:
+		_speech_label.text = text
+		_speech_label.visible = true
+		_speech_timer = 4.0
+
+func get_valence_color() -> Color:
+	if brain and brain.layer2:
+		return brain.layer2.get_valence_color()
+	return Color(0.9, 0.9, 0.2)  # yellow default
+
+func set_valence_visible(visible: bool) -> void:
+	if _valence_indicator:
+		_valence_indicator.visible = visible

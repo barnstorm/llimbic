@@ -91,10 +91,20 @@
 - GameManager.day_changed -> Layer3Executive (new day planning)
 - NavigationManager.navigation_ready -> NPCController (begin pathfinding)
 
+### NPCBrain
+- **File:** res://scripts/npc_brain.gd
+- **Extends:** RefCounted
+
+### InferenceClient (autoload)
+- **File:** res://scripts/inference_client.gd
+- **Extends:** Node
+- **Signals emitted:** request_completed(request_id: String, success: bool, data: Dictionary)
+
 ## Autoloads
 
 - GameManager = res://scripts/game_manager.gd
 - NavigationManager = res://scripts/navigation_manager.gd
+- InferenceClient = res://scripts/inference_client.gd
 
 ## Asset Hints
 

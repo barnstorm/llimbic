@@ -41,7 +41,7 @@ Uses pre-existing assets from joonspk-research/generative_agents: a pre-rendered
 
 ## 3. NPC AI & Town Life
 - **Depends on:** 1, 2
-- **Status:** pending
+- **Status:** done
 - **Targets:** scripts/npc_brain.gd, scripts/layer1_substrate.gd, scripts/layer2_projection.gd, scripts/layer3_executive.gd, scripts/memory_system.gd, scripts/social_propagation.gd, scripts/npc_controller.gd, scripts/debug_overlay.gd, scripts/interaction_system.gd, scripts/game_manager.gd, scripts/inference_client.gd
 - **Goal:** Implement the three-layer adaptive AI architecture with local model inference, structured memory, social propagation, player interaction, and a debug inspection overlay. Layer 1 runs entirely in GDScript at physics tick rate. Layer 2 and Layer 3 call the Python inference server asynchronously via HTTP.
 - **Requirements:**
