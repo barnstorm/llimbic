@@ -1,5 +1,6 @@
 torch>=2.0
 transformers>=4.40
+outlines>=1.2
 fastapi>=0.100
 uvicorn>=0.20
 pydantic>=2.0

@@ -9,10 +9,11 @@ chat, NPC-to-NPC conversation, and memory reflection.
 import sys
 import os
 import time
+import json
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import torch
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 import uvicorn
 
@@ -148,6 +149,75 @@ async def converse(req: ConverseRequest):
                                req.shared_context, req.speaker_recent)
     result = await _run(_do)
     return ConverseResponse(**result)
+
+
+# --- WebSocket endpoint ---
+# Single persistent connection multiplexes all L3 requests.
+# Client sends: {"id": "req_1", "method": "plan", "params": {...}}
+# Server sends: {"id": "req_1", "result": {...}}
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    print("WebSocket client connected")
+    try:
+        while True:
+            raw = await ws.receive_text()
+            msg = json.loads(raw)
+            req_id = msg.get("id", "?")
+            method = msg.get("method", "")
+            params = msg.get("params", {})
+
+            # Dispatch to the right model method in thread pool
+            async def handle():
+                try:
+                    result = await _dispatch(method, params)
+                    await ws.send_text(json.dumps({"id": req_id, "result": result}))
+                except Exception as e:
+                    await ws.send_text(json.dumps({"id": req_id, "error": str(e)}))
+
+            # Fire and forget — multiple requests can be in flight
+            asyncio.create_task(handle())
+    except WebSocketDisconnect:
+        print("WebSocket client disconnected")
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+
+
+async def _dispatch(method: str, params: dict) -> dict:
+    """Route a WebSocket request to the right model method."""
+    if method == "plan":
+        return await _run(model.plan, params.get("role", ""),
+                           params.get("memory_summary", ""),
+                           params.get("current_context", ""),
+                           params.get("emotion_summary", ""))
+    elif method == "reflect":
+        return await _run(model.reflect, params.get("memory_events", []))
+    elif method == "dialogue":
+        return await _run(model.dialogue, params.get("role", ""),
+                           params.get("emotion_summary", ""),
+                           params.get("relationship_context", ""),
+                           params.get("recent_events", []))
+    elif method == "chat":
+        def _do():
+            return model.chat(params.get("role", ""), params.get("npc_name", ""),
+                               params.get("emotion_summary", ""),
+                               params.get("relationship_context", ""),
+                               params.get("recent_events", []),
+                               params.get("conversation_history", []),
+                               params.get("player_message", ""))
+        return await _run(_do)
+    elif method == "converse":
+        def _do():
+            return model.converse(params.get("speaker_role", ""),
+                                   params.get("speaker_emotion", ""),
+                                   params.get("listener_role", ""),
+                                   params.get("listener_emotion", ""),
+                                   params.get("shared_context", ""),
+                                   params.get("speaker_recent", []))
+        return await _run(_do)
+    else:
+        return {"error": f"unknown method: {method}"}
 
 
 if __name__ == "__main__":
