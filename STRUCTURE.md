@@ -45,10 +45,10 @@
 ### InferenceClient (autoload)
 - **File:** res://scripts/inference_client.gd
 - **Extends:** Node
-- **Layer 2:** HTTP POST to localhost:8420 (projection/modulation)
+- **Layer 2:** WebSocket to ws://localhost:8420/ws (projection/modulation)
 - **Layer 3:** WebSocket to ws://localhost:8421/ws (plan, dialogue, chat, converse)
-- Auto-reconnects WebSocket on disconnect (5s backoff)
-- REQUEST_TIMEOUT: 30s
+- Both connections auto-reconnect on disconnect (30s backoff)
+- Multiplexed JSON-RPC: `{id, method, params}` → `{id, result}`
 
 ### PlayerController
 - **File:** res://scripts/player_controller.gd
@@ -57,24 +57,31 @@
 ### NPCController
 - **File:** res://scripts/npc_controller.gd
 - **Extends:** CharacterBody2D
-- **States:** IDLE, WALKING, ARRIVED, TALKING, CONVERSING
-- Observation pauses: high `observe` tendency + visible entities → brief stop to watch
-- Speed modulation: `flee` increases speed, `avoid` decreases near others (0.5x-1.5x)
-- Staggered startup: each NPC delays first plan request by 0.5-5s random
+- **Architecture:** Thin executor — brain selects actions, controller executes them
+- **Actions:** MOVE_TOWARD, PAUSE, OBSERVE, FLEE_FROM, WANDER, IDLE
+- **External lock:** `_externally_locked` set by conversation/interaction systems, overrides brain
+- Pathfinding is one tool among many, not the controlling abstraction
+- Wander: at destination, NPCs meander within 48px radius instead of standing frozen
 
 ### NPCBrain
 - **File:** res://scripts/npc_brain.gd
 - **Extends:** RefCounted
 - **Owns:** Layer1Substrate, Layer2Projection, Layer3Executive, MemorySystem, Perception
-- **Drive overrides:** When Layer 1 drives hit urgent thresholds (safety<30, energy<20, hunger>80, social>85), brain overrides Layer 3 plan to seek recovery. Suspends current plan chunk, resumes after recovery.
-- **Reflection:** Every 2 game-hours or 5+ new tagged events, calls /layer3/reflect to compress memory
-- **Modulation triggers:** When Layer 3 plan chunk changes, fires southbound modulation via Layer 2
+- **`select_action(delta)`:** Called every tick. Priority-ordered decision tree:
+  1. Reorientation pause (after interruption, 0.5-2s based on frustration)
+  2. Flee from distrusted entity (trust < 0.2, flee tendency > 0.5)
+  3. Observe interesting entity (new in FOV, observe > 0.6, 8s cooldown)
+  4. Wander at destination (within 48px, ticks chunk timer)
+  5. Move toward plan target (drive overrides change WHERE, action system changes HOW)
+- **Drive overrides:** safety<30, energy<20, hunger>80, social>85 → override destination, suspend chunk
+- **Reflection:** Every 2 game-hours or 5+ new tagged events
+- **Modulation triggers:** Fires southbound L2 modulation on chunk changes
 
 ### Layer1Substrate
 - **File:** res://scripts/layer1_substrate.gd
 - **Extends:** RefCounted
 - **Drives (0-100):** energy, hunger, social_need, safety
-- **Task state (0-1):** task_momentum, interruption_tolerance, frustration
+- **Task state (0-1):** task_momentum, interruption_tolerance, frustration, reorientation_timer
 - **Action tendencies (0-1):** approach, avoid, observe, help, flee — weighted by conditions
 - **Per-entity:** trust (dict), place_familiarity (dict)
 - **Modulation inputs from Layer 2:** learning_rate_mod, exploration_bias, attention_weight, interruption_sensitivity, persistence_scale
@@ -103,6 +110,8 @@
 - Relationship tracking (trust per entity), place familiarity
 - Unresolved concerns, reflections, failed strategies, socially acquired beliefs
 - Event decay over time
+- **Object knowledge:** `known_objects` dict (object_id -> {name, type, last_seen_position, last_seen_state, last_seen_time, learned_from, location})
+- Methods: `add_object_knowledge()`, `get_objects_at_location()`, `get_objects_by_type()`, `get_object_summary()`
 
 ### Perception
 - **File:** res://scripts/perception.gd
@@ -111,6 +120,14 @@
 - **Hearing:** Omnidirectional, 2.5-tile range (80px)
 - NPCs only observe entities within FOV
 - Speech broadcasts to all NPCs in hearing range
+- **Object vision:** `visible_objects` array + `update_object_vision()` — same FOV cone rules as entity vision
+
+### WorldObjectRegistry (autoload)
+- **File:** res://scripts/world_object_registry.gd
+- **Extends:** Node
+- Persistent registry of 21 world objects across 8 locations
+- Each object: id, name, type, position, location, state, owner, properties, discoverable, role_affinity
+- Methods: `register_object()`, `get_object()`, `get_objects_at_location()`, `get_objects_by_type()`, `get_all_objects()`, `update_object_state()`
 
 ### SocialPropagation
 - **File:** res://scripts/social_propagation.gd
@@ -156,13 +173,14 @@
 - GameManager = res://scripts/game_manager.gd
 - NavigationManager = res://scripts/navigation_manager.gd
 - InferenceClient = res://scripts/inference_client.gd
+- WorldObjectRegistry = res://scripts/world_object_registry.gd
 
 ## Inference Servers
 
 | Server | Port | Model | Protocol | Purpose |
 |--------|------|-------|----------|---------|
-| Layer 2 | 8420 | SmolLM2-135M-Instruct (transformers) | HTTP | Fast emotion projection/modulation |
-| Layer 3 | 8421 | SmolLM2-1.7B-Instruct (transformers) | HTTP + WebSocket (/ws) | Planning, dialogue, chat, NPC conversation |
+| Layer 2 | 8420 | SmolLM2-135M-Instruct (transformers) | WebSocket (/ws) + HTTP fallback | Fast emotion projection/modulation |
+| Layer 3 | 8421 | SmolLM2-1.7B-Instruct (transformers) | WebSocket (/ws) + HTTP fallback | Planning, dialogue, chat, NPC conversation |
 
 - Start both: `bash server/start.sh`
 - Logs: `tail -f /tmp/burg_l2.log /tmp/burg_l3.log`

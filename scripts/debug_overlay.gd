@@ -15,6 +15,7 @@ var _memory_label: Label = null
 var _modulation_label: Label = null
 var _l1_bars: Array = []  # [{label: Label, bar: ColorRect, bg: ColorRect}]
 var _l2_cells: Array = []  # ColorRect[27]
+var _objects_label: Label = null
 var _fov_draw_node: Node2D = null  # Draws FOV cones in world space
 
 # Emotion labels for heatmap tooltips
@@ -191,6 +192,17 @@ func _build_ui() -> void:
 	_panel.add_child(_memory_label)
 	y_offset += 65.0
 
+	# Section: Known Objects
+	var obj_header: Label = _make_label("-- Known Objects --", margin, y_offset, inner_w, 11, Color(0.4, 0.7, 1.0))
+	_panel.add_child(obj_header)
+	y_offset += 16.0
+
+	_objects_label = _make_label("No objects discovered.", margin, y_offset, inner_w, 9, Color(0.7, 0.8, 0.7))
+	_objects_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	_objects_label.size = Vector2(inner_w, 80)
+	_panel.add_child(_objects_label)
+	y_offset += 85.0
+
 	_panel.size.y = y_offset + 10.0
 
 func _make_label(text: String, x: float, y: float, w: float, font_size: int, color: Color) -> Label:
@@ -247,11 +259,26 @@ func _update_panel() -> void:
 	# Header
 	_name_label.text = _selected_npc.npc_name
 	_role_label.text = "Role: " + _selected_npc.role
+	var action: Dictionary = brain.current_action
+	var atype: String = action.get("type", "idle").to_upper()
+	var reason: String = action.get("reason", "")
 	if not brain._drive_override.is_empty():
-		_action_label.text = "OVERRIDE: " + brain._drive_override.get("reason", "?")
+		_action_label.text = "%s — OVERRIDE: %s" % [atype, brain._drive_override.get("reason", "?")]
 		_action_label.add_theme_color_override("font_color", Color(1.0, 0.4, 0.2))
+	elif atype == "FLEE_FROM":
+		_action_label.text = "%s — %s" % [atype, reason]
+		_action_label.add_theme_color_override("font_color", Color(1.0, 0.2, 0.2))
+	elif atype == "PAUSE":
+		_action_label.text = "%s — %s" % [atype, reason]
+		_action_label.add_theme_color_override("font_color", Color(0.9, 0.9, 0.3))
+	elif atype == "OBSERVE":
+		_action_label.text = "%s — %s" % [atype, reason]
+		_action_label.add_theme_color_override("font_color", Color(0.3, 0.8, 1.0))
+	elif atype == "WANDER":
+		_action_label.text = "%s — %s" % [atype, reason]
+		_action_label.add_theme_color_override("font_color", Color(0.6, 0.9, 0.6))
 	else:
-		_action_label.text = "Action: " + brain.get_current_action()
+		_action_label.text = "%s — %s" % [atype, reason]
 		_action_label.add_theme_color_override("font_color", Color(0.5, 0.9, 0.5))
 
 	# Layer 1 bars
@@ -308,6 +335,26 @@ func _update_panel() -> void:
 			_memory_label.text = "\n".join(events)
 		else:
 			_memory_label.text = "No notable events."
+
+	# Known Objects
+	if brain.memory and _objects_label:
+		var known: Dictionary = brain.memory.known_objects
+		if known.size() > 0:
+			var obj_lines: Array = []
+			var count: int = 0
+			for obj_id in known:
+				if count >= 6:
+					obj_lines.append("...and %d more" % (known.size() - 6))
+					break
+				var obj: Dictionary = known[obj_id]
+				var src: String = ""
+				if obj.get("learned_from", "direct") != "direct":
+					src = " (via %s)" % obj["learned_from"]
+				obj_lines.append("%s @ %s: %s%s" % [obj["name"], obj["location"], obj["last_seen_state"], src])
+				count += 1
+			_objects_label.text = "\n".join(obj_lines)
+		else:
+			_objects_label.text = "No objects discovered."
 
 func _update_plan_display() -> void:
 	# Clear existing plan labels

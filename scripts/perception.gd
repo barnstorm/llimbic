@@ -10,6 +10,7 @@ var facing_vector: Vector2 = Vector2.DOWN
 
 # What this NPC currently sees and hears
 var visible_entities: Array[Dictionary] = []  # [{name, position, distance, doing}]
+var visible_objects: Array[Dictionary] = []   # [{id, name, type, position, distance, state, owner}]
 var heard_events: Array[Dictionary] = []      # [{source, text, distance, time}]
 
 # Persistent heard buffer (cleared each tick, consumed by brain)
@@ -49,6 +50,33 @@ func update_vision(my_pos: Vector2, entities: Array) -> void:
 				"distance": dist,
 				"doing": entity.get("doing", ""),
 				"facing": entity.get("facing", ""),
+			})
+
+func update_object_vision(my_pos: Vector2, world_objects: Array) -> void:
+	"""Check which world objects are within the FOV cone."""
+	visible_objects.clear()
+	for obj in world_objects:
+		var obj_pos: Vector2 = obj.get("position", Vector2.ZERO)
+		var to_obj: Vector2 = obj_pos - my_pos
+		var dist: float = to_obj.length()
+
+		if dist > VISION_RANGE or dist < 1.0:
+			continue
+
+		# Angle check: is the object within our FOV cone?
+		var dir_normalized: Vector2 = to_obj.normalized()
+		var dot: float = facing_vector.dot(dir_normalized)
+		var angle: float = acos(clampf(dot, -1.0, 1.0))
+
+		if angle <= VISION_HALF_ANGLE:
+			visible_objects.append({
+				"id": obj.get("id", ""),
+				"name": obj.get("name", ""),
+				"type": obj.get("type", ""),
+				"position": obj_pos,
+				"distance": dist,
+				"state": obj.get("state", ""),
+				"owner": obj.get("owner", ""),
 			})
 
 func can_see(my_pos: Vector2, target_pos: Vector2) -> bool:

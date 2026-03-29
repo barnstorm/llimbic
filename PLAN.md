@@ -2,9 +2,9 @@
 
 ## Game Description
 
-A simulation-first adaptive NPC town built on the Smallville map from the Generative Agents project. The architecture treats NPCs as layered adaptive agents: Layer 1 is a numeric behavioral substrate (drives, momentum, interruption thresholds, trust, familiarity), Layer 2 uses a TinyChat15M-class local model to project Layer 1 state onto a fixed 27-dimensional GoEmotions coordinate surface and modulate back, and Layer 3 uses SmolLM2-135M for executive planning (daily agenda, role obligations, social goals, dialogue intent). No cloud LLMs. No GPT-class models. All inference is local.
+A simulation-first adaptive NPC town built on the Smallville map from the Generative Agents project. The architecture treats NPCs as layered adaptive agents with action-based control: Layer 1 is a numeric behavioral substrate (drives, momentum, interruption thresholds, trust, familiarity, reorientation cost) that selects moment-to-moment actions (move, pause, observe, flee, wander). Layer 2 uses SmolLM2-135M-Instruct to project Layer 1 state onto a fixed 27-dimensional GoEmotions coordinate surface and modulate back via southbound directives. Layer 3 uses SmolLM2-1.7B-Instruct for executive planning (daily agenda, role obligations, social goals, dialogue intent, reflection, memory compression). Both layers communicate via persistent WebSocket connections. No cloud LLMs. All inference is local.
 
-The player walks around the top-down pixel art town, interacts with NPCs (talk, block, help, disrupt), and observes how the layered AI produces believable, continuous, path-dependent behavior. A debug overlay lets the player inspect any NPC's internal state across all three layers including the 27-dim emotion vector.
+The player walks around the top-down pixel art town, interacts with NPCs (talk, block, help, disrupt), and observes how the layered AI produces believable, continuous, path-dependent behavior. NPCs deviate from schedules when drives become urgent, pause to reorient after interruption, flee from distrusted entities, observe interesting newcomers, and wander at destinations instead of standing frozen. A debug overlay lets the player inspect any NPC's internal state across all three layers including the 27-dim emotion vector and current action.
 
 Uses pre-existing assets from joonspk-research/generative_agents: a pre-rendered 4480×3200 town map (140×100 tiles at 32px), 48×48 character sprites (RPG Maker VX Ace format), and collision data extracted from the TMX.
 
@@ -131,3 +131,100 @@ Uses pre-existing assets from joonspk-research/generative_agents: a pre-rendered
   - Smooth camera transitions between points of interest
   - 2D: camera pans and smooth scrolling, zoom transitions between overview and close-up
 - **Verify:** A smooth MP4 video showing polished gameplay with no visual glitches.
+
+## 5. World Object Registry & Object Perception
+- **Depends on:** 1, 3
+- **Status:** done
+- **Targets:** scripts/world_object_registry.gd, scripts/perception.gd, scripts/memory_system.gd, scripts/npc_brain.gd, scripts/npc_controller.gd, scripts/debug_overlay.gd, project.godot
+- **Goal:** Add a persistent world object registry and extend NPC perception + memory to discover, observe, and remember structured world objects — not just other NPCs and speech.
+- **Requirements:**
+  - **WorldObjectRegistry (autoload):** A singleton that holds all world objects. Each object is a Dictionary:
+    - `id`: String (unique, e.g. "bakery_oven_01")
+    - `name`: String (display, e.g. "Brick Oven")
+    - `type`: String (category, e.g. "tool", "container", "supply", "furniture", "resource")
+    - `position`: Vector2 (world coordinates)
+    - `location`: String (which named location it belongs to, e.g. "bakery")
+    - `state`: String (e.g. "working", "broken", "empty", "locked", "full")
+    - `owner`: String (NPC name who owns/tends it, or "" for public)
+    - `properties`: Dictionary (type-specific, e.g. {"fuel": 80, "capacity": 50})
+    - `discoverable`: bool (true = NPCs must see it to learn about it)
+    - `role_affinity`: Array[String] (roles that care about this object, e.g. ["Baker"])
+  - **Initial Objects (15-20):** Populate the registry with objects tied to existing LOCATIONS. Examples:
+    - Bakery: brick oven (tool, Baker), flour sacks (supply), bread basket (container)
+    - Guard post: weapon rack (tool, Guard), lantern (furniture)
+    - Herbalist shop: herb drying rack (tool, Herbalist), mortar and pestle (tool), remedy shelf (container)
+    - Blacksmith: anvil (tool, Blacksmith), forge (tool), metal ingots (supply)
+    - Inn: pantry (container, Innkeeper), guest ledger (furniture), ale barrel (supply)
+    - Farm: plow (tool, Farmer), seed storage (container), water trough (resource)
+    - Market: market stall (furniture), trade goods (supply)
+    - Town square: well bucket (tool), notice board (furniture)
+    - Some objects start in a non-default state (broken, empty) to create discovery events
+  - **Object Perception:** Extend `perception.gd` with:
+    - `visible_objects: Array[Dictionary]` — populated by new `update_object_vision()` method
+    - Same FOV cone rules as entity vision (range, angle)
+    - Object dict: `{id, name, type, position, distance, state, owner}`
+    - Objects are only visible if within FOV and within VISION_RANGE
+  - **Object Memory:** Extend `memory_system.gd` with:
+    - `known_objects: Dictionary` — `object_id -> {name, type, last_seen_position, last_seen_state, last_seen_time, learned_from, location}`
+    - `add_object_knowledge(id, name, type, position, state, location, source)` — upsert
+    - `get_objects_at_location(location) -> Array` — filter known objects
+    - `get_objects_by_type(type) -> Array` — filter by type
+    - `get_object_summary() -> String` — for Layer 3 planning context
+    - Objects learned from direct observation have higher confidence than second-hand
+  - **Brain Integration:** In `npc_brain.update_perception()`:
+    - Call `perception.update_object_vision()` with objects from WorldObjectRegistry
+    - For each newly visible object: add to memory via `memory.add_object_knowledge()`
+    - If object state differs from last known: create tagged event ("Discovered broken oven at bakery")
+    - Role-relevant discoveries get higher salience (Baker sees broken oven = 0.8, Guard sees it = 0.4)
+  - **Debug Overlay:** Add an "Objects" section showing selected NPC's known objects (name, location, state)
+- **Verify:** Screenshot shows debug overlay with object knowledge section. At least one NPC has discovered objects at their work location. A tagged event in memory shows an object discovery. WorldObjectRegistry reports 15+ registered objects via a print at startup.
+
+## 6. Object-Aware Planning & Social Object Knowledge
+- **Depends on:** 5
+- **Status:** pending
+- **Targets:** scripts/layer3_executive.gd, scripts/npc_brain.gd, scripts/social_propagation.gd, scripts/memory_system.gd, scripts/interaction_system.gd
+- **Goal:** NPCs plan around discovered objects, act on object-related discoveries, and share object knowledge through social propagation. Plans can now target specific objects, not just named locations.
+- **Requirements:**
+  - **Object-Aware Planning (Layer 3):**
+    - Plan chunks gain optional `object_id` and `object_action` fields (e.g. `{"location": "bakery", "object_id": "bakery_oven_01", "object_action": "use", "purpose": "Fire up the oven"}`)
+    - `update_plan()` receives object summary from memory in addition to existing context
+    - Role-default schedules include object references where natural (Baker's "Bake morning bread" chunk targets the oven)
+    - When an NPC discovers a broken/empty object in their domain, it creates a concern → triggers replanning with object context → new chunk to address it ("Fix the oven", "Restock flour")
+  - **Object Interaction Actions (Brain):**
+    - New action type: `EXAMINE` — NPC stops at object position, faces it, spends 1-2s examining. Creates observation + updates object memory with current state.
+    - Trigger: NPC arrives at destination with an `object_id` chunk, or sees a role-relevant object they haven't examined recently (>5 minutes)
+    - After examining: if object state is problematic (broken, empty), add tagged event + concern
+  - **Social Object Knowledge (Propagation):**
+    - Extend `_exchange_events()` to also exchange object knowledge
+    - When NPCs converse, they can share known objects: `memory.add_object_knowledge()` with `source=other_npc_name`
+    - Role-filtered: Baker more likely to share info about bakery objects, Guard about security-relevant objects
+    - Trust-weighted: object knowledge from trusted sources stored with "reliable" flag
+    - Creates natural information flow: "Mabel told me the inn pantry is empty"
+  - **Drive Override Enhancement:**
+    - Hunger drive override now checks known food-related objects (e.g., if NPC knows bread basket is full at bakery, prefer bakery over generic FOOD_LOCATIONS)
+    - Object knowledge enriches drive override target selection
+  - **Dialogue Context:**
+    - `request_dialogue()` and conversation context include relevant object knowledge
+    - NPCs can mention objects they know about in conversation: "The oven's been acting up" or "I heard the pantry is empty"
+  - **Interaction System:**
+    - When player chats with NPC, dialogue context includes NPC's object knowledge summary
+    - NPC responses can reference discovered objects naturally
+- **Verify:** Screenshot shows an NPC with an object-targeting plan chunk visible in debug overlay. At least one NPC has replanned due to discovering a problematic object. Social propagation log shows object knowledge being shared between NPCs. A conversation between player and NPC references a discovered object.
+
+## 7. Presentation Video (Updated)
+- **Depends on:** 5, 6
+- **Status:** pending
+- **Targets:** test/presentation.gd, screenshots/presentation/gameplay.mp4
+- **Goal:** Create a ~30-second cinematic video showcasing the object knowledge system in action.
+- **Requirements:**
+  - Write test/presentation.gd — a SceneTree script (extends SceneTree)
+  - ~900 frames at 30 FPS (30 seconds)
+  - Use Video Capture from godot-capture (AVI via --write-movie, convert to MP4 with ffmpeg)
+  - Output: screenshots/presentation/gameplay.mp4
+  - Show an NPC arriving at their workplace and discovering objects (debug overlay visible)
+  - Show the NPC examining an object in a non-default state (e.g. broken oven)
+  - Show the debug overlay with object knowledge section populated
+  - Show two NPCs conversing and object knowledge spreading via social propagation
+  - Fast-forward to show replanning triggered by object discovery
+  - Smooth camera transitions, 2D pans and zooms
+- **Verify:** A smooth MP4 video showing object discovery, knowledge sharing, and object-aware planning with no visual glitches.

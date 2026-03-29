@@ -14,6 +14,7 @@ var brain: RefCounted = null  # NPCBrain
 var _nav_manager: Node = null
 var _game_manager: Node = null
 var _inference_client: Node = null
+var _world_object_registry: Node = null
 var _nav_ready: bool = false
 var _facing: String = "down"
 
@@ -52,6 +53,8 @@ func _ready() -> void:
 			_game_manager = child
 		elif child.name == "InferenceClient":
 			_inference_client = child
+		elif child.name == "WorldObjectRegistry":
+			_world_object_registry = child
 
 	if _nav_manager:
 		if _nav_manager.has_signal("navigation_ready"):
@@ -70,7 +73,7 @@ func _ready() -> void:
 	var BrainScript: GDScript = load("res://scripts/npc_brain.gd")
 	brain = BrainScript.new()
 	brain.setup(npc_name, role)
-	brain.set_autoloads(_inference_client, _game_manager)
+	brain.set_autoloads(_inference_client, _game_manager, _world_object_registry)
 
 	# Speech bubble
 	_speech_label = Label.new()

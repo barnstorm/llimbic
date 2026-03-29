@@ -9,10 +9,11 @@ and behavioral modulation. Designed for ~4 calls/sec from 8 NPCs.
 import sys
 import os
 import time
+import json
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import torch
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 import uvicorn
 
@@ -111,6 +112,91 @@ async def modulate(req: ModulateRequest):
     params = await _run(model.modulate, req.directives, vec)
     log.info(f"MODULATE '{req.directives[:50]}' -> lr={params['learning_rate_mod']:.1f} exp={params['exploration_bias']:.1f} [{time.time()-t0:.2f}s]")
     return ModulateResponse(**params)
+
+
+# --- WebSocket endpoint ---
+# Same multiplexing pattern as Layer 3. Client sends:
+#   {"id": "req_1", "method": "project", "params": {...}}
+# Server sends:
+#   {"id": "req_1", "result": {...}}
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    print("Layer 2 WebSocket client connected")
+    state = {"open": True}
+    pending_tasks: set = set()
+
+    async def safe_send(text: str):
+        if not state["open"]:
+            return
+        try:
+            await ws.send_text(text)
+        except Exception:
+            state["open"] = False
+
+    async def handle(req_id: str, method: str, params: dict):
+        t0 = time.time()
+        try:
+            result = await _ws_dispatch(method, params)
+            elapsed = time.time() - t0
+            if method == "project":
+                top_str = ", ".join(f"{d['name']}={d['value']:.2f}" for d in result.get("top_dimensions", [])[:3])
+                log.info(f"WS PROJECT -> {top_str} [{elapsed:.2f}s]")
+            else:
+                log.info(f"WS {method.upper()} [{elapsed:.2f}s]")
+            await safe_send(json.dumps({"id": req_id, "result": result}))
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.error(f"WS {method} error: {e}")
+            await safe_send(json.dumps({"id": req_id, "error": str(e)}))
+
+    try:
+        while True:
+            raw = await ws.receive_text()
+            msg = json.loads(raw)
+            req_id = msg.get("id", "?")
+            method = msg.get("method", "")
+            params = msg.get("params", {})
+
+            task = asyncio.create_task(handle(req_id, method, params))
+            pending_tasks.add(task)
+            task.add_done_callback(pending_tasks.discard)
+    except WebSocketDisconnect:
+        log.info("Layer 2 WebSocket client disconnected")
+    except Exception as e:
+        print(f"Layer 2 WebSocket error: {e}")
+    finally:
+        state["open"] = False
+        for t in pending_tasks:
+            t.cancel()
+        pending_tasks.clear()
+
+
+async def _ws_dispatch(method: str, params: dict) -> dict:
+    """Route a WebSocket request to the right model method."""
+    if method == "project":
+        layer1_state = params.get("layer1_state", {})
+        recent_events = params.get("recent_events", [])
+        current_vector = params.get("current_vector", [])
+        vec = current_vector if len(current_vector) == NUM_DIMS else default_vector()
+        result = await _run(model.project, layer1_state, recent_events, vec)
+        top = top_dimensions(result["vector"], 5)
+        val = valence_summary(result["vector"])
+        return {
+            "vector": result["vector"],
+            "summary": result["summary"],
+            "top_dimensions": [{"name": n, "value": round(v, 3)} for n, v in top],
+            "valence": val,
+        }
+    elif method == "modulate":
+        directives = params.get("directives", "")
+        current_vector = params.get("current_vector", [])
+        vec = current_vector if len(current_vector) == NUM_DIMS else default_vector()
+        return await _run(model.modulate, directives, vec)
+    else:
+        return {"error": f"unknown method: {method}"}
 
 
 if __name__ == "__main__":

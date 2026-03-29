@@ -14,6 +14,7 @@ var perception: RefCounted = null  # Perception (FOV + hearing)
 # References
 var _inference_client: Node = null
 var _game_manager: Node = null
+var _world_object_registry: Node = null
 
 # Drive override state
 var _drive_override: Dictionary = {}  # {target: Vector2, reason: String, drive: String}
@@ -66,9 +67,10 @@ func setup(p_name: String, p_role: String) -> void:
 	var PercScript: GDScript = load("res://scripts/perception.gd")
 	perception = PercScript.new()
 
-func set_autoloads(inference_client: Node, game_manager: Node) -> void:
+func set_autoloads(inference_client: Node, game_manager: Node, world_object_registry: Node = null) -> void:
 	_inference_client = inference_client
 	_game_manager = game_manager
+	_world_object_registry = world_object_registry
 
 func update_layer1(delta: float, world_pos: Vector2, nearby_npcs: int) -> void:
 	if layer1 == null:
@@ -486,6 +488,12 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array) -> void
 		var doing: String = seen.get("doing", "")
 		memory.add_observation(seen["name"], "", doing if doing != "" else "walking")
 
+	# --- Object perception ---
+	if _world_object_registry != null:
+		var all_objects: Array = _world_object_registry.get_all_objects()
+		perception.update_object_vision(my_pos, all_objects)
+		_process_visible_objects()
+
 	# Process anything heard this tick
 	var heard: Array = perception.consume_heard()
 	for evt in heard:
@@ -495,6 +503,55 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array) -> void
 			["heard", "overheard"],
 			evt["source"]
 		)
+
+func _process_visible_objects() -> void:
+	"""Process newly visible objects: add to memory, create events for discoveries and state changes."""
+	if perception == null or memory == null:
+		return
+	for obj in perception.visible_objects:
+		var obj_id: String = obj.get("id", "")
+		if obj_id == "":
+			continue
+		var obj_name: String = obj.get("name", "")
+		var obj_type: String = obj.get("type", "")
+		var obj_state: String = obj.get("state", "")
+		var obj_pos: Vector2 = obj.get("position", Vector2.ZERO)
+		var obj_owner: String = obj.get("owner", "")
+
+		# Determine location from registry
+		var obj_location: String = ""
+		if _world_object_registry:
+			var full_obj: Dictionary = _world_object_registry.get_object(obj_id)
+			obj_location = full_obj.get("location", "")
+
+		var known: Dictionary = memory.get_known_object(obj_id)
+		var is_new: bool = known.is_empty()
+		var state_changed: bool = (not is_new) and known.get("last_seen_state", "") != obj_state
+
+		# Upsert object knowledge
+		memory.add_object_knowledge(obj_id, obj_name, obj_type, obj_pos, obj_state, obj_location, "direct")
+
+		# Determine salience based on role affinity
+		var base_salience: float = 0.4
+		var full_obj_data: Dictionary = {}
+		if _world_object_registry:
+			full_obj_data = _world_object_registry.get_object(obj_id)
+		var affinities: Array = full_obj_data.get("role_affinity", [])
+		if affinities.size() == 0 or role in affinities:
+			base_salience = 0.8  # Role-relevant
+		else:
+			base_salience = 0.4  # Not role-relevant
+
+		# Create tagged events for discoveries
+		if is_new:
+			var event_text: String = "Discovered %s at %s (state: %s)" % [obj_name, obj_location, obj_state]
+			memory.add_tagged_event(event_text, base_salience, ["object_discovery", obj_type], "direct")
+
+		# State change event
+		if state_changed:
+			var old_state: String = known.get("last_seen_state", "unknown")
+			var event_text: String = "Noticed %s at %s changed from %s to %s" % [obj_name, obj_location, old_state, obj_state]
+			memory.add_tagged_event(event_text, base_salience, ["object_state_change", obj_type], "direct")
 
 func hear_speech(source_name: String, text: String, source_pos: Vector2, my_pos: Vector2) -> void:
 	"""Called when someone speaks nearby. Omnidirectional hearing check."""

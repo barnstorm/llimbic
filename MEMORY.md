@@ -32,17 +32,19 @@
 ## Task 3: NPC AI & Town Life
 
 ### Architecture
-- NPCBrain (RefCounted) orchestrates Layer1, Layer2, Layer3, and MemorySystem per NPC
+- NPCBrain (RefCounted) orchestrates Layer1, Layer2, Layer3, MemorySystem, and Perception per NPC
 - All layer classes are RefCounted, instantiated from GDScript via `load().new()`
-- InferenceClient: HTTP to L2 (port 8420), WebSocket to L3 (port 8421/ws). Graceful degradation if servers are down.
-- Layer 1 runs every physics tick (pure GDScript drives/tendencies + action tendencies: approach, avoid, observe, help, flee)
-- Layer 2 fires every ~2.0 real seconds per NPC (staggered, emotion vector projection via HTTP)
+- InferenceClient: WebSocket to L2 (ws://localhost:8420/ws), WebSocket to L3 (ws://localhost:8421/ws). Both use multiplexed JSON-RPC. Graceful degradation if servers are down, 30s reconnect backoff.
+- **Action-based control:** Brain calls `select_action(delta)` every tick, returning an action dict. Controller is a thin executor. Actions: MOVE_TOWARD, PAUSE, OBSERVE, FLEE_FROM, WANDER, IDLE. Pathfinding is one tool among many.
+- Layer 1 runs every physics tick (pure GDScript drives/tendencies). Reorientation timer: 0.5-2s pause after interruption proportional to frustration.
+- Layer 2 fires every ~2.0 real seconds per NPC (staggered, emotion vector projection via WebSocket)
 - Layer 3 fires on game-time intervals (~30 game-minutes). Plans use role defaults; LLM only triggered for replanning on high frustration/concerns/failures.
-- Social propagation pulses every 5 real seconds, checks NPC pairs within 64px, requires social_need > 30 + FOV visibility + interruption check
-- Drive overrides: brain overrides L3 plan when safety<30, energy<20, hunger>80, or social>85. Suspends current chunk, resumes after recovery.
+- Social propagation pulses every 5 real seconds, checks NPC pairs within 64px, requires social_need > 30 + FOV visibility + interruption willingness check
+- Drive overrides: brain overrides L3 plan destination when safety<30, energy<20, hunger>80, or social>85. Suspends current chunk, resumes after recovery.
 - Reflection: every 2 game-hours or 5+ new tagged events, calls /layer3/reflect to compress memory
-- Observation pauses: NPCs with high observe tendency briefly stop to watch nearby entities
-- Speed modulation: flee tendency increases walk speed, avoid tendency decreases it near others
+- Southbound modulation: Layer 3 chunk changes → directive string → Layer 2 modulate → Layer 1 params
+- Role-filtered social propagation: guards share security events preferentially, trust-weighted salience
+- Event decay: tagged events lose salience over time, removed below 0.1
 
 ### What worked
 - Direct property access on RefCounted instances works fine from NPC controller (no casting needed)
@@ -50,14 +52,23 @@
 - Plan chunk timing: game-hours converted to ~8-30 real seconds for playable pacing
 - `Input.action_press()` in SceneTree test scripts does NOT propagate to node `_input()` handlers — must directly set overlay state in test harness
 - NPCs use `add_to_group("npcs")` in `_ready()` for easy lookup by social propagation and debug overlay
+- Wander at destination (random subtargets within 48px, 2-5s per leg, 0.4x speed) looks much more alive than frozen standing
+
+### LLM prompting
+- SmolLM2 breaks character ("I'm an AI") when prompted with "You are {name}" in multi-turn user/assistant format
+- Fix: frame as dialogue writer ("Write one line of dialogue for a {role}") with conversation embedded as narrative text in a single prompt — not as user/assistant turns
+- Explicit "never mention AI" rule needed in every prompt
+- Chat uses single prompt with embedded transcript; dialogue/converse use "Write one line for..." framing
 
 ### Technical details
 - Layer3Executive.LOCATIONS maps 16 town location names to world pixel positions
 - ROLE_CONFIG defines home, work, and default daily schedule per role (4-7 chunks each)
 - 27-dim GoEmotions vector: indices 0-11 positive, 12-22 negative, 23-26 cognitive/neutral
 - Valence computed from positive vs negative sum ratio
-- Social propagation cooldown: 300 real seconds per NPC pair
+- Social propagation cooldown: 60 real seconds per NPC pair
 - NPC speech bubble: Label child on CharacterBody2D, shown for 4 seconds after dialogue
+- HTTP result code 13 = RESULT_REQUEST_FAILED (connection refused). Must mark server unavailable on failure or requests pile up.
+- WebSocket reconnect: 30s backoff prevents spam when server is down. Initial connect failure sets timer to 25s so first retry is in ~5s.
 
 ### Autoloads
 - GameManager, NavigationManager, InferenceClient — all registered in project.godot
@@ -77,3 +88,20 @@
 - time_scale progression: 5.0 (normal activity) -> 30.0 (fast-forward day progression) -> 5.0 (close-up)
 - Camera zoom range: 1.6x (wide establishing) to 4.0x (close-up NPC follow)
 - AVI output from Godot is MJPEG; must convert to H.264 MP4 for compatibility
+
+## Task 5: World Object Registry & Object Perception
+
+### What worked
+- WorldObjectRegistry as autoload with Dictionary-based objects works well. 21 objects registered across 8 locations.
+- Perception `update_object_vision()` reuses the same FOV cone logic as entity vision — straightforward extension.
+- Object memory upsert pattern: `known_objects[id] = {...}` with timestamp for freshness tracking.
+- NPCs discover objects at their starting locations within ~10 frames (1 second at 10 FPS) since they start near their work locations.
+- Role affinity salience: Baker discovering Brick Oven gets 0.8 salience, Guard seeing it gets 0.4.
+
+### Technical details
+- WorldObjectRegistry autoload must be listed after InferenceClient in project.godot autoload order.
+- `_initialize()` in SceneTree test scripts runs before autoload `_ready()` — so `_world_obj_registry.objects` is empty at that point. Check object counts in `_process()` instead.
+- Object positions are placed near the LOCATIONS coordinates (within VISION_RANGE of 96px) so NPCs discover them when at their work/home locations.
+- Three objects start in non-default state: bakery_basket_01 (empty), smith_forge_01 (broken), inn_ale_barrel_01 (empty) — these trigger discovery events with state info.
+- Debug overlay panel expanded by ~100px height to accommodate the Known Objects section.
+- `npc_brain.set_autoloads()` gained optional third parameter `world_object_registry` for backward compatibility.

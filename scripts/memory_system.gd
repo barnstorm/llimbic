@@ -34,6 +34,9 @@ var failed_strategies: Array[Dictionary] = []
 # Socially acquired beliefs with source identity + trust weight
 var acquired_beliefs: Array[Dictionary] = []
 
+# Known world objects: object_id -> {name, type, last_seen_position, last_seen_state, last_seen_time, learned_from, location}
+var known_objects: Dictionary = {}
+
 func add_observation(who: String, where: String, doing: String) -> void:
 	var obs: Dictionary = {
 		"who": who,
@@ -150,3 +153,52 @@ func get_tagged_events_for_exchange() -> Array[Dictionary]:
 		if evt["salience"] > 0.3:
 			result.append(evt)
 	return result
+
+# --- Object Knowledge ---
+
+func add_object_knowledge(id: String, obj_name: String, type: String, position: Vector2, state: String, location: String, source: String) -> void:
+	## Upsert object knowledge. source = "direct" for seen, or NPC name for second-hand.
+	known_objects[id] = {
+		"name": obj_name,
+		"type": type,
+		"last_seen_position": position,
+		"last_seen_state": state,
+		"last_seen_time": Time.get_ticks_msec(),
+		"learned_from": source,
+		"location": location,
+	}
+
+func get_objects_at_location(location: String) -> Array:
+	## Filter known objects by location name.
+	var result: Array = []
+	for id in known_objects:
+		var obj: Dictionary = known_objects[id]
+		if obj.get("location", "") == location:
+			result.append({"id": id, "name": obj["name"], "type": obj["type"], "state": obj["last_seen_state"], "location": obj["location"]})
+	return result
+
+func get_objects_by_type(type: String) -> Array:
+	## Filter known objects by type.
+	var result: Array = []
+	for id in known_objects:
+		var obj: Dictionary = known_objects[id]
+		if obj.get("type", "") == type:
+			result.append({"id": id, "name": obj["name"], "type": obj["type"], "state": obj["last_seen_state"], "location": obj["location"]})
+	return result
+
+func get_known_object(id: String) -> Dictionary:
+	return known_objects.get(id, {})
+
+func get_object_summary() -> String:
+	## Summary of known objects for Layer 3 planning context.
+	if known_objects.is_empty():
+		return ""
+	var parts: Array = []
+	for id in known_objects:
+		var obj: Dictionary = known_objects[id]
+		var src: String = " (heard from %s)" % obj["learned_from"] if obj["learned_from"] != "direct" else ""
+		parts.append("- %s at %s: %s%s" % [obj["name"], obj["location"], obj["last_seen_state"], src])
+	if parts.size() > 8:
+		parts.resize(8)
+		parts.append("- ...and %d more" % (known_objects.size() - 8))
+	return "Known objects:\n" + "\n".join(parts)
