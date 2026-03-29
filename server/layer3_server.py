@@ -11,11 +11,15 @@ import os
 import time
 import json
 import asyncio
+import logging
 from concurrent.futures import ThreadPoolExecutor
 import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 import uvicorn
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [L3] %(message)s", datefmt="%H:%M:%S")
+log = logging.getLogger("layer3")
 
 _executor = ThreadPoolExecutor(max_workers=4)
 sys.path.insert(0, os.path.dirname(__file__))
@@ -118,36 +122,51 @@ async def health():
 
 @app.post("/layer3/plan", response_model=PlanResponse)
 async def plan(req: PlanRequest):
+    log.info(f"PLAN [{req.role}] context='{req.current_context[:60]}' emotion='{req.emotion_summary[:40]}'")
+    t0 = time.time()
     result = await _run(model.plan, req.role, req.memory_summary, req.current_context, req.emotion_summary)
+    log.info(f"PLAN [{req.role}] -> {len(result.get('agenda',[]))} chunks ({result.get('source','?')}) [{time.time()-t0:.1f}s]")
     return PlanResponse(**result)
 
 @app.post("/layer3/reflect", response_model=ReflectResponse)
 async def reflect(req: ReflectRequest):
+    log.info(f"REFLECT {len(req.memory_events)} events")
+    t0 = time.time()
     result = await _run(model.reflect, req.memory_events)
+    log.info(f"REFLECT -> {len(result.get('reflections',[]))} reflections [{time.time()-t0:.1f}s]")
     return ReflectResponse(**result)
 
 @app.post("/layer3/dialogue", response_model=DialogueResponse)
 async def dialogue(req: DialogueRequest):
+    log.info(f"DIALOGUE [{req.role}] emotion='{req.emotion_summary[:40]}'")
+    t0 = time.time()
     result = await _run(model.dialogue, req.role, req.emotion_summary,
                          req.relationship_context, req.recent_events)
+    log.info(f"DIALOGUE [{req.role}] -> intent={result.get('intent','')} \"{result.get('utterance','')}\" [{time.time()-t0:.1f}s]")
     return DialogueResponse(**result)
 
 @app.post("/layer3/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
+    log.info(f"CHAT [{req.npc_name}] player says: \"{req.player_message}\"")
+    t0 = time.time()
     def _do():
         return model.chat(req.role, req.npc_name, req.emotion_summary,
                            req.relationship_context, req.recent_events,
                            req.conversation_history, req.player_message)
     result = await _run(_do)
+    log.info(f"CHAT [{req.npc_name}] -> \"{result.get('utterance','')}\" mood={result.get('mood_shift','')} [{time.time()-t0:.1f}s]")
     return ChatResponse(**result)
 
 @app.post("/layer3/converse", response_model=ConverseResponse)
 async def converse(req: ConverseRequest):
+    log.info(f"CONVERSE [{req.speaker_role}] -> [{req.listener_role}]")
+    t0 = time.time()
     def _do():
         return model.converse(req.speaker_role, req.speaker_emotion,
                                req.listener_role, req.listener_emotion,
                                req.shared_context, req.speaker_recent)
     result = await _run(_do)
+    log.info(f"CONVERSE [{req.speaker_role}] -> \"{result.get('utterance','')}\" topic={result.get('topic','')} [{time.time()-t0:.1f}s]")
     return ConverseResponse(**result)
 
 
@@ -173,12 +192,26 @@ async def websocket_endpoint(ws: WebSocket):
             state["open"] = False
 
     async def handle(req_id: str, method: str, params: dict):
+        t0 = time.time()
         try:
             result = await _dispatch(method, params)
+            elapsed = time.time() - t0
+            # Log based on method
+            if method == "chat":
+                log.info(f"WS CHAT [{params.get('npc_name','')}] player: \"{params.get('player_message','')}\" -> \"{result.get('utterance','')}\" [{elapsed:.1f}s]")
+            elif method == "plan":
+                log.info(f"WS PLAN [{params.get('role','')}] -> {len(result.get('agenda',[]))} chunks ({result.get('source','?')}) [{elapsed:.1f}s]")
+            elif method == "dialogue":
+                log.info(f"WS DIALOGUE [{params.get('role','')}] -> \"{result.get('utterance','')}\" [{elapsed:.1f}s]")
+            elif method == "converse":
+                log.info(f"WS CONVERSE [{params.get('speaker_role','')}] -> \"{result.get('utterance','')}\" [{elapsed:.1f}s]")
+            else:
+                log.info(f"WS {method.upper()} [{elapsed:.1f}s]")
             await safe_send(json.dumps({"id": req_id, "result": result}))
         except asyncio.CancelledError:
             pass
         except Exception as e:
+            log.error(f"WS {method} error: {e}")
             await safe_send(json.dumps({"id": req_id, "error": str(e)}))
 
     try:
@@ -188,12 +221,13 @@ async def websocket_endpoint(ws: WebSocket):
             req_id = msg.get("id", "?")
             method = msg.get("method", "")
             params = msg.get("params", {})
+            log.info(f"WS <- {method} ({req_id})")
 
             task = asyncio.create_task(handle(req_id, method, params))
             pending_tasks.add(task)
             task.add_done_callback(pending_tasks.discard)
     except WebSocketDisconnect:
-        print("WebSocket client disconnected")
+        log.info("WebSocket client disconnected")
     except Exception as e:
         print(f"WebSocket error: {e}")
     finally:

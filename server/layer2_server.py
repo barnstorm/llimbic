@@ -16,6 +16,11 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import uvicorn
 
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [L2] %(message)s", datefmt="%H:%M:%S")
+log = logging.getLogger("layer2")
+
 _executor = ThreadPoolExecutor(max_workers=2)
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -87,9 +92,12 @@ async def health():
 @app.post("/layer2/project", response_model=ProjectResponse)
 async def project(req: ProjectRequest):
     vec = req.current_vector if len(req.current_vector) == NUM_DIMS else default_vector()
+    t0 = time.time()
     result = await _run(model.project, req.layer1_state, req.recent_events, vec)
     top = top_dimensions(result["vector"], 5)
     val = valence_summary(result["vector"])
+    top_str = ", ".join(f"{d['name']}={d['value']:.2f}" for d in [{"name": n, "value": round(v, 3)} for n, v in top][:3])
+    log.info(f"PROJECT e={req.layer1_state.get('energy',0):.0f} h={req.layer1_state.get('hunger',0):.0f} f={req.layer1_state.get('frustration',0):.2f} -> {top_str} [{time.time()-t0:.2f}s]")
     return ProjectResponse(
         vector=result["vector"], summary=result["summary"],
         top_dimensions=[{"name": n, "value": round(v, 3)} for n, v in top],
@@ -99,7 +107,9 @@ async def project(req: ProjectRequest):
 @app.post("/layer2/modulate", response_model=ModulateResponse)
 async def modulate(req: ModulateRequest):
     vec = req.current_vector if len(req.current_vector) == NUM_DIMS else default_vector()
+    t0 = time.time()
     params = await _run(model.modulate, req.directives, vec)
+    log.info(f"MODULATE '{req.directives[:50]}' -> lr={params['learning_rate_mod']:.1f} exp={params['exploration_bias']:.1f} [{time.time()-t0:.2f}s]")
     return ModulateResponse(**params)
 
 
