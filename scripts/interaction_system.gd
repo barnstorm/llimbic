@@ -238,7 +238,7 @@ func _request_npc_greeting() -> void:
 	var rel_context: String = "Trust: %.2f" % trust_val
 	var recent: Array = brain.memory.get_recent_events_text(3)
 
-	if _inference_client and _inference_client.is_server_available():
+	if _inference_client:
 		_inference_client.layer3_dialogue(
 			_active_npc.role, emo_summary, rel_context, recent,
 			func(success: bool, data: Dictionary) -> void:
@@ -270,14 +270,15 @@ func _request_npc_reply(player_text: String) -> void:
 	var rel_context: String = "Trust: %.2f" % trust_val
 	var recent: Array = brain.memory.get_recent_events_text(3)
 
-	if _inference_client and _inference_client.is_server_available():
+	if _inference_client:
 		_inference_client.layer3_chat(
 			_active_npc.role, _active_npc.npc_name, emo_summary,
 			rel_context, recent, _conversation_history, player_text,
 			_on_chat_response
 		)
 	else:
-		_on_chat_response(false, {"utterance": "I see...", "mood_shift": "neutral"})
+		push_warning("InteractionSystem: No inference client found")
+		_on_chat_response(false, {"utterance": "...", "mood_shift": "neutral"})
 
 func _on_chat_response(success: bool, data: Dictionary) -> void:
 	_waiting_for_reply = false
