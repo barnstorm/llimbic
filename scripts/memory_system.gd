@@ -130,6 +130,19 @@ func get_memory_summary() -> String:
 		parts.append("Reflections: " + reflections[reflections.size() - 1])
 	return "\n".join(parts) if parts.size() > 0 else "No notable memories."
 
+func decay_events(hours_elapsed: float) -> void:
+	## Reduce salience of old events over time. Remove events below threshold.
+	var decay_rate: float = 0.02 * hours_elapsed
+	var to_remove: Array = []
+	for i in range(tagged_events.size()):
+		tagged_events[i]["salience"] -= decay_rate
+		if tagged_events[i]["salience"] < 0.1:
+			to_remove.append(i)
+	# Remove from end to avoid index shifting
+	to_remove.reverse()
+	for idx in to_remove:
+		tagged_events.remove_at(idx)
+
 func get_tagged_events_for_exchange() -> Array[Dictionary]:
 	## Returns events suitable for social propagation (direct observations, above threshold)
 	var result: Array[Dictionary] = []

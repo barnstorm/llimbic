@@ -34,11 +34,15 @@
 ### Architecture
 - NPCBrain (RefCounted) orchestrates Layer1, Layer2, Layer3, and MemorySystem per NPC
 - All layer classes are RefCounted, instantiated from GDScript via `load().new()`
-- InferenceClient autoload manages async HTTP to localhost:8420; gracefully degrades if server is down
-- Layer 1 runs every physics tick (pure GDScript drives/tendencies)
-- Layer 2 fires every 0.5s (emotion vector projection via HTTP)
-- Layer 3 fires on game-time intervals (~30 game-minutes, plan chunking via HTTP)
-- Social propagation pulses every 5 real seconds, checks NPC pairs within 64px
+- InferenceClient: HTTP to L2 (port 8420), WebSocket to L3 (port 8421/ws). Graceful degradation if servers are down.
+- Layer 1 runs every physics tick (pure GDScript drives/tendencies + action tendencies: approach, avoid, observe, help, flee)
+- Layer 2 fires every ~2.0 real seconds per NPC (staggered, emotion vector projection via HTTP)
+- Layer 3 fires on game-time intervals (~30 game-minutes). Plans use role defaults; LLM only triggered for replanning on high frustration/concerns/failures.
+- Social propagation pulses every 5 real seconds, checks NPC pairs within 64px, requires social_need > 30 + FOV visibility + interruption check
+- Drive overrides: brain overrides L3 plan when safety<30, energy<20, hunger>80, or social>85. Suspends current chunk, resumes after recovery.
+- Reflection: every 2 game-hours or 5+ new tagged events, calls /layer3/reflect to compress memory
+- Observation pauses: NPCs with high observe tendency briefly stop to watch nearby entities
+- Speed modulation: flee tendency increases walk speed, avoid tendency decreases it near others
 
 ### What worked
 - Direct property access on RefCounted instances works fine from NPC controller (no casting needed)

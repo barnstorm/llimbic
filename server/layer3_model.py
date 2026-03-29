@@ -150,8 +150,27 @@ class Layer3Model:
              emotion_summary: str) -> dict:
         """
         Generate a daily agenda: list of plan chunks.
+        Uses defaults normally; triggers LLM replanning when state warrants it.
         Falls back to role-based default schedule if model output is unparseable.
         """
+        default = DEFAULT_SCHEDULES.get(role, DEFAULT_SCHEDULES["Farmer"])
+
+        # Determine if state warrants LLM replanning
+        should_replan = False
+        mem_lower = memory_summary.lower()
+        emo_lower = emotion_summary.lower()
+        if "concern" in mem_lower or "worried" in mem_lower:
+            should_replan = True
+        if "frustrat" in emo_lower or "distress" in emo_lower:
+            should_replan = True
+        if "frustration is high" in mem_lower:
+            should_replan = True
+        if "multiple recent failures" in mem_lower:
+            should_replan = True
+
+        if not should_replan:
+            return {"agenda": list(default), "source": "default"}
+
         locations_list = ", ".join(TOWN_LOCATIONS.keys())
 
         prompt = (
@@ -168,9 +187,33 @@ class Layer3Model:
             f"Output 4-6 plan chunks. Output ONLY the JSON array."
         )
 
-        # Use role-based default schedules — LLM planning is too slow
-        # and defaults are well-designed for each role already
-        default = DEFAULT_SCHEDULES.get(role, DEFAULT_SCHEDULES["Farmer"])
+        raw = self._generate(prompt, max_new_tokens=300, temperature=0.3)
+
+        try:
+            json_match = re.search(r'\[[\s\S]*\]', raw)
+            if json_match:
+                agenda = json.loads(json_match.group())
+                # Validate: must be a list of dicts with valid location keys
+                valid = True
+                for chunk in agenda:
+                    if not isinstance(chunk, dict):
+                        valid = False
+                        break
+                    loc = chunk.get("location", "")
+                    if loc not in TOWN_LOCATIONS:
+                        valid = False
+                        break
+                    # Ensure required fields exist with sane defaults
+                    chunk.setdefault("duration", 1.0)
+                    chunk.setdefault("priority", 0.5)
+                    chunk.setdefault("purpose", "task")
+                    chunk["duration"] = max(0.5, min(5.0, float(chunk["duration"])))
+                    chunk["priority"] = max(0.0, min(1.0, float(chunk["priority"])))
+                if valid and len(agenda) >= 3:
+                    return {"agenda": agenda, "source": "llm"}
+        except (json.JSONDecodeError, ValueError):
+            pass
+
         return {"agenda": list(default), "source": "default"}
 
     def reflect(self, memory_events: list[str]) -> dict:
@@ -182,11 +225,11 @@ class Layer3Model:
 
         events_str = "\n".join(f"- {e}" for e in memory_events[-10:])
         prompt = (
-            f"You are an NPC reflecting on recent events.\n"
+            f"Summarize these events from a townsperson's perspective.\n"
             f"Events:\n{events_str}\n\n"
             f"Output a JSON object with:\n"
-            f'- "reflections": array of 1-3 short summary sentences\n'
-            f'- "concerns": array of 0-2 unresolved issues\n\n'
+            f'- "reflections": array of 1-3 short summary sentences about what happened\n'
+            f'- "concerns": array of 0-2 unresolved issues that would worry someone\n\n'
             f"Output ONLY valid JSON."
         )
 
@@ -213,14 +256,15 @@ class Layer3Model:
         events_str = "; ".join(recent_events[-3:]) if recent_events else "nothing notable"
 
         prompt = (
-            f"You are a {role} NPC in a medieval town. A player approaches you.\n"
-            f"Your emotional state: {emotion_summary}\n"
-            f"Relationship with player: {relationship_context}\n"
+            f"Write one line of dialogue for a {role} in a medieval fantasy town. "
+            f"A traveler just approached them.\n"
+            f"The {role} feels: {emotion_summary}\n"
+            f"Relationship with traveler: {relationship_context}\n"
             f"Recent events: {events_str}\n\n"
             f"Output a JSON object with:\n"
             f'- "intent": one word (greet, warn, complain, thank, refuse, ask, inform, dismiss)\n'
-            f'- "utterance": one short sentence (max 15 words) in character\n\n'
-            f"Output ONLY valid JSON."
+            f'- "utterance": one short sentence (max 15 words) spoken in character as the {role}\n\n'
+            f"Never mention AI or break character. Output ONLY valid JSON."
         )
 
         raw = self._generate(prompt, max_new_tokens=60, temperature=0.4)
@@ -258,27 +302,32 @@ class Layer3Model:
         """
         events_str = "; ".join(recent_events[-3:]) if recent_events else "nothing notable"
 
-        # Build proper multi-turn messages for chat template
-        system_context = (
-            f"You are {npc_name}, a {role} in a medieval town. "
-            f"You feel {emotion_summary}. You know: {events_str}. "
-            f"Reply in character as {npc_name}. One or two sentences max. "
-            f"Output JSON: {{\"utterance\": \"your reply\", \"mood_shift\": \"one word\"}}"
-        )
-
-        messages = [{"role": "user", "content": system_context}]
-        # Add assistant acknowledgment so model enters character
-        messages.append({"role": "assistant", "content": f'{{"utterance": "I am {npc_name} the {role}.", "mood_shift": "neutral"}}'})
-
-        # Map conversation history to user/assistant turns
+        # Build the full context as a single prompt with embedded dialogue,
+        # so the model never sees raw "user" messages that trigger assistant mode.
+        dialogue_lines = []
         for msg in conversation_history[-4:]:
             if msg["speaker"] == "Player":
-                messages.append({"role": "user", "content": msg["text"]})
+                dialogue_lines.append(f'Traveler: "{msg["text"]}"')
             else:
-                messages.append({"role": "assistant", "content": f'{{"utterance": "{msg["text"]}", "mood_shift": "neutral"}}'})
+                dialogue_lines.append(f'{npc_name}: "{msg["text"]}"')
+        dialogue_lines.append(f'Traveler: "{player_message}"')
+        dialogue_str = "\n".join(dialogue_lines)
 
-        # Add player's new message
-        messages.append({"role": "user", "content": player_message})
+        prompt = (
+            f"You are writing dialogue for {npc_name}, a {role} in a medieval fantasy town. "
+            f"{npc_name} is a real person in this world — not an AI, not a computer program, not a bot. "
+            f"{npc_name} has a physical body, lives in the town, and does {role.lower()} work every day.\n\n"
+            f"{npc_name} currently feels: {emotion_summary}\n"
+            f"{npc_name} knows: {events_str}\n"
+            f"Relationship with this traveler: {relationship_context}\n\n"
+            f"Conversation so far:\n{dialogue_str}\n\n"
+            f"Write {npc_name}'s next reply. Stay in character. One or two sentences max. "
+            f"If the traveler asks {npc_name} to do something physical, {npc_name} can agree or refuse as a real person would. "
+            f"Never mention AI, models, programs, or break character.\n\n"
+            f'Output ONLY a JSON object: {{"utterance": "what {npc_name} says", "mood_shift": "one word"}}'
+        )
+
+        messages = [{"role": "user", "content": prompt}]
 
         # Generate using chat template with multi-turn
         text = self.tokenizer.apply_chat_template(
@@ -332,16 +381,16 @@ class Layer3Model:
         events_str = "; ".join(speaker_recent[-3:]) if speaker_recent else "nothing notable"
 
         prompt = (
-            f"You are a {speaker_role} NPC talking to a {listener_role} in a medieval town.\n"
-            f"Your emotional state: {speaker_emotion}\n"
+            f"Write one line of dialogue for a {speaker_role} talking to a {listener_role} in a medieval town.\n"
+            f"The {speaker_role} feels: {speaker_emotion}\n"
             f"The {listener_role} seems: {listener_emotion}\n"
             f"Context: {shared_context}\n"
-            f"Things you know: {events_str}\n\n"
+            f"The {speaker_role} knows: {events_str}\n\n"
             f"Output a JSON object with:\n"
             f'"intent": one word (gossip, warn, greet, ask, complain, share, joke, inform)\n'
-            f'"utterance": one short sentence (max 15 words) spoken to the {listener_role}\n'
-            f'"topic": what you are talking about in 5 words or less\n\n'
-            f"Output ONLY valid JSON."
+            f'"utterance": one short sentence (max 15 words) spoken in character as the {speaker_role}\n'
+            f'"topic": what they are talking about in 5 words or less\n\n'
+            f"Never mention AI or break character. Output ONLY valid JSON."
         )
 
         raw = self._generate(prompt, max_new_tokens=80, temperature=0.5)

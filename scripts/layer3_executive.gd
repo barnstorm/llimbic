@@ -82,6 +82,8 @@ const ROLE_CONFIG: Dictionary = {
 # Current plan
 var agenda: Array[Dictionary] = []
 var current_chunk_index: int = 0
+var suspended_chunk: Dictionary = {}
+var suspended_chunk_index: int = -1
 var _role: String = ""
 var _npc_name: String = ""
 var _plan_timer: float = 0.0
@@ -124,6 +126,29 @@ func advance_chunk() -> void:
 	current_chunk_index += 1
 	if current_chunk_index >= agenda.size():
 		current_chunk_index = 0
+	clear_suspended()
+
+func suspend_current_chunk() -> void:
+	## Save the current chunk so it can be resumed after a drive override.
+	if suspended_chunk_index >= 0:
+		return  # Already have a suspended chunk
+	suspended_chunk = get_current_chunk().duplicate()
+	suspended_chunk_index = current_chunk_index
+
+func resume_suspended() -> bool:
+	## Resume the suspended chunk. Returns true if resumed, false if nothing to resume.
+	if suspended_chunk_index < 0 or suspended_chunk.is_empty():
+		return false
+	if suspended_chunk_index < agenda.size():
+		current_chunk_index = suspended_chunk_index
+	suspended_chunk = {}
+	suspended_chunk_index = -1
+	return true
+
+func clear_suspended() -> void:
+	## Discard any suspended chunk (e.g., on normal chunk completion).
+	suspended_chunk = {}
+	suspended_chunk_index = -1
 
 func get_target_position() -> Vector2:
 	var chunk: Dictionary = get_current_chunk()
@@ -206,6 +231,30 @@ func _get_default_greeting() -> String:
 			return "Welcome! Take a seat."
 		_:
 			return "Hello there."
+
+func get_chunk_directive() -> String:
+	## Generate a natural-language directive from the current plan chunk for Layer 2 modulation.
+	var chunk: Dictionary = get_current_chunk()
+	if chunk.is_empty():
+		return "stay calm and alert"
+	var priority: float = chunk.get("priority", 0.5)
+	var purpose: String = chunk.get("purpose", "").to_lower()
+	var parts: Array = []
+	if priority > 0.8:
+		parts.append("focus intensely, resist distractions")
+	elif priority > 0.6:
+		parts.append("stay focused")
+	else:
+		parts.append("be relaxed and open to interaction")
+	if "patrol" in purpose or "watch" in purpose or "guard" in purpose:
+		parts.append("stay alert and vigilant")
+	if "sell" in purpose or "socialize" in purpose or "chat" in purpose or "gossip" in purpose:
+		parts.append("be sociable and approachable")
+	if "rest" in purpose or "sleep" in purpose:
+		parts.append("wind down and recover")
+	if "deliver" in purpose or "sort" in purpose:
+		parts.append("move with purpose, minimize delays")
+	return ", ".join(parts)
 
 func should_go_home(hour: float) -> bool:
 	# NPCs return home around 21:00, except special roles

@@ -247,7 +247,12 @@ func _update_panel() -> void:
 	# Header
 	_name_label.text = _selected_npc.npc_name
 	_role_label.text = "Role: " + _selected_npc.role
-	_action_label.text = "Action: " + brain.get_current_action()
+	if not brain._drive_override.is_empty():
+		_action_label.text = "OVERRIDE: " + brain._drive_override.get("reason", "?")
+		_action_label.add_theme_color_override("font_color", Color(1.0, 0.4, 0.2))
+	else:
+		_action_label.text = "Action: " + brain.get_current_action()
+		_action_label.add_theme_color_override("font_color", Color(0.5, 0.9, 0.5))
 
 	# Layer 1 bars
 	if brain.layer1:
@@ -316,8 +321,16 @@ func _update_plan_display() -> void:
 	var agenda: Array = l3.agenda
 	var current_idx: int = l3.current_chunk_index
 
+	# Show suspended chunk indicator
 	var y: float = 0.0
-	for i in range(mini(agenda.size(), 8)):  # Show max 8 chunks
+	if l3.suspended_chunk_index >= 0:
+		var s_chunk: Dictionary = l3.suspended_chunk
+		var s_text: String = "S: %s - %s" % [s_chunk.get("location", "?"), s_chunk.get("purpose", "?")]
+		var s_lbl: Label = _make_label(s_text, 0, y, 296, 9, Color(0.3, 0.8, 0.8, 0.7))
+		_l3_plan_container.add_child(s_lbl)
+		y += 14.0
+
+	for i in range(mini(agenda.size(), 7)):  # Show max 7 chunks (1 slot for suspended)
 		var chunk: Dictionary = agenda[i]
 		var loc: String = chunk.get("location", "?")
 		var purpose: String = chunk.get("purpose", "?")

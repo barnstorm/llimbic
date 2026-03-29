@@ -12,6 +12,7 @@ var safety: float = 80.0
 var task_momentum: float = 0.0
 var interruption_tolerance: float = 0.5
 var frustration: float = 0.0
+var reorientation_timer: float = 0.0  # seconds of pause after interruption
 
 # Per-entity trust dictionary: entity_name -> float (0-1)
 var trust: Dictionary = {}
@@ -103,6 +104,10 @@ func update(delta: float) -> void:
 	# Frustration: slow decay
 	frustration = clampf(frustration - 0.01 * rate, 0.0, 1.0)
 
+	# Reorientation timer: counts down after interruption
+	if reorientation_timer > 0.0:
+		reorientation_timer = maxf(reorientation_timer - delta, 0.0)
+
 	# Day cycle: energy recovers faster at home at night
 	if _hour >= 21.0 or _hour < 6.0:
 		if _is_at_home:
@@ -139,6 +144,8 @@ func set_context(hour: float, at_home: bool, at_work: bool, location: String, ne
 func apply_interruption() -> void:
 	frustration = clampf(frustration + 0.1, 0.0, 1.0)
 	task_momentum = clampf(task_momentum - 0.3, 0.0, 1.0)
+	# Reorientation cost: NPC pauses before resuming. Higher frustration = longer pause.
+	reorientation_timer = 0.5 + frustration * 1.5  # 0.5-2.0 seconds
 
 func start_task() -> void:
 	task_momentum = 0.1

@@ -12,6 +12,18 @@ var _inference_client: Node = null
 const CONVERSE_RANGE: float = 64.0  # 2 tiles
 const COOLDOWN_DURATION: float = 60.0  # 1 game-minute between conversations for same pair
 
+# Role-tag affinity for preferential information sharing
+const ROLE_TAG_AFFINITY: Dictionary = {
+	"Guard": ["security", "danger", "patrol", "crime", "suspicious"],
+	"Gossip": ["rumor", "conversation", "social", "heard", "overheard"],
+	"Baker": ["trade", "supply", "food", "delivery"],
+	"Farmer": ["trade", "supply", "weather", "food"],
+	"Innkeeper": ["trade", "social", "travelers", "food"],
+	"Courier": ["delivery", "road", "news"],
+	"Herbalist": ["remedy", "illness", "herbs"],
+	"Blacksmith": ["trade", "supply", "forge"],
+}
+
 func _ready() -> void:
 	call_deferred("_find_inference_client")
 
@@ -63,13 +75,19 @@ func _try_start_conversation(npc_a: Node, npc_b: Node) -> void:
 	# Both must not already be in conversation or talking
 	if not npc_a.has_method("start_conversation") or not npc_b.has_method("start_conversation"):
 		return
-	if npc_a._state == npc_a.State.TALKING or npc_a._state == npc_a.State.CONVERSING:
+	if npc_a._externally_locked:
 		return
-	if npc_b._state == npc_b.State.TALKING or npc_b._state == npc_b.State.CONVERSING:
+	if npc_b._externally_locked:
 		return
 
 	# Both must have social_need > 30
 	if npc_a.brain.layer1.social_need < 30.0 or npc_b.brain.layer1.social_need < 30.0:
+		return
+
+	# Both must be willing to interrupt their current task
+	if not npc_a.brain.layer1.should_interrupt_for("medium"):
+		return
+	if not npc_b.brain.layer1.should_interrupt_for("medium"):
 		return
 
 	# Cooldown check
@@ -219,18 +237,37 @@ func _cleanup_conversation(convo: Dictionary) -> void:
 		convo["listener"].end_conversation()
 
 func _exchange_events(from_npc: Node, to_npc: Node) -> void:
-	"""Transfer a tagged event from one NPC's memory to another."""
+	"""Transfer a tagged event from one NPC's memory to another with role filtering and trust weighting."""
 	var events: Array = from_npc.brain.memory.get_tagged_events_for_exchange()
 	if events.is_empty():
 		return
-	var evt: Dictionary = events[randi() % events.size()]
-	var new_salience: float = evt["salience"] * 0.7
+
+	# Role-filtered selection: prefer events matching speaker's role affinity
+	var speaker_role: String = from_npc.role if "role" in from_npc else ""
+	var affinity_tags: Array = ROLE_TAG_AFFINITY.get(speaker_role, [])
+	var preferred: Array = []
+	for evt in events:
+		var tags: Array = evt.get("tags", [])
+		for tag in tags:
+			if tag in affinity_tags:
+				preferred.append(evt)
+				break
+	var chosen: Dictionary
+	if preferred.size() > 0:
+		chosen = preferred[randi() % preferred.size()]
+	else:
+		chosen = events[randi() % events.size()]
+
+	# Trust-weighted salience: low trust = much lower salience
+	var trust: float = to_npc.brain.memory.get_trust(from_npc.npc_name)
+	var trust_factor: float = clampf(trust + 0.3, 0.3, 1.0)
+	var new_salience: float = chosen["salience"] * 0.7 * trust_factor
+
 	to_npc.brain.memory.add_tagged_event(
-		str(evt["description"]), new_salience, ["second-hand"], from_npc.npc_name
+		str(chosen["description"]), new_salience, ["second-hand"], from_npc.npc_name
 	)
 	to_npc.brain.memory.add_acquired_belief(
-		str(evt["description"]), from_npc.npc_name,
-		to_npc.brain.memory.get_trust(from_npc.npc_name)
+		str(chosen["description"]), from_npc.npc_name, trust
 	)
 
 func _fallback_line(speaker_role: String, listener_role: String) -> String:
