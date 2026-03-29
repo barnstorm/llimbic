@@ -278,29 +278,49 @@ class Layer3Model:
              conversation_history: list[dict], player_message: str) -> dict:
         """
         Generate NPC reply to player's typed message in a back-and-forth conversation.
-        conversation_history is a list of {"speaker": "Player"|npc_name, "text": "..."}
+        Uses proper multi-turn chat template instead of single-message prompt.
         """
         events_str = "; ".join(recent_events[-3:]) if recent_events else "nothing notable"
 
-        # Build conversation context
-        history_str = ""
-        for msg in conversation_history[-6:]:  # last 6 messages for context
-            history_str += f"{msg['speaker']}: {msg['text']}\n"
-        history_str += f"Player: {player_message}\n"
-
-        prompt = (
-            f"You are {npc_name}, a {role} in a medieval town. You are having a conversation with the player.\n"
-            f"Your emotional state: {emotion_summary}\n"
-            f"Relationship with player: {relationship_context}\n"
-            f"Recent events you know about: {events_str}\n\n"
-            f"Conversation so far:\n{history_str}\n"
-            f"Output a JSON object with:\n"
-            f'"utterance": your reply as {npc_name} (one or two sentences, max 30 words, stay in character)\n'
-            f'"mood_shift": how this conversation makes you feel (one word: pleased, annoyed, curious, nervous, neutral, amused, suspicious)\n\n'
-            f"Output ONLY valid JSON."
+        # Build proper multi-turn messages for chat template
+        system_context = (
+            f"You are {npc_name}, a {role} in a medieval town. "
+            f"You feel {emotion_summary}. You know: {events_str}. "
+            f"Reply in character as {npc_name}. One or two sentences max. "
+            f"Output JSON: {{\"utterance\": \"your reply\", \"mood_shift\": \"one word\"}}"
         )
 
-        raw = self._generate(prompt, max_new_tokens=100, temperature=0.5)
+        messages = [{"role": "user", "content": system_context}]
+        # Add assistant acknowledgment so model enters character
+        messages.append({"role": "assistant", "content": f'{{"utterance": "I am {npc_name} the {role}.", "mood_shift": "neutral"}}'})
+
+        # Map conversation history to user/assistant turns
+        for msg in conversation_history[-4:]:
+            if msg["speaker"] == "Player":
+                messages.append({"role": "user", "content": msg["text"]})
+            else:
+                messages.append({"role": "assistant", "content": f'{{"utterance": "{msg["text"]}", "mood_shift": "neutral"}}'})
+
+        # Add player's new message
+        messages.append({"role": "user", "content": player_message})
+
+        # Generate using chat template with multi-turn
+        text = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=80,
+                temperature=0.5,
+                do_sample=True,
+                top_p=0.9,
+                repetition_penalty=1.2,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+        generated = outputs[0][inputs["input_ids"].shape[1]:]
+        raw = self.tokenizer.decode(generated, skip_special_tokens=True).strip()
 
         try:
             json_match = re.search(r'\{[^{}]*\}', raw)
