@@ -7,7 +7,7 @@ signal request_completed(request_id: String, success: bool, data: Dictionary)
 const LAYER2_URL: String = "http://127.0.0.1:8420"
 const LAYER3_URL: String = "http://127.0.0.1:8421"
 const MAX_CONCURRENT: int = 10
-const REQUEST_TIMEOUT: float = 5.0
+const REQUEST_TIMEOUT: float = 30.0
 
 var _queue: Array[Dictionary] = []
 var _active: Array[Dictionary] = []
@@ -175,7 +175,8 @@ func _handle_failure(entry: Dictionary, reason: String) -> void:
 	if is_instance_valid(entry.get("http")):
 		entry["http"].queue_free()
 	_active.erase(entry)
-	_server_available = false
+	# Don't set _server_available = false on timeouts — the server may just be slow
+	push_warning("InferenceClient: " + reason + " for " + str(entry.get("endpoint", "?")))
 
 	var callback: Callable = entry["callback"]
 	if callback.is_valid():
