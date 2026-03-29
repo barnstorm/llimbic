@@ -58,3 +58,18 @@
 ### Autoloads
 - GameManager, NavigationManager, InferenceClient — all registered in project.godot
 - Access pattern: iterate `get_tree().root.get_children()` and match by `.name`
+
+## Task 4: Presentation Video
+
+### What worked
+- `DISPLAY=:0` with lavapipe software renderer works for `--write-movie` AVI capture at 30 FPS (no GPU needed)
+- Keyframe-based camera system: array of {frame, pos, zoom, speed} dicts, lerp between them in `_process()`
+- Direct debug overlay manipulation: set `_active`, `visible`, `_selected_npc` directly instead of simulated input (Input.action_press doesn't propagate to node `_input()` in SceneTree scripts)
+- Closest NPC pair detection for framing NPC interactions mid-video
+- ffmpeg CRF 28 + slow preset produced 3.8 MB for 30s at 1280x720 — well under 50MB limit
+
+### Technical details
+- 900 frames at 30 FPS = exactly 30 seconds
+- time_scale progression: 5.0 (normal activity) -> 30.0 (fast-forward day progression) -> 5.0 (close-up)
+- Camera zoom range: 1.6x (wide establishing) to 4.0x (close-up NPC follow)
+- AVI output from Godot is MJPEG; must convert to H.264 MP4 for compatibility

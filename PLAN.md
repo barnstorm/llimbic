@@ -115,7 +115,7 @@ Uses pre-existing assets from joonspk-research/generative_agents: a pre-rendered
 
 ## 4. Presentation Video
 - **Depends on:** 1, 2, 3
-- **Status:** pending
+- **Status:** done
 - **Targets:** test/presentation.gd, screenshots/presentation/gameplay.mp4
 - **Goal:** Create a ~30-second cinematic video showcasing the completed NPC town simulation.
 - **Requirements:**
