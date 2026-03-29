@@ -136,8 +136,9 @@ async def load_models():
     model_name = "HuggingFaceTB/SmolLM2-135M-Instruct"
 
     layer2 = Layer2Model(model_name=model_name, device=device)
-    # Share the model instance for Layer 3 to save VRAM
-    layer3 = Layer3Model(model_name=model_name, device=device)
+    # Layer 3 uses a larger model for planning/dialogue/chat
+    layer3_model_name = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
+    layer3 = Layer3Model(model_name=layer3_model_name, device=device)
 
     # Warm up with a test generation
     print("Warming up models...")
