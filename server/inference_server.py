@@ -15,10 +15,15 @@ Serves on localhost:8420. Models loaded to GPU at startup.
 import sys
 import os
 import time
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import torch
 from fastapi import FastAPI
 from pydantic import BaseModel
 import uvicorn
+
+# Thread pool for offloading blocking model inference
+_executor = ThreadPoolExecutor(max_workers=2)
 
 # Add server dir to path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -170,10 +175,16 @@ async def health():
     )
 
 
+async def _run_in_thread(fn, *args):
+    """Offload blocking model inference to thread pool so async endpoints stay responsive."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_executor, fn, *args)
+
+
 @app.post("/layer2/project", response_model=ProjectResponse)
 async def layer2_project(req: ProjectRequest):
     vec = req.current_vector if len(req.current_vector) == NUM_DIMS else default_vector()
-    result = layer2.project(req.layer1_state, req.recent_events, vec)
+    result = await _run_in_thread(layer2.project, req.layer1_state, req.recent_events, vec)
     top = top_dimensions(result["vector"], 5)
     val = valence_summary(result["vector"])
     return ProjectResponse(
@@ -187,42 +198,46 @@ async def layer2_project(req: ProjectRequest):
 @app.post("/layer2/modulate", response_model=ModulateResponse)
 async def layer2_modulate(req: ModulateRequest):
     vec = req.current_vector if len(req.current_vector) == NUM_DIMS else default_vector()
-    params = layer2.modulate(req.directives, vec)
+    params = await _run_in_thread(layer2.modulate, req.directives, vec)
     return ModulateResponse(**params)
 
 
 @app.post("/layer3/plan", response_model=PlanResponse)
 async def layer3_plan(req: PlanRequest):
-    result = layer3.plan(req.role, req.memory_summary, req.current_context, req.emotion_summary)
+    result = await _run_in_thread(layer3.plan, req.role, req.memory_summary, req.current_context, req.emotion_summary)
     return PlanResponse(**result)
 
 
 @app.post("/layer3/reflect", response_model=ReflectResponse)
 async def layer3_reflect(req: ReflectRequest):
-    result = layer3.reflect(req.memory_events)
+    result = await _run_in_thread(layer3.reflect, req.memory_events)
     return ReflectResponse(**result)
 
 
 @app.post("/layer3/dialogue", response_model=DialogueResponse)
 async def layer3_dialogue(req: DialogueRequest):
-    result = layer3.dialogue(req.role, req.emotion_summary,
-                             req.relationship_context, req.recent_events)
+    result = await _run_in_thread(layer3.dialogue, req.role, req.emotion_summary,
+                                   req.relationship_context, req.recent_events)
     return DialogueResponse(**result)
 
 
 @app.post("/layer3/chat", response_model=ChatResponse)
 async def layer3_chat(req: ChatRequest):
-    result = layer3.chat(req.role, req.npc_name, req.emotion_summary,
-                          req.relationship_context, req.recent_events,
-                          req.conversation_history, req.player_message)
+    def _do_chat():
+        return layer3.chat(req.role, req.npc_name, req.emotion_summary,
+                            req.relationship_context, req.recent_events,
+                            req.conversation_history, req.player_message)
+    result = await _run_in_thread(_do_chat)
     return ChatResponse(**result)
 
 
 @app.post("/layer3/converse", response_model=ConverseResponse)
 async def layer3_converse(req: ConverseRequest):
-    result = layer3.converse(req.speaker_role, req.speaker_emotion,
-                              req.listener_role, req.listener_emotion,
-                              req.shared_context, req.speaker_recent)
+    def _do_converse():
+        return layer3.converse(req.speaker_role, req.speaker_emotion,
+                                req.listener_role, req.listener_emotion,
+                                req.shared_context, req.speaker_recent)
+    result = await _run_in_thread(_do_converse)
     return ConverseResponse(**result)
 
 

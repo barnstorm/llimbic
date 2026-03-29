@@ -153,10 +153,10 @@ func _physics_process(delta: float) -> void:
 	# Layer 1: every tick
 	brain.update_layer1(delta, global_position, _nearby_npc_count)
 
-	# Layer 2: medium cadence
+	# Layer 2: medium cadence (staggered per NPC to avoid request spikes)
 	_l2_timer += delta
-	if _l2_timer >= 0.5:
-		_l2_timer = 0.0
+	if _l2_timer >= 2.0:
+		_l2_timer = randf_range(0.0, 0.5)  # stagger next update
 		brain.update_layer2(delta)
 
 	# Layer 3: triggered by game time (handled via plan checks)
