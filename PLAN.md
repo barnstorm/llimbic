@@ -10,7 +10,7 @@ Uses pre-existing assets from joonspk-research/generative_agents: a pre-rendered
 
 ## 1. World, Navigation & Characters
 - **Depends on:** (none)
-- **Status:** pending
+- **Status:** done
 - **Targets:** scenes/main.tscn, scenes/player.tscn, scenes/npc.tscn, scripts/player_controller.gd, scripts/npc_controller.gd, scripts/camera_controller.gd, scripts/world_map.gd, scripts/navigation_manager.gd, project.godot
 - **Goal:** Set up the complete game world using pre-rendered Smallville map with tile-based collision, player movement, NPC spawning with animated sprites, AStar2D pathfinding, and camera follow. This is the visual and spatial foundation everything else builds on.
 - **Requirements:**

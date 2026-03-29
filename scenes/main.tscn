@@ -1,25 +1,86 @@
-[gd_scene load_steps=7 format=3]
+[gd_scene load_steps=11 format=3]
 
-[ext_resource type="Script" path="res://scripts/world_map.gd" id="1_tefeu"]
-[ext_resource type="PackedScene" path="res://scenes/player.tscn" id="2_o6xl0"]
-[ext_resource type="Script" path="res://scripts/player_controller.gd" id="3_tipki"]
-[ext_resource type="Script" path="res://scripts/debug_overlay.gd" id="4_85g3d"]
-[ext_resource type="Script" path="res://scripts/social_propagation.gd" id="5_choun"]
-[ext_resource type="Script" path="res://scripts/interaction_system.gd" id="6_ya4ey"]
+[ext_resource type="Script" path="res://scripts/world_map.gd" id="1_choun"]
+[ext_resource type="PackedScene" path="res://scenes/player.tscn" id="2_ya4ey"]
+[ext_resource type="Script" path="res://scripts/player_controller.gd" id="3_eb6dy"]
+[ext_resource type="PackedScene" path="res://scenes/npc.tscn" id="4_trceg"]
+[ext_resource type="Script" path="res://scripts/npc_controller.gd" id="5_a8y0u"]
+[ext_resource type="Script" path="res://scripts/camera_controller.gd" id="6_jkv2x"]
+[ext_resource type="Script" path="res://scripts/hud_time.gd" id="7_jbj1t"]
+[ext_resource type="Script" path="res://scripts/debug_overlay.gd" id="8_muem4"]
+[ext_resource type="Script" path="res://scripts/social_propagation.gd" id="9_dp3eg"]
+[ext_resource type="Script" path="res://scripts/interaction_system.gd" id="10_0ld40"]
 
 [node name="Main" type="Node2D"]
 
 [node name="WorldMap" type="Sprite2D" parent="."]
 centered = false
-script = ExtResource("1_tefeu")
+script = ExtResource("1_choun")
 
-[node name="Player" type="CharacterBody2D" parent="." instance=ExtResource("2_o6xl0")]
-script = ExtResource("3_tipki")
+[node name="Player" type="CharacterBody2D" parent="." instance=ExtResource("2_ya4ey")]
+script = ExtResource("3_eb6dy")
 
 [node name="NPCs" type="Node2D" parent="."]
 
+[node name="NPC_0" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
+position = Vector2(1712, 464)
+script = ExtResource("5_a8y0u")
+npc_name = "Edith"
+role = "Baker"
+character_sheet_path = "res://assets/characters/Character_RM_002.png"
+
+[node name="NPC_1" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
+position = Vector2(2320, 464)
+script = ExtResource("5_a8y0u")
+npc_name = "Roland"
+role = "Guard"
+character_sheet_path = "res://assets/characters/Character_RM_003.png"
+
+[node name="NPC_2" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
+position = Vector2(528, 592)
+script = ExtResource("5_a8y0u")
+npc_name = "Ivy"
+role = "Herbalist"
+character_sheet_path = "res://assets/characters/Character_RM_004.png"
+
+[node name="NPC_3" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
+position = Vector2(816, 592)
+script = ExtResource("5_a8y0u")
+npc_name = "Felix"
+role = "Courier"
+character_sheet_path = "res://assets/characters/Character_RM_005.png"
+
+[node name="NPC_4" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
+position = Vector2(1168, 592)
+script = ExtResource("5_a8y0u")
+npc_name = "Greta"
+role = "Blacksmith"
+character_sheet_path = "res://assets/characters/Character_RM_006.png"
+
+[node name="NPC_5" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
+position = Vector2(2768, 592)
+script = ExtResource("5_a8y0u")
+npc_name = "Mabel"
+role = "Gossip"
+character_sheet_path = "res://assets/characters/Character_RM_007.png"
+
+[node name="NPC_6" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
+position = Vector2(2992, 592)
+script = ExtResource("5_a8y0u")
+npc_name = "Aldric"
+role = "Farmer"
+character_sheet_path = "res://assets/characters/Character_RM_008.png"
+
+[node name="NPC_7" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
+position = Vector2(2096, 624)
+script = ExtResource("5_a8y0u")
+npc_name = "Hugo"
+role = "Innkeeper"
+character_sheet_path = "res://assets/characters/Character_RM_009.png"
+
 [node name="Camera2D" type="Camera2D" parent="."]
 zoom = Vector2(2.5, 2.5)
+script = ExtResource("6_jkv2x")
 
 [node name="HUD" type="CanvasLayer" parent="."]
 
@@ -35,15 +96,21 @@ offset_left = 10.0
 offset_top = 10.0
 offset_right = 10.0
 offset_bottom = 10.0
+theme_override_font_sizes/font_size = 20
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_shadow_color = Color(0, 0, 0, 0.8)
+theme_override_constants/shadow_offset_x = 1
+theme_override_constants/shadow_offset_y = 1
 text = "6:00 AM"
+script = ExtResource("7_jbj1t")
 
 [node name="DebugOverlay" type="CanvasLayer" parent="."]
 layer = 2
 visible = false
-script = ExtResource("4_85g3d")
+script = ExtResource("8_muem4")
 
 [node name="SocialPropagation" type="Node" parent="."]
-script = ExtResource("5_choun")
+script = ExtResource("9_dp3eg")
 
 [node name="InteractionSystem" type="Node" parent="."]
-script = ExtResource("6_ya4ey")
+script = ExtResource("10_0ld40")
