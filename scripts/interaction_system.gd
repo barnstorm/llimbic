@@ -113,18 +113,17 @@ func _build_chat_ui() -> void:
 	_close_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(_close_hint)
 
-func _input(event: InputEvent) -> void:
+func _unhandled_input(event: InputEvent) -> void:
 	if _chat_layer == null:
 		return
 	if _chat_layer.visible:
-		# Chat is open
+		# Chat is open — block game movement/interaction inputs
+		# Using _unhandled_input so LineEdit gets keys first via _gui_input
 		if event.is_action_pressed("ui_cancel"):
 			_close_chat()
 			get_viewport().set_input_as_handled()
-		# Block game inputs while chat is open
-		if event is InputEventKey:
-			if event.is_action("interact") or event.is_action("move_up") or event.is_action("move_down") or event.is_action("move_left") or event.is_action("move_right"):
-				get_viewport().set_input_as_handled()
+		elif event.is_action("move_up") or event.is_action("move_down") or event.is_action("move_left") or event.is_action("move_right") or event.is_action("interact"):
+			get_viewport().set_input_as_handled()
 	else:
 		if event.is_action_pressed("interact"):
 			_try_interact()
