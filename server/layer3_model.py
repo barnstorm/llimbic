@@ -168,32 +168,8 @@ class Layer3Model:
             f"Output 4-6 plan chunks. Output ONLY the JSON array."
         )
 
-        raw = self._generate(prompt, max_new_tokens=400, temperature=0.3)
-
-        # Try to parse model output
-        try:
-            # Find JSON array in output
-            array_match = re.search(r'\[[\s\S]*?\]', raw)
-            if array_match:
-                chunks = json.loads(array_match.group())
-                # Validate chunks
-                valid_chunks = []
-                for chunk in chunks:
-                    if isinstance(chunk, dict) and "location" in chunk:
-                        loc = chunk["location"]
-                        if loc in TOWN_LOCATIONS:
-                            valid_chunks.append({
-                                "location": loc,
-                                "duration": max(0.5, min(5.0, float(chunk.get("duration", 1.0)))),
-                                "priority": max(0.0, min(1.0, float(chunk.get("priority", 0.5)))),
-                                "purpose": str(chunk.get("purpose", ""))[:80],
-                            })
-                if len(valid_chunks) >= 3:
-                    return {"agenda": valid_chunks, "source": "model"}
-        except (json.JSONDecodeError, ValueError, TypeError):
-            pass
-
-        # Fallback to role-based default
+        # Use role-based default schedules — LLM planning is too slow
+        # and defaults are well-designed for each role already
         default = DEFAULT_SCHEDULES.get(role, DEFAULT_SCHEDULES["Farmer"])
         return {"agenda": list(default), "source": "default"}
 
@@ -214,7 +190,7 @@ class Layer3Model:
             f"Output ONLY valid JSON."
         )
 
-        raw = self._generate(prompt, max_new_tokens=200, temperature=0.3)
+        raw = self._generate(prompt, max_new_tokens=80, temperature=0.3)
 
         try:
             json_match = re.search(r'\{[\s\S]*\}', raw)
@@ -312,7 +288,7 @@ class Layer3Model:
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=80,
+                max_new_tokens=50,
                 temperature=0.5,
                 do_sample=True,
                 top_p=0.9,
