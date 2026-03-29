@@ -160,6 +160,27 @@ async def converse(req: ConverseRequest):
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     print("WebSocket client connected")
+    state = {"open": True}
+    pending_tasks: set = set()
+
+    async def safe_send(text: str):
+        """Send text on websocket, silently drop if closed."""
+        if not state["open"]:
+            return
+        try:
+            await ws.send_text(text)
+        except Exception:
+            state["open"] = False
+
+    async def handle(req_id: str, method: str, params: dict):
+        try:
+            result = await _dispatch(method, params)
+            await safe_send(json.dumps({"id": req_id, "result": result}))
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            await safe_send(json.dumps({"id": req_id, "error": str(e)}))
+
     try:
         while True:
             raw = await ws.receive_text()
@@ -168,20 +189,18 @@ async def websocket_endpoint(ws: WebSocket):
             method = msg.get("method", "")
             params = msg.get("params", {})
 
-            # Dispatch to the right model method in thread pool
-            async def handle():
-                try:
-                    result = await _dispatch(method, params)
-                    await ws.send_text(json.dumps({"id": req_id, "result": result}))
-                except Exception as e:
-                    await ws.send_text(json.dumps({"id": req_id, "error": str(e)}))
-
-            # Fire and forget — multiple requests can be in flight
-            asyncio.create_task(handle())
+            task = asyncio.create_task(handle(req_id, method, params))
+            pending_tasks.add(task)
+            task.add_done_callback(pending_tasks.discard)
     except WebSocketDisconnect:
         print("WebSocket client disconnected")
     except Exception as e:
         print(f"WebSocket error: {e}")
+    finally:
+        state["open"] = False
+        for t in pending_tasks:
+            t.cancel()
+        pending_tasks.clear()
 
 
 async def _dispatch(method: str, params: dict) -> dict:
