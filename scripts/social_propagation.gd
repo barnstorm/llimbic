@@ -163,6 +163,11 @@ func _request_speech(convo: Dictionary, speaker: Node, listener: Node) -> void:
 	if speaker.brain.layer3:
 		location = speaker.brain.layer3.location_name_from_position(speaker.global_position)
 	var context: String = "At %s, %s" % [location, speaker.brain.get_current_action()]
+	# Enrich context with object knowledge for more natural conversation
+	if speaker.brain.memory:
+		var obj_ctx: String = speaker.brain.memory.get_object_dialogue_context(speaker.role if "role" in speaker else "")
+		if obj_ctx != "":
+			context += ". " + obj_ctx
 	var recent: Array = speaker.brain.memory.get_recent_events_text(3)
 
 	_inference_client.layer3_converse(
@@ -184,8 +189,9 @@ func _on_speech_received(convo: Dictionary, speaker: Node, success: bool, data: 
 	# Speaker says it out loud (shows bubble + broadcasts to hearing range)
 	speaker.speak(utterance)
 
-	# Exchange memory events between the pair
+	# Exchange memory events and object knowledge between the pair
 	_exchange_events(convo["speaker"], convo["listener"])
+	_exchange_object_knowledge(convo["speaker"], convo["listener"])
 
 	# Record the conversation in both NPCs' memory
 	var listener: Node = convo["listener"] if speaker == convo["speaker"] else convo["speaker"]
@@ -269,6 +275,76 @@ func _exchange_events(from_npc: Node, to_npc: Node) -> void:
 	to_npc.brain.memory.add_acquired_belief(
 		str(chosen["description"]), from_npc.npc_name, trust
 	)
+
+func _exchange_object_knowledge(from_npc: Node, to_npc: Node) -> void:
+	"""Share object knowledge between NPCs during conversation.
+	Role-filtered: NPCs prefer sharing objects relevant to their role.
+	Trust-weighted: objects from trusted sources get 'reliable' flag."""
+	if from_npc.brain == null or to_npc.brain == null:
+		return
+	if from_npc.brain.memory == null or to_npc.brain.memory == null:
+		return
+
+	var speaker_role: String = from_npc.role if "role" in from_npc else ""
+	var shareable: Array = from_npc.brain.memory.get_objects_for_sharing(speaker_role)
+	if shareable.is_empty():
+		return
+
+	# Role-filtered: prefer objects matching speaker's role
+	var affinity_tags: Array = ROLE_TAG_AFFINITY.get(speaker_role, [])
+	var preferred: Array = []
+	for obj in shareable:
+		# Objects at the speaker's work location are more likely to be shared
+		var obj_loc: String = obj.get("location", "")
+		if speaker_role == "Baker" and obj_loc == "bakery":
+			preferred.append(obj)
+		elif speaker_role == "Guard" and obj_loc == "guard_post":
+			preferred.append(obj)
+		elif speaker_role == "Innkeeper" and obj_loc == "inn":
+			preferred.append(obj)
+		elif speaker_role == "Blacksmith" and obj_loc == "blacksmith":
+			preferred.append(obj)
+		elif speaker_role == "Herbalist" and obj_loc == "herbalist_shop":
+			preferred.append(obj)
+		elif speaker_role == "Farmer" and obj_loc == "farm":
+			preferred.append(obj)
+		elif obj.get("state", "") in ["broken", "empty", "locked"]:
+			preferred.append(obj)  # Problematic objects are always interesting
+
+	var to_share: Array = preferred if preferred.size() > 0 else shareable
+	# Share 1-2 objects per conversation
+	var share_count: int = mini(to_share.size(), randi_range(1, 2))
+	to_share.shuffle()
+
+	var trust: float = to_npc.brain.memory.get_trust(from_npc.npc_name)
+	var is_reliable: bool = trust > 0.6
+
+	for i in range(share_count):
+		var obj: Dictionary = to_share[i]
+		var obj_id: String = obj.get("id", "")
+		if obj_id == "":
+			continue
+		# Don't share if listener already knows it from direct observation
+		var existing: Dictionary = to_npc.brain.memory.get_known_object(obj_id)
+		if not existing.is_empty() and existing.get("learned_from", "") == "direct":
+			continue
+
+		to_npc.brain.memory.add_object_knowledge(
+			obj_id, obj.get("name", ""), obj.get("type", ""),
+			obj.get("position", Vector2.ZERO), obj.get("state", ""),
+			obj.get("location", ""), from_npc.npc_name, is_reliable
+		)
+
+		# Create a tagged event about the shared knowledge
+		var state: String = obj.get("state", "")
+		if state in ["broken", "empty", "locked"]:
+			to_npc.brain.memory.add_tagged_event(
+				"%s told me the %s at %s is %s" % [from_npc.npc_name, obj.get("name", ""), obj.get("location", ""), state],
+				0.5 * clampf(trust + 0.3, 0.3, 1.0),
+				["object_knowledge", "second-hand"],
+				from_npc.npc_name
+			)
+			print("[SocialProp] %s shared object knowledge with %s: %s at %s is %s" % [from_npc.npc_name, to_npc.npc_name, obj.get("name", ""), obj.get("location", ""), state])
 
 func _fallback_line(speaker_role: String, listener_role: String) -> String:
 	var lines: Dictionary = {

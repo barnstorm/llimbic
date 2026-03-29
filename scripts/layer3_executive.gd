@@ -25,23 +25,23 @@ const LOCATIONS: Dictionary = {
 # Role -> home, work, default schedule
 const ROLE_CONFIG: Dictionary = {
 	"Baker": {"home": "bakery", "work": "bakery", "schedule": [
-		{"location": "bakery", "duration": 6.0, "priority": 0.9, "purpose": "Bake morning bread"},
+		{"location": "bakery", "duration": 6.0, "priority": 0.9, "purpose": "Bake morning bread", "object_id": "bakery_oven_01", "object_action": "use"},
 		{"location": "market", "duration": 3.0, "priority": 0.7, "purpose": "Sell bread at market"},
 		{"location": "town_square", "duration": 2.0, "priority": 0.4, "purpose": "Socialize"},
-		{"location": "bakery", "duration": 4.0, "priority": 0.8, "purpose": "Afternoon baking"},
+		{"location": "bakery", "duration": 4.0, "priority": 0.8, "purpose": "Afternoon baking", "object_id": "bakery_oven_01", "object_action": "use"},
 	]},
 	"Guard": {"home": "guard_post", "work": "guard_post", "schedule": [
-		{"location": "guard_post", "duration": 4.0, "priority": 0.9, "purpose": "Morning watch"},
+		{"location": "guard_post", "duration": 4.0, "priority": 0.9, "purpose": "Morning watch", "object_id": "guard_weapon_rack_01", "object_action": "examine"},
 		{"location": "town_square", "duration": 2.0, "priority": 0.7, "purpose": "Patrol town square"},
 		{"location": "market", "duration": 2.0, "priority": 0.6, "purpose": "Patrol market"},
 		{"location": "road_east", "duration": 3.0, "priority": 0.8, "purpose": "Check east road"},
 		{"location": "guard_post", "duration": 4.0, "priority": 0.9, "purpose": "Evening watch"},
 	]},
 	"Herbalist": {"home": "herbalist_shop", "work": "herbalist_shop", "schedule": [
-		{"location": "herbalist_shop", "duration": 5.0, "priority": 0.9, "purpose": "Prepare remedies"},
+		{"location": "herbalist_shop", "duration": 5.0, "priority": 0.9, "purpose": "Prepare remedies", "object_id": "herb_mortar_01", "object_action": "use"},
 		{"location": "farm", "duration": 2.0, "priority": 0.6, "purpose": "Gather herbs from farm"},
 		{"location": "town_square", "duration": 2.0, "priority": 0.4, "purpose": "Rest and socialize"},
-		{"location": "herbalist_shop", "duration": 4.0, "priority": 0.8, "purpose": "Afternoon treatments"},
+		{"location": "herbalist_shop", "duration": 4.0, "priority": 0.8, "purpose": "Afternoon treatments", "object_id": "herb_remedy_shelf_01", "object_action": "examine"},
 	]},
 	"Courier": {"home": "courier_office", "work": "courier_office", "schedule": [
 		{"location": "courier_office", "duration": 2.0, "priority": 0.8, "purpose": "Sort deliveries"},
@@ -53,10 +53,10 @@ const ROLE_CONFIG: Dictionary = {
 		{"location": "courier_office", "duration": 2.0, "priority": 0.7, "purpose": "End of day sorting"},
 	]},
 	"Blacksmith": {"home": "blacksmith", "work": "blacksmith", "schedule": [
-		{"location": "blacksmith", "duration": 6.0, "priority": 0.9, "purpose": "Forge tools and weapons"},
+		{"location": "blacksmith", "duration": 6.0, "priority": 0.9, "purpose": "Forge tools and weapons", "object_id": "smith_forge_01", "object_action": "use"},
 		{"location": "market", "duration": 2.0, "priority": 0.6, "purpose": "Sell wares"},
 		{"location": "inn", "duration": 2.0, "priority": 0.4, "purpose": "Evening meal and rest"},
-		{"location": "blacksmith", "duration": 3.0, "priority": 0.7, "purpose": "Late forging"},
+		{"location": "blacksmith", "duration": 3.0, "priority": 0.7, "purpose": "Late forging", "object_id": "smith_anvil_01", "object_action": "use"},
 	]},
 	"Gossip": {"home": "home_south", "work": "town_square", "schedule": [
 		{"location": "market", "duration": 3.0, "priority": 0.7, "purpose": "Gather news at market"},
@@ -66,15 +66,15 @@ const ROLE_CONFIG: Dictionary = {
 		{"location": "well", "duration": 2.0, "priority": 0.6, "purpose": "Chat at the well"},
 	]},
 	"Farmer": {"home": "farm", "work": "farm", "schedule": [
-		{"location": "farm", "duration": 6.0, "priority": 0.9, "purpose": "Tend crops"},
+		{"location": "farm", "duration": 6.0, "priority": 0.9, "purpose": "Tend crops", "object_id": "farm_plow_01", "object_action": "use"},
 		{"location": "market", "duration": 2.0, "priority": 0.7, "purpose": "Sell produce"},
 		{"location": "inn", "duration": 1.5, "priority": 0.4, "purpose": "Midday meal"},
-		{"location": "farm", "duration": 4.0, "priority": 0.8, "purpose": "Afternoon farming"},
+		{"location": "farm", "duration": 4.0, "priority": 0.8, "purpose": "Afternoon farming", "object_id": "farm_trough_01", "object_action": "examine"},
 	]},
 	"Innkeeper": {"home": "inn", "work": "inn", "schedule": [
-		{"location": "inn", "duration": 5.0, "priority": 0.9, "purpose": "Prepare breakfast service"},
+		{"location": "inn", "duration": 5.0, "priority": 0.9, "purpose": "Prepare breakfast service", "object_id": "inn_pantry_01", "object_action": "examine"},
 		{"location": "market", "duration": 2.0, "priority": 0.6, "purpose": "Buy supplies"},
-		{"location": "inn", "duration": 8.0, "priority": 0.9, "purpose": "Run the inn"},
+		{"location": "inn", "duration": 8.0, "priority": 0.9, "purpose": "Run the inn", "object_id": "inn_ale_barrel_01", "object_action": "examine"},
 		{"location": "inn", "duration": 3.0, "priority": 0.8, "purpose": "Evening service until close"},
 	]},
 }
@@ -159,7 +159,7 @@ func get_target_position() -> Vector2:
 		return LOCATIONS[loc_name]
 	return Vector2(2096, 800)
 
-func update_plan(hour: float, memory_summary: String, emotion_summary: String, inference_client: Node) -> void:
+func update_plan(hour: float, memory_summary: String, emotion_summary: String, inference_client: Node, object_summary: String = "") -> void:
 	# Check if it's time for a new plan (every 30 game-minutes)
 	if _last_plan_hour < 0.0:
 		_last_plan_hour = hour
@@ -178,6 +178,9 @@ func update_plan(hour: float, memory_summary: String, emotion_summary: String, i
 
 	_pending_plan = true
 	var context: String = "Hour: %.1f, Location: %s" % [hour, get_current_chunk().get("location", "unknown")]
+	# Enrich context with object knowledge
+	if object_summary != "":
+		context += "\n" + object_summary
 	inference_client.layer3_plan(_role, memory_summary, context, emotion_summary, _on_plan_result)
 
 func _on_plan_result(success: bool, data: Dictionary) -> void:
@@ -268,6 +271,35 @@ func get_night_behavior() -> Dictionary:
 	if _role == "Guard":
 		return {"location": "town_square", "duration": 8.0, "priority": 0.9, "purpose": "Night patrol"}
 	return {"location": get_home_location(), "duration": 8.0, "priority": 1.0, "purpose": "Rest at home"}
+
+func inject_object_concern_chunk(concern_text: String, location: String, object_id: String, object_action: String) -> void:
+	## Insert a high-priority chunk right after the current one to address a problematic object.
+	## This is triggered when an NPC discovers a broken/empty object in their domain.
+	var fix_chunk: Dictionary = {
+		"location": location,
+		"duration": 2.0,
+		"priority": 0.95,
+		"purpose": concern_text,
+		"object_id": object_id,
+		"object_action": object_action,
+	}
+	var insert_idx: int = current_chunk_index + 1
+	if insert_idx > agenda.size():
+		insert_idx = agenda.size()
+	agenda.insert(insert_idx, fix_chunk)
+	print("[Layer3] %s: Injected concern chunk — %s (object: %s)" % [_npc_name, concern_text, object_id])
+
+func get_object_target_position(world_object_registry: Node) -> Vector2:
+	## If the current chunk has an object_id, return that object's position.
+	## Otherwise return Vector2.ZERO (caller should use normal location target).
+	var chunk: Dictionary = get_current_chunk()
+	var obj_id: String = chunk.get("object_id", "")
+	if obj_id == "" or world_object_registry == null:
+		return Vector2.ZERO
+	var obj: Dictionary = world_object_registry.get_object(obj_id)
+	if obj.is_empty():
+		return Vector2.ZERO
+	return obj.get("position", Vector2.ZERO)
 
 func location_name_from_position(world_pos: Vector2) -> String:
 	var best_name: String = "unknown"

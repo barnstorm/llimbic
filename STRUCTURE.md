@@ -58,7 +58,7 @@
 - **File:** res://scripts/npc_controller.gd
 - **Extends:** CharacterBody2D
 - **Architecture:** Thin executor — brain selects actions, controller executes them
-- **Actions:** MOVE_TOWARD, PAUSE, OBSERVE, FLEE_FROM, WANDER, IDLE
+- **Actions:** MOVE_TOWARD, PAUSE, OBSERVE, EXAMINE, FLEE_FROM, WANDER, IDLE
 - **External lock:** `_externally_locked` set by conversation/interaction systems, overrides brain
 - Pathfinding is one tool among many, not the controlling abstraction
 - Wander: at destination, NPCs meander within 48px radius instead of standing frozen
@@ -71,9 +71,11 @@
   1. Reorientation pause (after interruption, 0.5-2s based on frustration)
   2. Flee from distrusted entity (trust < 0.2, flee tendency > 0.5)
   3. Observe interesting entity (new in FOV, observe > 0.6, 8s cooldown)
-  4. Wander at destination (within 48px, ticks chunk timer)
-  5. Move toward plan target (drive overrides change WHERE, action system changes HOW)
-- **Drive overrides:** safety<30, energy<20, hunger>80, social>85 → override destination, suspend chunk
+  4. EXAMINE object (1-2s, triggered by chunk arrival with object_id or seeing role-relevant unexamined object)
+  5. Wander at destination (within 48px, ticks chunk timer, checks for unexamined chunk objects)
+  6. Move toward plan target (drive overrides change WHERE, action system changes HOW)
+- **Object interaction:** EXAMINE action stops NPC, faces object, updates memory with current state. If object is problematic (broken/empty), creates concern and injects fix chunk into plan.
+- **Drive overrides:** safety<30, energy<20, hunger>80, social>85 → override destination, suspend chunk. Hunger override checks known food objects first.
 - **Reflection:** Every 2 game-hours or 5+ new tagged events
 - **Modulation triggers:** Fires southbound L2 modulation on chunk changes
 
@@ -98,7 +100,9 @@
 - **File:** res://scripts/layer3_executive.gd
 - **Extends:** RefCounted
 - 16 town locations with world positions
-- Role configs with default daily schedules (4-7 chunks each)
+- Role configs with default daily schedules (4-7 chunks each), with optional `object_id` and `object_action` fields
+- **Object-aware planning:** Plan chunks can target specific objects. Role-default schedules reference work objects (Baker targets oven, Blacksmith targets forge, etc.)
+- **Object concern injection:** When NPC discovers a problematic object in their domain, injects a high-priority fix/restock chunk into the agenda
 - **Conditional replanning:** Only triggers LLM when state warrants it (high frustration, concerns, failures). Otherwise uses role defaults instantly.
 - **Chunk suspension:** Can suspend current chunk for drive override, resume after recovery
 - Night behavior: NPCs return home ~21:00, Guard patrols, Innkeeper stays late
@@ -110,8 +114,10 @@
 - Relationship tracking (trust per entity), place familiarity
 - Unresolved concerns, reflections, failed strategies, socially acquired beliefs
 - Event decay over time
-- **Object knowledge:** `known_objects` dict (object_id -> {name, type, last_seen_position, last_seen_state, last_seen_time, learned_from, location})
-- Methods: `add_object_knowledge()`, `get_objects_at_location()`, `get_objects_by_type()`, `get_object_summary()`
+- **Object knowledge:** `known_objects` dict (object_id -> {name, type, last_seen_position, last_seen_state, last_seen_time, learned_from, location, reliable})
+- Methods: `add_object_knowledge()`, `get_objects_at_location()`, `get_objects_by_type()`, `get_object_summary()`, `get_problematic_objects()`, `get_food_objects()`, `get_objects_for_sharing()`, `get_object_dialogue_context()`
+- Second-hand object knowledge from trusted sources (trust > 0.6) marked as "reliable"
+- Direct observations don't get overwritten by fresh second-hand info (5-minute protection)
 
 ### Perception
 - **File:** res://scripts/perception.gd
@@ -136,6 +142,8 @@
 - Requires: both NPCs have social_need > 30, at least one sees the other, both pass interruption check
 - Role-tag affinity: guards prefer sharing security info, merchants trade info, etc.
 - Trust-weighted salience: events from trusted sources stored with higher salience
+- **Object knowledge exchange:** During conversations, NPCs share known objects (1-2 per conversation). Role-filtered sharing (Baker shares bakery objects, etc.). Trust-weighted: reliable flag set for trusted sources.
+- Conversation context enriched with object knowledge for more natural dialogue
 - Cooldown: 60 real seconds per pair
 - NPCs stop, face each other, generate dialogue via Layer 3, speech bubbles visible
 
@@ -145,6 +153,7 @@
 - Uses `_unhandled_input` (not `_input`) so LineEdit gets keypresses first
 - Opens chat panel (right side, dark theme) with message history
 - NPC greeting via `/layer3/dialogue`, replies via `/layer3/chat` (WebSocket)
+- Dialogue context includes NPC's object knowledge summary (notable/problematic objects)
 - Shows `[server] Connection failed` when server is down
 - Speech broadcasts to nearby NPCs via hearing system
 - Mood shifts affect trust

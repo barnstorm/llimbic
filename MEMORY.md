@@ -105,3 +105,23 @@
 - Three objects start in non-default state: bakery_basket_01 (empty), smith_forge_01 (broken), inn_ale_barrel_01 (empty) — these trigger discovery events with state info.
 - Debug overlay panel expanded by ~100px height to accommodate the Known Objects section.
 - `npc_brain.set_autoloads()` gained optional third parameter `world_object_registry` for backward compatibility.
+
+## Task 6: Object-Aware Planning & Social Object Knowledge
+
+### What worked
+- Plan chunks with `object_id` and `object_action` fields allow NPCs to target specific objects in their schedules.
+- EXAMINE action (1-2s stop + face object) triggers reliably when NPC arrives at destination with object_id chunk, or while wandering at destination with unexamined chunk object.
+- Object concern injection: NPCs discovering broken/empty objects in their domain immediately inject a "Fix/Restock" chunk into their plan agenda.
+- Hunger drive override now checks `memory.get_food_objects()` for known stocked food locations before falling back to generic FOOD_LOCATIONS.
+- Dialogue context enrichment: `get_object_dialogue_context()` provides notable object info (broken/empty/locked) for NPC conversations.
+- Social object knowledge exchange: `_exchange_object_knowledge()` shares 1-2 objects per conversation, role-filtered and trust-weighted.
+- Direct observation protection: second-hand object knowledge doesn't overwrite fresh (< 5 min) direct observations.
+
+### Technical details
+- `_should_examine()` must check `_last_examine_times.has(object_id)` for never-examined case. Using `get(id, 0)` and comparing `Time.get_ticks_msec() - 0 > 300000` fails early in runtime because the engine hasn't been running for 5 minutes yet.
+- EXAMINE action is handled by npc_controller.gd alongside "observe" — both stop the NPC and face the target.
+- `inject_object_concern_chunk()` inserts the fix chunk at `current_chunk_index + 1` so it's the next thing the NPC does.
+- `get_object_target_position()` on Layer3Executive returns the object's world position if the current chunk has an object_id, allowing NPCs to walk to the exact object rather than just the location center.
+- Debug overlay shows object IDs in plan chunks via `[object_id]` suffix, and EXAMINE action in purple.
+- `memory.add_object_knowledge()` has a `reliable` parameter (bool) set true when the source NPC's trust > 0.6.
+- Social propagation enriches conversation context with `get_object_dialogue_context()` so LLM-generated dialogue can reference discovered objects.

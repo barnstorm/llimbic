@@ -208,7 +208,7 @@ func _execute_action(action: Dictionary, delta: float) -> void:
 			_play_idle()
 			move_and_slide()
 
-		"observe":
+		"observe", "examine":
 			velocity = Vector2.ZERO
 			var target_pos: Vector2 = action.get("target", global_position)
 			face_toward(target_pos)

@@ -40,6 +40,11 @@ var _at_destination: bool = false
 var _destination_timer: float = 0.0
 var _destination_duration: float = 0.0
 
+# EXAMINE action state
+var _examine_timer: float = 0.0
+var _examining_object_id: String = ""
+var _last_examine_times: Dictionary = {}  # object_id -> ticks_msec
+
 # Timers
 var _social_pulse_timer: float = 0.0
 var _social_pulse_interval: float = 5.0  # game minutes → real seconds depend on time_scale
@@ -133,7 +138,8 @@ func update_layer3(hour: float) -> void:
 	var emo_summary: String = ""
 	if layer2:
 		emo_summary = layer2.get_emotion_summary()
-	layer3.update_plan(hour, mem_summary, emo_summary, _inference_client)
+	var obj_summary: String = memory.get_object_summary()
+	layer3.update_plan(hour, mem_summary, emo_summary, _inference_client, obj_summary)
 
 	# Trigger southbound modulation when chunk changes
 	_check_modulation_trigger()
@@ -201,6 +207,27 @@ func _safest_familiar_location() -> Vector2:
 		return L3Cls.LOCATIONS[best_loc]
 	return Vector2(2096, 800)
 
+func _find_best_food_target() -> Vector2:
+	## Check known food-related objects first, fallback to generic food locations.
+	if memory:
+		var food_objs: Array = memory.get_food_objects()
+		if food_objs.size() > 0:
+			# Pick the nearest food location with known stocked objects
+			var L3Cls: GDScript = load("res://scripts/layer3_executive.gd")
+			var best_pos: Vector2 = Vector2.ZERO
+			var best_dist: float = 999999.0
+			for fobj in food_objs:
+				var loc_name: String = fobj["location"]
+				if L3Cls.LOCATIONS.has(loc_name):
+					var pos: Vector2 = L3Cls.LOCATIONS[loc_name]
+					var dist: float = _last_world_pos.distance_to(pos)
+					if dist < best_dist:
+						best_dist = dist
+						best_pos = pos
+			if best_pos != Vector2.ZERO:
+				return best_pos
+	return _nearest_location(FOOD_LOCATIONS)
+
 func check_drive_override() -> Dictionary:
 	## Check if any Layer 1 drive has crossed an urgent threshold.
 	## Returns override dict or empty if no override needed.
@@ -215,7 +242,8 @@ func check_drive_override() -> Dictionary:
 		var pos: Vector2 = L3Cls.LOCATIONS.get(home, Vector2(2096, 800))
 		return {"target": pos, "reason": "Exhausted, going home", "drive": "energy"}
 	if layer1.hunger > 80.0:
-		return {"target": _nearest_location(FOOD_LOCATIONS), "reason": "Need to eat", "drive": "hunger"}
+		var food_target: Vector2 = _find_best_food_target()
+		return {"target": food_target, "reason": "Need to eat", "drive": "hunger"}
 	if layer1.social_need > 85.0:
 		return {"target": _nearest_location(PUBLIC_LOCATIONS), "reason": "Lonely, seeking company", "drive": "social_need"}
 	return {}
@@ -274,6 +302,11 @@ func get_target_position() -> Vector2:
 		_drive_override = override
 		return override["target"]
 
+	# Check if the current chunk targets a specific object
+	if _world_object_registry:
+		var obj_pos: Vector2 = layer3.get_object_target_position(_world_object_registry)
+		if obj_pos != Vector2.ZERO:
+			return obj_pos
 	return layer3.get_target_position()
 
 func get_current_action() -> String:
@@ -315,11 +348,26 @@ func select_action(delta: float) -> Dictionary:
 			current_action = {"type": "observe", "target": interesting["position"], "entity": interesting["name"], "duration": randf_range(0.8, 1.5), "reason": "Observing " + interesting["name"], "speed_mul": 0.0}
 			return current_action
 
-	# 4. Get plan target (includes drive overrides)
+	# 4. EXAMINE action: if currently examining an object, continue until done
+	if _examining_object_id != "" and _examine_timer > 0.0:
+		_examine_timer -= delta
+		if _examine_timer <= 0.0:
+			_finish_examine()
+		current_action = {"type": "examine", "reason": "Examining object", "speed_mul": 0.0, "object_id": _examining_object_id}
+		return current_action
+
+	# 4b. Check if we should examine a role-relevant object nearby (>5 min since last examine)
+	var examine_target: Dictionary = _find_examinable_object()
+	if not examine_target.is_empty():
+		_start_examine(examine_target)
+		current_action = {"type": "examine", "target": examine_target["position"], "reason": "Examining " + examine_target.get("name", "object"), "speed_mul": 0.0, "object_id": examine_target.get("id", "")}
+		return current_action
+
+	# 5. Get plan target (includes drive overrides + object targeting)
 	var plan_target: Vector2 = get_target_position()
 	var dist_to_target: float = _last_world_pos.distance_to(plan_target)
 
-	# 5. At destination → wander + tick chunk timer
+	# 6. At destination → check for object-targeted examine, then wander + tick chunk timer
 	if dist_to_target < 48.0:
 		if not _at_destination:
 			# Just arrived
@@ -331,6 +379,27 @@ func select_action(delta: float) -> Dictionary:
 			_destination_duration = clampf(duration_hours * 5.0, 8.0, 30.0)
 			_destination_timer = _destination_duration
 			memory.add_observation(npc_name, chunk.get("location", ""), "arrived for " + chunk.get("purpose", "task"))
+			# If chunk has an object_id, start examining it on arrival
+			var chunk_obj_id: String = chunk.get("object_id", "")
+			if chunk_obj_id != "" and _should_examine(chunk_obj_id):
+				var obj_data: Dictionary = {}
+				if _world_object_registry:
+					obj_data = _world_object_registry.get_object(chunk_obj_id)
+				if not obj_data.is_empty():
+					_start_examine({"id": chunk_obj_id, "name": obj_data.get("name", ""), "position": obj_data.get("position", _last_world_pos), "state": obj_data.get("state", ""), "type": obj_data.get("type", "")})
+					current_action = {"type": "examine", "target": obj_data.get("position", _last_world_pos), "reason": "Examining " + obj_data.get("name", "object"), "speed_mul": 0.0, "object_id": chunk_obj_id}
+					return current_action
+
+		# While at destination, check if the chunk's object needs examining
+		if layer3 and _examining_object_id == "" and _examine_timer <= 0.0:
+			var chunk_for_examine: Dictionary = layer3.get_current_chunk()
+			var chunk_obj: String = chunk_for_examine.get("object_id", "")
+			if chunk_obj != "" and _should_examine(chunk_obj) and _world_object_registry != null:
+				var obj_data_at_dest: Dictionary = _world_object_registry.get_object(chunk_obj)
+				if not obj_data_at_dest.is_empty():
+					_start_examine({"id": chunk_obj, "name": obj_data_at_dest.get("name", ""), "position": obj_data_at_dest.get("position", _last_world_pos), "state": obj_data_at_dest.get("state", ""), "type": obj_data_at_dest.get("type", "")})
+					current_action = {"type": "examine", "target": obj_data_at_dest.get("position", _last_world_pos), "reason": "Examining " + obj_data_at_dest.get("name", "object"), "speed_mul": 0.0, "object_id": chunk_obj}
+					return current_action
 
 		# Tick destination timer
 		_destination_timer -= delta
@@ -429,6 +498,9 @@ func on_player_interaction(callback: Callable) -> void:
 
 	var trust_val: float = memory.get_trust("Player")
 	var rel_context: String = "Trust: %.2f" % trust_val
+	var obj_ctx: String = memory.get_object_dialogue_context(role)
+	if obj_ctx != "":
+		rel_context += ". " + obj_ctx
 	var recent: Array = memory.get_recent_events_text(3)
 
 	layer3.request_dialogue(emo_summary, rel_context, recent, _inference_client, callback)
@@ -552,6 +624,86 @@ func _process_visible_objects() -> void:
 			var old_state: String = known.get("last_seen_state", "unknown")
 			var event_text: String = "Noticed %s at %s changed from %s to %s" % [obj_name, obj_location, old_state, obj_state]
 			memory.add_tagged_event(event_text, base_salience, ["object_state_change", obj_type], "direct")
+
+# --- EXAMINE action helpers ---
+
+func _should_examine(object_id: String) -> bool:
+	## Returns true if the object hasn't been examined recently (>5 minutes = 300000ms).
+	if not _last_examine_times.has(object_id):
+		return true  # Never examined
+	var last_time: int = _last_examine_times[object_id]
+	return (Time.get_ticks_msec() - last_time) > 300000
+
+func _start_examine(obj: Dictionary) -> void:
+	## Begin examining an object. NPC stops and faces it for 1-2 seconds.
+	_examining_object_id = obj.get("id", "")
+	_examine_timer = randf_range(1.0, 2.0)
+	_last_examine_times[_examining_object_id] = Time.get_ticks_msec()
+	memory.add_observation(npc_name, "", "Examining " + obj.get("name", "object"))
+
+func _finish_examine() -> void:
+	## Called when examine timer expires. Updates object memory and creates events.
+	if _examining_object_id == "" or _world_object_registry == null:
+		_examining_object_id = ""
+		return
+	var obj: Dictionary = _world_object_registry.get_object(_examining_object_id)
+	if obj.is_empty():
+		_examining_object_id = ""
+		return
+
+	var obj_name: String = obj.get("name", "")
+	var obj_state: String = obj.get("state", "")
+	var obj_type: String = obj.get("type", "")
+	var obj_loc: String = obj.get("location", "")
+	var obj_pos: Vector2 = obj.get("position", Vector2.ZERO)
+
+	# Update memory with fresh state from registry
+	memory.add_object_knowledge(_examining_object_id, obj_name, obj_type, obj_pos, obj_state, obj_loc, "direct")
+
+	# Check if object state is problematic
+	if obj_state in ["broken", "empty", "locked"]:
+		var affinities: Array = obj.get("role_affinity", [])
+		var is_my_domain: bool = affinities.size() == 0 or role in affinities
+		var salience: float = 0.8 if is_my_domain else 0.4
+		var event_text: String = "Examined %s at %s — it's %s" % [obj_name, obj_loc, obj_state]
+		memory.add_tagged_event(event_text, salience, ["object_examine", "problematic", obj_type], "direct")
+
+		if is_my_domain:
+			# Add concern and inject a fix chunk into the plan
+			var concern: String = "%s at %s is %s" % [obj_name, obj_loc, obj_state]
+			memory.add_concern(concern)
+			if layer3:
+				var fix_purpose: String = ""
+				match obj_state:
+					"broken":
+						fix_purpose = "Fix the %s" % obj_name
+					"empty":
+						fix_purpose = "Restock the %s" % obj_name
+					"locked":
+						fix_purpose = "Unlock the %s" % obj_name
+				layer3.inject_object_concern_chunk(fix_purpose, obj_loc, _examining_object_id, "fix")
+				print("[Brain] %s: Discovered problematic %s (%s) — replanning" % [npc_name, obj_name, obj_state])
+	else:
+		memory.add_tagged_event("Examined %s at %s — %s" % [obj_name, obj_loc, obj_state], 0.3, ["object_examine"], "direct")
+
+	_examining_object_id = ""
+
+func _find_examinable_object() -> Dictionary:
+	## Find a role-relevant visible object that hasn't been examined recently.
+	if perception == null or _world_object_registry == null:
+		return {}
+	for obj in perception.visible_objects:
+		var obj_id: String = obj.get("id", "")
+		if obj_id == "" or not _should_examine(obj_id):
+			continue
+		# Check role affinity
+		var full_obj: Dictionary = _world_object_registry.get_object(obj_id)
+		var affinities: Array = full_obj.get("role_affinity", [])
+		if affinities.size() > 0 and role not in affinities:
+			continue
+		# Only auto-examine if role-relevant
+		return {"id": obj_id, "name": obj.get("name", ""), "position": obj.get("position", Vector2.ZERO), "state": obj.get("state", ""), "type": obj.get("type", "")}
+	return {}
 
 func hear_speech(source_name: String, text: String, source_pos: Vector2, my_pos: Vector2) -> void:
 	"""Called when someone speaks nearby. Omnidirectional hearing check."""

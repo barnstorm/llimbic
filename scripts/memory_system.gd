@@ -156,8 +156,16 @@ func get_tagged_events_for_exchange() -> Array[Dictionary]:
 
 # --- Object Knowledge ---
 
-func add_object_knowledge(id: String, obj_name: String, type: String, position: Vector2, state: String, location: String, source: String) -> void:
+func add_object_knowledge(id: String, obj_name: String, type: String, position: Vector2, state: String, location: String, source: String, reliable: bool = false) -> void:
 	## Upsert object knowledge. source = "direct" for seen, or NPC name for second-hand.
+	## reliable = true when source is a trusted NPC (trust > 0.6).
+	var existing: Dictionary = known_objects.get(id, {})
+	# Direct observation always overwrites. Second-hand only overwrites if no direct observation exists
+	# or if the second-hand info is newer.
+	var dominated: bool = (source != "direct" and existing.get("learned_from", "") == "direct"
+		and Time.get_ticks_msec() - existing.get("last_seen_time", 0) < 300000)  # 5 minutes
+	if dominated:
+		return  # Don't overwrite fresh direct observation with second-hand info
 	known_objects[id] = {
 		"name": obj_name,
 		"type": type,
@@ -166,6 +174,7 @@ func add_object_knowledge(id: String, obj_name: String, type: String, position: 
 		"last_seen_time": Time.get_ticks_msec(),
 		"learned_from": source,
 		"location": location,
+		"reliable": source == "direct" or reliable,
 	}
 
 func get_objects_at_location(location: String) -> Array:
@@ -197,8 +206,62 @@ func get_object_summary() -> String:
 	for id in known_objects:
 		var obj: Dictionary = known_objects[id]
 		var src: String = " (heard from %s)" % obj["learned_from"] if obj["learned_from"] != "direct" else ""
-		parts.append("- %s at %s: %s%s" % [obj["name"], obj["location"], obj["last_seen_state"], src])
+		var rel: String = " [reliable]" if obj.get("reliable", false) and obj["learned_from"] != "direct" else ""
+		parts.append("- %s at %s: %s%s%s" % [obj["name"], obj["location"], obj["last_seen_state"], src, rel])
 	if parts.size() > 8:
 		parts.resize(8)
 		parts.append("- ...and %d more" % (known_objects.size() - 8))
 	return "Known objects:\n" + "\n".join(parts)
+
+func get_problematic_objects() -> Array:
+	## Returns objects in problematic states (broken, empty, locked).
+	var result: Array = []
+	for id in known_objects:
+		var obj: Dictionary = known_objects[id]
+		var state: String = obj.get("last_seen_state", "")
+		if state in ["broken", "empty", "locked"]:
+			result.append({"id": id, "name": obj["name"], "type": obj["type"], "state": state, "location": obj["location"], "learned_from": obj["learned_from"]})
+	return result
+
+func get_food_objects() -> Array:
+	## Returns known food-related objects (containers/supplies at food locations).
+	var food_locations: Array = ["bakery", "inn", "market", "farm"]
+	var result: Array = []
+	for id in known_objects:
+		var obj: Dictionary = known_objects[id]
+		var loc: String = obj.get("location", "")
+		var obj_type: String = obj.get("type", "")
+		var state: String = obj.get("last_seen_state", "")
+		if loc in food_locations and obj_type in ["container", "supply"] and state != "empty":
+			result.append({"id": id, "name": obj["name"], "location": loc, "state": state})
+	return result
+
+func get_objects_for_sharing(sharer_role: String) -> Array:
+	## Returns objects suitable for sharing during social propagation.
+	## Filters by role affinity: NPCs prefer sharing objects relevant to their role.
+	var result: Array = []
+	for id in known_objects:
+		var obj: Dictionary = known_objects[id]
+		# Prefer objects with interesting states or from role-relevant locations
+		var state: String = obj.get("last_seen_state", "")
+		var is_interesting: bool = state in ["broken", "empty", "locked"] or obj.get("learned_from", "") == "direct"
+		if is_interesting:
+			result.append({"id": id, "name": obj["name"], "type": obj["type"], "state": state, "location": obj["location"], "position": obj.get("last_seen_position", Vector2.ZERO)})
+	return result
+
+func get_object_dialogue_context(role: String) -> String:
+	## Returns a short string describing notable objects for dialogue context.
+	var notable: Array = []
+	for id in known_objects:
+		var obj: Dictionary = known_objects[id]
+		var state: String = obj.get("last_seen_state", "")
+		if state in ["broken", "empty", "locked"]:
+			var src: String = ""
+			if obj.get("learned_from", "direct") != "direct":
+				src = " (%s told me)" % obj["learned_from"]
+			notable.append("%s at %s is %s%s" % [obj["name"], obj["location"], state, src])
+	if notable.is_empty():
+		return ""
+	if notable.size() > 3:
+		notable.resize(3)
+	return "Notable objects: " + "; ".join(notable)

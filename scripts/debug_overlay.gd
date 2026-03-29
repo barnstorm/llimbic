@@ -271,6 +271,9 @@ func _update_panel() -> void:
 	elif atype == "PAUSE":
 		_action_label.text = "%s — %s" % [atype, reason]
 		_action_label.add_theme_color_override("font_color", Color(0.9, 0.9, 0.3))
+	elif atype == "EXAMINE":
+		_action_label.text = "%s — %s" % [atype, reason]
+		_action_label.add_theme_color_override("font_color", Color(0.8, 0.5, 1.0))
 	elif atype == "OBSERVE":
 		_action_label.text = "%s — %s" % [atype, reason]
 		_action_label.add_theme_color_override("font_color", Color(0.3, 0.8, 1.0))
@@ -382,7 +385,10 @@ func _update_plan_display() -> void:
 		var loc: String = chunk.get("location", "?")
 		var purpose: String = chunk.get("purpose", "?")
 		var dur: float = chunk.get("duration", 0.0)
+		var obj_id: String = chunk.get("object_id", "")
 		var text: String = "%s (%.0fh) - %s" % [loc, dur, purpose]
+		if obj_id != "":
+			text += " [%s]" % obj_id.get_file()  # Show short object ID
 
 		var color: Color = Color(0.6, 0.6, 0.6)
 		if i == current_idx:

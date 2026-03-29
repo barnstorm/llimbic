@@ -237,6 +237,11 @@ func _request_npc_greeting() -> void:
 		emo_summary = brain.layer2.get_emotion_summary()
 	var trust_val: float = brain.memory.get_trust("Player")
 	var rel_context: String = "Trust: %.2f" % trust_val
+	# Include object knowledge in dialogue context
+	if brain.memory:
+		var obj_ctx: String = brain.memory.get_object_dialogue_context(_active_npc.role if "role" in _active_npc else "")
+		if obj_ctx != "":
+			rel_context += ". " + obj_ctx
 	var recent: Array = brain.memory.get_recent_events_text(3)
 
 	if _inference_client:
@@ -271,6 +276,11 @@ func _request_npc_reply(player_text: String) -> void:
 		emo_summary = brain.layer2.get_emotion_summary()
 	var trust_val: float = brain.memory.get_trust("Player")
 	var rel_context: String = "Trust: %.2f" % trust_val
+	# Include object knowledge in chat context
+	if brain.memory:
+		var obj_ctx: String = brain.memory.get_object_dialogue_context(_active_npc.role if "role" in _active_npc else "")
+		if obj_ctx != "":
+			rel_context += ". " + obj_ctx
 	var recent: Array = brain.memory.get_recent_events_text(3)
 
 	if _inference_client:

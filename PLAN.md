@@ -181,7 +181,7 @@ Uses pre-existing assets from joonspk-research/generative_agents: a pre-rendered
 
 ## 6. Object-Aware Planning & Social Object Knowledge
 - **Depends on:** 5
-- **Status:** pending
+- **Status:** done
 - **Targets:** scripts/layer3_executive.gd, scripts/npc_brain.gd, scripts/social_propagation.gd, scripts/memory_system.gd, scripts/interaction_system.gd
 - **Goal:** NPCs plan around discovered objects, act on object-related discoveries, and share object knowledge through social propagation. Plans can now target specific objects, not just named locations.
 - **Requirements:**
