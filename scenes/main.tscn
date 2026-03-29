@@ -1,0 +1,49 @@
+[gd_scene load_steps=7 format=3]
+
+[ext_resource type="Script" path="res://scripts/world_map.gd" id="1_tefeu"]
+[ext_resource type="PackedScene" path="res://scenes/player.tscn" id="2_o6xl0"]
+[ext_resource type="Script" path="res://scripts/player_controller.gd" id="3_tipki"]
+[ext_resource type="Script" path="res://scripts/debug_overlay.gd" id="4_85g3d"]
+[ext_resource type="Script" path="res://scripts/social_propagation.gd" id="5_choun"]
+[ext_resource type="Script" path="res://scripts/interaction_system.gd" id="6_ya4ey"]
+
+[node name="Main" type="Node2D"]
+
+[node name="WorldMap" type="Sprite2D" parent="."]
+centered = false
+script = ExtResource("1_tefeu")
+
+[node name="Player" type="CharacterBody2D" parent="." instance=ExtResource("2_o6xl0")]
+script = ExtResource("3_tipki")
+
+[node name="NPCs" type="Node2D" parent="."]
+
+[node name="Camera2D" type="Camera2D" parent="."]
+zoom = Vector2(2.5, 2.5)
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="HUDContainer" type="Control" parent="HUD"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+
+[node name="TimeLabel" type="Label" parent="HUD/HUDContainer"]
+layout_mode = 0
+offset_left = 10.0
+offset_top = 10.0
+offset_right = 10.0
+offset_bottom = 10.0
+text = "6:00 AM"
+
+[node name="DebugOverlay" type="CanvasLayer" parent="."]
+layer = 2
+visible = false
+script = ExtResource("4_85g3d")
+
+[node name="SocialPropagation" type="Node" parent="."]
+script = ExtResource("5_choun")
+
+[node name="InteractionSystem" type="Node" parent="."]
+script = ExtResource("6_ya4ey")
