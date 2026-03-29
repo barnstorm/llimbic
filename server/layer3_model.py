@@ -1,21 +1,21 @@
 """
 Layer 3 — Executive / Planning Model
 
-Uses SmolLM2-135M-Instruct for:
+Uses SmolLM2-1.7B-Instruct for:
 - Daily agenda generation
 - Short-horizon plan chunking
 - Reflection over memory summaries
 - Dialogue intent generation
 - Social reasoning (bounded)
 
-This model must NOT be used for continuous control, per-frame decisions,
-or low-level behavior. It runs at slow cadence and outputs structured JSON.
+Uses outlines for guaranteed structured JSON output.
+This model runs at slow cadence and outputs structured JSON.
 """
 
 import torch
-import json
-import re
+from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import outlines
 
 # Town locations for structured planning
 TOWN_LOCATIONS = {
@@ -37,7 +37,7 @@ TOWN_LOCATIONS = {
     "road_south": {"tile": [70, 90], "type": "transit", "public": True},
 }
 
-# Role-based default schedules (fallback when model output is poor)
+# Role-based default schedules (fallback when model output has invalid locations)
 DEFAULT_SCHEDULES = {
     "Baker": [
         {"location": "home_north", "duration": 1.0, "priority": 0.5, "purpose": "wake up and prepare"},
@@ -105,107 +105,127 @@ DEFAULT_SCHEDULES = {
 }
 
 
-class Layer3Model:
-    """Executive planning model using SmolLM2-135M-Instruct."""
+# --- Output schemas for outlines structured generation ---
 
-    def __init__(self, model_name: str = "HuggingFaceTB/SmolLM2-135M-Instruct",
+class PlanChunk(BaseModel):
+    location: str
+    duration: float
+    priority: float
+    purpose: str
+
+class PlanOutput(BaseModel):
+    agenda: list[PlanChunk]
+
+class ReflectOutput(BaseModel):
+    reflections: list[str]
+    concerns: list[str]
+
+class DialogueOutput(BaseModel):
+    intent: str
+    utterance: str
+
+class ChatOutput(BaseModel):
+    utterance: str
+    mood_shift: str
+
+class ConverseOutput(BaseModel):
+    intent: str
+    utterance: str
+    topic: str
+
+
+class Layer3Model:
+    """Executive planning model using SmolLM2-1.7B-Instruct with outlines structured generation."""
+
+    def __init__(self, model_name: str = "HuggingFaceTB/SmolLM2-1.7B-Instruct",
                  device: str = "cuda"):
         self.device = device
         self.model_name = model_name
         print(f"Layer3: Loading {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(
+        hf_model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.float16,
             device_map=device
         )
-        self.model.eval()
-        param_count = sum(p.numel() for p in self.model.parameters())
+        hf_model.eval()
+        param_count = sum(p.numel() for p in hf_model.parameters())
         print(f"Layer3: Model loaded ({param_count / 1e6:.1f}M params)")
 
-    def _generate(self, prompt: str, max_new_tokens: int = 300,
-                  temperature: float = 0.3) -> str:
-        """Generate structured text from prompt."""
-        messages = [
-            {"role": "user", "content": prompt}
-        ]
-        text = self.tokenizer.apply_chat_template(
+        # Wrap with outlines
+        self._outlines_model = outlines.from_transformers(hf_model, self.tokenizer)
+
+        # Pre-build generators for each output schema
+        print("Layer3: Building structured generators...")
+        self._plan_gen = outlines.Generator(self._outlines_model, output_type=PlanOutput)
+        self._reflect_gen = outlines.Generator(self._outlines_model, output_type=ReflectOutput)
+        self._dialogue_gen = outlines.Generator(self._outlines_model, output_type=DialogueOutput)
+        self._chat_gen = outlines.Generator(self._outlines_model, output_type=ChatOutput)
+        self._converse_gen = outlines.Generator(self._outlines_model, output_type=ConverseOutput)
+        print("Layer3: Generators ready.")
+
+    def _format_prompt(self, prompt: str) -> str:
+        """Apply chat template to a single-turn prompt."""
+        messages = [{"role": "user", "content": prompt}]
+        return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=max(temperature, 0.01),
-                do_sample=temperature > 0.05,
-                top_p=0.9,
-                repetition_penalty=1.1,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
-        generated = outputs[0][inputs["input_ids"].shape[1]:]
-        return self.tokenizer.decode(generated, skip_special_tokens=True).strip()
+
+    def _format_chat(self, messages: list[dict]) -> str:
+        """Apply chat template to multi-turn messages."""
+        return self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
 
     def plan(self, role: str, memory_summary: str, current_context: str,
              emotion_summary: str) -> dict:
         """
         Generate a daily agenda: list of plan chunks.
-        Falls back to role-based default schedule if model output is unparseable.
+        Falls back to role-based default schedule if generated locations are invalid.
         """
         locations_list = ", ".join(TOWN_LOCATIONS.keys())
 
-        prompt = (
+        prompt = self._format_prompt(
             f"You are a {role} NPC planning your day in a small medieval town.\n"
             f"Available locations: {locations_list}\n"
             f"Memory: {memory_summary}\n"
             f"Current state: {current_context}\n"
             f"Emotional state: {emotion_summary}\n\n"
-            f"Create a daily plan as a JSON array of objects. Each object has:\n"
+            f"Create a daily plan as a JSON object with an 'agenda' array. Each item has:\n"
             f'- "location": one of the available locations\n'
             f'- "duration": hours (0.5-5.0)\n'
             f'- "priority": 0.0-1.0\n'
             f'- "purpose": short description\n\n'
-            f"Output 4-6 plan chunks. Output ONLY the JSON array."
+            f"Output 4-6 plan chunks. Output ONLY the JSON object."
         )
 
-        raw = self._generate(prompt, max_new_tokens=400, temperature=0.3)
+        result = self._plan_gen(prompt, max_tokens=400, temperature=0.3)
 
-        # Try to parse model output
-        try:
-            # Find JSON array in output
-            array_match = re.search(r'\[[\s\S]*?\]', raw)
-            if array_match:
-                chunks = json.loads(array_match.group())
-                # Validate chunks
-                valid_chunks = []
-                for chunk in chunks:
-                    if isinstance(chunk, dict) and "location" in chunk:
-                        loc = chunk["location"]
-                        if loc in TOWN_LOCATIONS:
-                            valid_chunks.append({
-                                "location": loc,
-                                "duration": max(0.5, min(5.0, float(chunk.get("duration", 1.0)))),
-                                "priority": max(0.0, min(1.0, float(chunk.get("priority", 0.5)))),
-                                "purpose": str(chunk.get("purpose", ""))[:80],
-                            })
-                if len(valid_chunks) >= 3:
-                    return {"agenda": valid_chunks, "source": "model"}
-        except (json.JSONDecodeError, ValueError, TypeError):
-            pass
+        # Validate locations and clamp numeric ranges
+        valid_chunks = []
+        for chunk in result.agenda:
+            if chunk.location in TOWN_LOCATIONS:
+                valid_chunks.append({
+                    "location": chunk.location,
+                    "duration": max(0.5, min(5.0, chunk.duration)),
+                    "priority": max(0.0, min(1.0, chunk.priority)),
+                    "purpose": chunk.purpose[:80],
+                })
+
+        if len(valid_chunks) >= 3:
+            return {"agenda": valid_chunks, "source": "model"}
 
         # Fallback to role-based default
         default = DEFAULT_SCHEDULES.get(role, DEFAULT_SCHEDULES["Farmer"])
         return {"agenda": list(default), "source": "default"}
 
     def reflect(self, memory_events: list[str]) -> dict:
-        """
-        Compress memory events into reflections and surface concerns.
-        """
+        """Compress memory events into reflections and surface concerns."""
         if not memory_events:
             return {"reflections": [], "concerns": []}
 
         events_str = "\n".join(f"- {e}" for e in memory_events[-10:])
-        prompt = (
+        prompt = self._format_prompt(
             f"You are an NPC reflecting on recent events.\n"
             f"Events:\n{events_str}\n\n"
             f"Output a JSON object with:\n"
@@ -214,29 +234,18 @@ class Layer3Model:
             f"Output ONLY valid JSON."
         )
 
-        raw = self._generate(prompt, max_new_tokens=200, temperature=0.3)
-
-        try:
-            json_match = re.search(r'\{[\s\S]*\}', raw)
-            if json_match:
-                data = json.loads(json_match.group())
-                return {
-                    "reflections": [str(r)[:100] for r in data.get("reflections", [])],
-                    "concerns": [str(c)[:100] for c in data.get("concerns", [])],
-                }
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        return {"reflections": ["Things have been uneventful."], "concerns": []}
+        result = self._reflect_gen(prompt, max_tokens=200, temperature=0.3)
+        return {
+            "reflections": [r[:100] for r in result.reflections],
+            "concerns": [c[:100] for c in result.concerns],
+        }
 
     def dialogue(self, role: str, emotion_summary: str,
                  relationship_context: str, recent_events: list[str]) -> dict:
-        """
-        Generate dialogue intent and utterance for player interaction.
-        """
+        """Generate dialogue intent and utterance for player interaction."""
         events_str = "; ".join(recent_events[-3:]) if recent_events else "nothing notable"
 
-        prompt = (
+        prompt = self._format_prompt(
             f"You are a {role} NPC in a medieval town. A player approaches you.\n"
             f"Your emotional state: {emotion_summary}\n"
             f"Relationship with player: {relationship_context}\n"
@@ -247,42 +256,21 @@ class Layer3Model:
             f"Output ONLY valid JSON."
         )
 
-        raw = self._generate(prompt, max_new_tokens=60, temperature=0.4)
-
-        try:
-            json_match = re.search(r'\{[^{}]*\}', raw)
-            if json_match:
-                data = json.loads(json_match.group())
-                return {
-                    "intent": str(data.get("intent", "greet"))[:20],
-                    "utterance": str(data.get("utterance", "Hello there."))[:100],
-                }
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        # Role-based fallback
-        fallbacks = {
-            "Baker": {"intent": "greet", "utterance": "Fresh bread today! What can I get you?"},
-            "Guard": {"intent": "inform", "utterance": "All quiet on the roads today."},
-            "Herbalist": {"intent": "greet", "utterance": "Looking for remedies? I have some fresh herbs."},
-            "Courier": {"intent": "greet", "utterance": "Can't stop long, deliveries to make!"},
-            "Blacksmith": {"intent": "greet", "utterance": "Need something repaired? I'm your smith."},
-            "Gossip": {"intent": "inform", "utterance": "Oh, have you heard the latest?"},
-            "Farmer": {"intent": "greet", "utterance": "Good day! The crops are coming in well."},
-            "Innkeeper": {"intent": "greet", "utterance": "Welcome! Pull up a chair."},
+        result = self._dialogue_gen(prompt, max_tokens=60, temperature=0.4)
+        return {
+            "intent": result.intent[:20],
+            "utterance": result.utterance[:100],
         }
-        return fallbacks.get(role, {"intent": "greet", "utterance": "Hello there."})
 
     def chat(self, role: str, npc_name: str, emotion_summary: str,
              relationship_context: str, recent_events: list[str],
              conversation_history: list[dict], player_message: str) -> dict:
         """
         Generate NPC reply to player's typed message in a back-and-forth conversation.
-        Uses proper multi-turn chat template instead of single-message prompt.
+        Uses proper multi-turn chat template.
         """
         events_str = "; ".join(recent_events[-3:]) if recent_events else "nothing notable"
 
-        # Build proper multi-turn messages for chat template
         system_context = (
             f"You are {npc_name}, a {role} in a medieval town. "
             f"You feel {emotion_summary}. You know: {events_str}. "
@@ -291,59 +279,21 @@ class Layer3Model:
         )
 
         messages = [{"role": "user", "content": system_context}]
-        # Add assistant acknowledgment so model enters character
         messages.append({"role": "assistant", "content": f'{{"utterance": "I am {npc_name} the {role}.", "mood_shift": "neutral"}}'})
 
-        # Map conversation history to user/assistant turns
         for msg in conversation_history[-4:]:
             if msg["speaker"] == "Player":
                 messages.append({"role": "user", "content": msg["text"]})
             else:
                 messages.append({"role": "assistant", "content": f'{{"utterance": "{msg["text"]}", "mood_shift": "neutral"}}'})
 
-        # Add player's new message
         messages.append({"role": "user", "content": player_message})
 
-        # Generate using chat template with multi-turn
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=80,
-                temperature=0.5,
-                do_sample=True,
-                top_p=0.9,
-                repetition_penalty=1.2,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
-        generated = outputs[0][inputs["input_ids"].shape[1]:]
-        raw = self.tokenizer.decode(generated, skip_special_tokens=True).strip()
-
-        try:
-            json_match = re.search(r'\{[^{}]*\}', raw)
-            if json_match:
-                data = json.loads(json_match.group())
-                return {
-                    "utterance": str(data.get("utterance", "Hmm, I see."))[:150],
-                    "mood_shift": str(data.get("mood_shift", "neutral"))[:20],
-                }
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        # Fallback — acknowledge what the player said
-        fallbacks = [
-            f"I hear you. Things have been busy at the {role.lower()}'s.",
-            "Interesting... I'll keep that in mind.",
-            f"As a {role.lower()}, I've seen a lot. But go on.",
-            "Hmm, is that so?",
-        ]
-        import random
+        prompt = self._format_chat(messages)
+        result = self._chat_gen(prompt, max_tokens=80, temperature=0.5)
         return {
-            "utterance": random.choice(fallbacks),
-            "mood_shift": "neutral",
+            "utterance": result.utterance[:150],
+            "mood_shift": result.mood_shift[:20],
         }
 
     def converse(self, speaker_role: str, speaker_emotion: str,
@@ -351,11 +301,10 @@ class Layer3Model:
                  shared_context: str, speaker_recent: list[str]) -> dict:
         """
         Generate NPC-to-NPC conversation: speaker says something to listener.
-        Returns intent, utterance, and optional topic (event being shared).
         """
         events_str = "; ".join(speaker_recent[-3:]) if speaker_recent else "nothing notable"
 
-        prompt = (
+        prompt = self._format_prompt(
             f"You are a {speaker_role} NPC talking to a {listener_role} in a medieval town.\n"
             f"Your emotional state: {speaker_emotion}\n"
             f"The {listener_role} seems: {listener_emotion}\n"
@@ -368,35 +317,11 @@ class Layer3Model:
             f"Output ONLY valid JSON."
         )
 
-        raw = self._generate(prompt, max_new_tokens=80, temperature=0.5)
-
-        try:
-            json_match = re.search(r'\{[^{}]*\}', raw)
-            if json_match:
-                data = json.loads(json_match.group())
-                return {
-                    "intent": str(data.get("intent", "greet"))[:20],
-                    "utterance": str(data.get("utterance", "Good day."))[:100],
-                    "topic": str(data.get("topic", "small talk"))[:50],
-                }
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        # Fallback based on role combinations
-        fallbacks = {
-            "Gossip": f"Did you hear what happened at the {listener_role.lower()}'s place?",
-            "Guard": f"Keep your eyes open, {listener_role}.",
-            "Baker": f"Want some bread, {listener_role}?",
-            "Farmer": "Weather's been good for the crops.",
-            "Innkeeper": "Business has been steady lately.",
-            "Courier": "I've got news from the road.",
-            "Herbalist": "The herbs are growing well this season.",
-            "Blacksmith": "I've been busy at the forge.",
-        }
+        result = self._converse_gen(prompt, max_tokens=80, temperature=0.5)
         return {
-            "intent": "greet",
-            "utterance": fallbacks.get(speaker_role, f"Hello, {listener_role}."),
-            "topic": "small talk",
+            "intent": result.intent[:20],
+            "utterance": result.utterance[:100],
+            "topic": result.topic[:50],
         }
 
     def get_location_tile(self, location_name: str) -> list[int] | None:
