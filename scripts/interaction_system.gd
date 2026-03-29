@@ -244,11 +244,13 @@ func _request_npc_greeting() -> void:
 			_active_npc.role, emo_summary, rel_context, recent,
 			func(success: bool, data: Dictionary) -> void:
 				_waiting_for_reply = false
+				_remove_typing_indicator()
+				if not success:
+					_add_message_bubble("[server]", "Layer 3 server not running (port 8421)", false)
+					return
 				var utterance: String = data.get("utterance", "Hello there.")
 				_conversation_history.append({"speaker": _active_npc.npc_name, "text": utterance})
-				_remove_typing_indicator()
 				_add_message_bubble(_active_npc.npc_name, utterance, false)
-				# Speak out loud so nearby NPCs hear
 				if is_instance_valid(_active_npc):
 					_active_npc.speak(utterance)
 		)
@@ -286,6 +288,11 @@ func _on_chat_response(success: bool, data: Dictionary) -> void:
 	_remove_typing_indicator()
 
 	if _active_npc == null or not is_instance_valid(_active_npc):
+		return
+
+	if not success:
+		_add_message_bubble("[server]", "Connection failed — start servers with: bash server/start.sh", false)
+		_input_field.call_deferred("grab_focus")
 		return
 
 	var utterance: String = data.get("utterance", "Hmm...")
