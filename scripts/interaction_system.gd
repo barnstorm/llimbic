@@ -114,6 +114,8 @@ func _build_chat_ui() -> void:
 	vbox.add_child(_close_hint)
 
 func _input(event: InputEvent) -> void:
+	if _chat_layer == null:
+		return
 	if _chat_layer.visible:
 		# Chat is open
 		if event.is_action_pressed("ui_cancel"):
