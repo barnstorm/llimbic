@@ -12,13 +12,14 @@
 | move_right | D, Right |
 | interact | Space, Enter |
 | toggle_debug | Tab |
+| ui_cancel | Escape |
 
 ## Scenes
 
 ### Main
 - **File:** res://scenes/main.tscn
 - **Root type:** Node2D
-- **Children:** WorldMap (Sprite2D), Player (instance), NPCs (Node2D container), Camera2D, CanvasLayer (HUD)
+- **Children:** WorldMap (Sprite2D), Player (instance), NPCs (Node2D container), Camera2D, CanvasLayer (HUD), DebugOverlay, SocialPropagation, InteractionSystem
 
 ### Player
 - **File:** res://scenes/player.tscn
@@ -28,7 +29,7 @@
 ### NPC
 - **File:** res://scenes/npc.tscn
 - **Root type:** CharacterBody2D
-- **Children:** AnimatedSprite2D, NameLabel (Label), StateIndicator (Sprite2D)
+- **Children:** AnimatedSprite2D, NameLabel (Label)
 
 ## Scripts
 
@@ -37,25 +38,30 @@
 - **Extends:** Node
 - **Signals emitted:** time_changed(hour: float), day_changed(day: int)
 
-### PlayerController
-- **File:** res://scripts/player_controller.gd
-- **Extends:** CharacterBody2D
-- **Attaches to:** Player:Player
-
-### NPCController
-- **File:** res://scripts/npc_controller.gd
-- **Extends:** CharacterBody2D
-- **Attaches to:** NPC:NPC
-
 ### NavigationManager (autoload)
 - **File:** res://scripts/navigation_manager.gd
 - **Extends:** Node
 - **Signals emitted:** navigation_ready
 
-### WorldMap
-- **File:** res://scripts/world_map.gd
-- **Extends:** Sprite2D
-- **Attaches to:** Main:WorldMap
+### InferenceClient (autoload)
+- **File:** res://scripts/inference_client.gd
+- **Extends:** Node
+- **Signals emitted:** request_completed(request_id, success, data)
+- **Routes:** Layer 2 requests → localhost:8420, Layer 3 requests → localhost:8421
+
+### PlayerController
+- **File:** res://scripts/player_controller.gd
+- **Extends:** CharacterBody2D
+
+### NPCController
+- **File:** res://scripts/npc_controller.gd
+- **Extends:** CharacterBody2D
+- **States:** IDLE, WALKING, ARRIVED, TALKING, CONVERSING
+
+### NPCBrain
+- **File:** res://scripts/npc_brain.gd
+- **Extends:** RefCounted
+- **Owns:** Layer1Substrate, Layer2Projection, Layer3Executive, MemorySystem, Perception
 
 ### Layer1Substrate
 - **File:** res://scripts/layer1_substrate.gd
@@ -73,32 +79,43 @@
 - **File:** res://scripts/memory_system.gd
 - **Extends:** RefCounted
 
+### Perception
+- **File:** res://scripts/perception.gd
+- **Extends:** RefCounted
+- **FOV:** 90° cone, 3-tile range (96px), directional based on facing
+- **Hearing:** Omnidirectional, 2.5-tile range (80px)
+
 ### SocialPropagation
 - **File:** res://scripts/social_propagation.gd
 - **Extends:** Node
-
-### DebugOverlay
-- **File:** res://scripts/debug_overlay.gd
-- **Extends:** CanvasLayer
+- **Manages:** NPC-to-NPC face-to-face conversations with Layer 3 dialogue
 
 ### InteractionSystem
 - **File:** res://scripts/interaction_system.gd
 - **Extends:** Node
+- **Manages:** Player chat dialogue panel with multi-turn conversation via Layer 3
+
+### DebugOverlay
+- **File:** res://scripts/debug_overlay.gd
+- **Extends:** CanvasLayer
+- **Shows:** L1 bars, L2 GoEmotions 27-dim heatmap, L3 plan chunks, FOV cones
+
+### CameraController
+- **File:** res://scripts/camera_controller.gd
+- **Extends:** Camera2D
+
+### WorldMap
+- **File:** res://scripts/world_map.gd
+- **Extends:** Sprite2D
+
+### HUDTime
+- **File:** res://scripts/hud_time.gd
+- **Extends:** Label
 
 ## Signal Map
 
-- GameManager.time_changed -> NPCController (schedule checks)
-- GameManager.day_changed -> Layer3Executive (new day planning)
 - NavigationManager.navigation_ready -> NPCController (begin pathfinding)
-
-### NPCBrain
-- **File:** res://scripts/npc_brain.gd
-- **Extends:** RefCounted
-
-### InferenceClient (autoload)
-- **File:** res://scripts/inference_client.gd
-- **Extends:** Node
-- **Signals emitted:** request_completed(request_id: String, success: bool, data: Dictionary)
+- GameManager time tracked by NPCController each tick
 
 ## Autoloads
 
@@ -106,8 +123,17 @@
 - NavigationManager = res://scripts/navigation_manager.gd
 - InferenceClient = res://scripts/inference_client.gd
 
+## Inference Servers
+
+| Server | Port | Model | Purpose |
+|--------|------|-------|---------|
+| Layer 2 | 8420 | SmolLM2-135M-Instruct | Fast emotion projection/modulation (~4 calls/sec) |
+| Layer 3 | 8421 | SmolLM2-1.7B-Instruct | Planning, dialogue, chat, NPC conversation |
+
+Start both: `bash server/start.sh`
+
 ## Asset Hints
 
-- Pre-rendered town map: assets/img/town_map.png (4480×3200, used as Sprite2D)
+- Pre-rendered town map: assets/img/town_map.png (4480×3200, Sprite2D background)
 - Collision grid: assets/img/collision_map.png (140×100, parsed for AStar2D)
 - Character sprites: assets/characters/Character_RM_001-010.png (576×384, 48×48 frames, RPG Maker VX Ace format)

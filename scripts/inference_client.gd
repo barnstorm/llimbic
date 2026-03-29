@@ -4,7 +4,8 @@ extends Node
 
 signal request_completed(request_id: String, success: bool, data: Dictionary)
 
-const BASE_URL: String = "http://127.0.0.1:8420"
+const LAYER2_URL: String = "http://127.0.0.1:8420"
+const LAYER3_URL: String = "http://127.0.0.1:8421"
 const MAX_CONCURRENT: int = 10
 const REQUEST_TIMEOUT: float = 5.0
 
@@ -114,11 +115,13 @@ func _next_id() -> String:
 	return "req_" + str(_request_counter)
 
 func _enqueue(request_id: String, endpoint: String, body: Dictionary, callback: Callable) -> void:
+	var base_url: String = LAYER2_URL if endpoint.begins_with("/layer2") else LAYER3_URL
 	_queue.append({
 		"id": request_id,
 		"endpoint": endpoint,
 		"body": body,
-		"callback": callback
+		"callback": callback,
+		"base_url": base_url
 	})
 
 func _send_request(req_data: Dictionary) -> void:
@@ -126,7 +129,7 @@ func _send_request(req_data: Dictionary) -> void:
 	http.timeout = REQUEST_TIMEOUT
 	add_child(http)
 
-	var url: String = BASE_URL + req_data["endpoint"]
+	var url: String = req_data["base_url"] + req_data["endpoint"]
 	var json_body: String = JSON.stringify(req_data["body"])
 	var headers: PackedStringArray = PackedStringArray(["Content-Type: application/json"])
 
@@ -180,16 +183,17 @@ func _handle_failure(entry: Dictionary, reason: String) -> void:
 	request_completed.emit(entry["id"], false, {"error": reason})
 
 func _check_health() -> void:
-	var http := HTTPRequest.new()
-	http.timeout = 3.0
-	add_child(http)
-	http.request_completed.connect(_on_health_check.bind(http))
-	var err: int = http.request(BASE_URL + "/health", PackedStringArray(), HTTPClient.METHOD_GET)
-	if err != OK:
-		_server_available = false
-		http.queue_free()
+	for url in [LAYER2_URL, LAYER3_URL]:
+		var http := HTTPRequest.new()
+		http.timeout = 5.0
+		add_child(http)
+		http.request_completed.connect(_on_health_check.bind(http))
+		var err: int = http.request(url + "/health", PackedStringArray(), HTTPClient.METHOD_GET)
+		if err != OK:
+			http.queue_free()
 
 func _on_health_check(result: int, response_code: int, _headers: PackedStringArray, _body: PackedByteArray, http: HTTPRequest) -> void:
 	if is_instance_valid(http):
 		http.queue_free()
-	_server_available = (result == HTTPRequest.RESULT_SUCCESS and response_code == 200)
+	if result == HTTPRequest.RESULT_SUCCESS and response_code == 200:
+		_server_available = true

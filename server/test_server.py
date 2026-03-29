@@ -9,7 +9,8 @@ import json
 import time
 import requests
 
-BASE = "http://127.0.0.1:8420"
+L2_BASE = "http://127.0.0.1:8420"
+L3_BASE = "http://127.0.0.1:8421"
 PASS = 0
 FAIL = 0
 
@@ -25,18 +26,23 @@ def test(name, fn):
         print(f"  FAIL: {name} — {e}")
 
 
-def check_health():
-    r = requests.get(f"{BASE}/health", timeout=5)
+def check_health_l2():
+    r = requests.get(f"{L2_BASE}/health", timeout=5)
     assert r.status_code == 200
     d = r.json()
     assert d["status"] == "ok"
-    assert "SmolLM2" in d["layer2_model"]
-    assert "SmolLM2" in d["layer3_model"]
-    assert d["gpu_memory_used_mb"] > 0
+    assert "SmolLM2" in d["model"]
+
+def check_health_l3():
+    r = requests.get(f"{L3_BASE}/health", timeout=5)
+    assert r.status_code == 200
+    d = r.json()
+    assert d["status"] == "ok"
+    assert "1.7B" in d["model"]
 
 
 def check_layer2_project():
-    r = requests.post(f"{BASE}/layer2/project", json={
+    r = requests.post(f"{L2_BASE}/layer2/project", json={
         "layer1_state": {"energy": 40, "hunger": 60, "frustration": 0.4,
                          "social_need": 70, "safety": 60, "task_momentum": 0.3},
         "recent_events": ["was interrupted", "saw a fight"],
@@ -51,7 +57,7 @@ def check_layer2_project():
 
 
 def check_layer2_modulate():
-    r = requests.post(f"{BASE}/layer2/modulate", json={
+    r = requests.post(f"{L2_BASE}/layer2/modulate", json={
         "directives": "stay alert, avoid east road",
         "current_vector": [0.2] * 27,
     }, timeout=10)
@@ -65,7 +71,7 @@ def check_layer2_modulate():
 
 
 def check_layer3_plan():
-    r = requests.post(f"{BASE}/layer3/plan", json={
+    r = requests.post(f"{L3_BASE}/layer3/plan", json={
         "role": "Baker",
         "memory_summary": "Sold bread, heard about wolves",
         "current_context": "10:30 AM, at bakery",
@@ -81,7 +87,7 @@ def check_layer3_plan():
 
 
 def check_layer3_dialogue():
-    r = requests.post(f"{BASE}/layer3/dialogue", json={
+    r = requests.post(f"{L3_BASE}/layer3/dialogue", json={
         "role": "Guard",
         "emotion_summary": "alert",
         "relationship_context": "Trust: 0.5",
@@ -95,7 +101,7 @@ def check_layer3_dialogue():
 
 
 def check_layer3_chat():
-    r = requests.post(f"{BASE}/layer3/chat", json={
+    r = requests.post(f"{L3_BASE}/layer3/chat", json={
         "role": "Guard",
         "npc_name": "Roland",
         "emotion_summary": "alert",
@@ -117,7 +123,7 @@ def check_layer3_chat():
 
 def check_layer3_chat_multi_turn():
     """Test that multi-turn conversation tracks context."""
-    r = requests.post(f"{BASE}/layer3/chat", json={
+    r = requests.post(f"{L3_BASE}/layer3/chat", json={
         "role": "Baker",
         "npc_name": "Edith",
         "emotion_summary": "cheerful",
@@ -136,7 +142,7 @@ def check_layer3_chat_multi_turn():
 
 
 def check_layer3_converse():
-    r = requests.post(f"{BASE}/layer3/converse", json={
+    r = requests.post(f"{L3_BASE}/layer3/converse", json={
         "speaker_role": "Gossip",
         "speaker_emotion": "curious",
         "listener_role": "Baker",
@@ -152,7 +158,7 @@ def check_layer3_converse():
 
 
 def check_layer3_reflect():
-    r = requests.post(f"{BASE}/layer3/reflect", json={
+    r = requests.post(f"{L3_BASE}/layer3/reflect", json={
         "memory_events": [
             "Sold bread to 3 customers",
             "Heard rumor about wolves from the guard",
@@ -168,7 +174,7 @@ def check_layer3_reflect():
 def check_response_time():
     """Layer 2 should be fast (<2s), Layer 3 chat should be reasonable (<5s)."""
     t0 = time.time()
-    requests.post(f"{BASE}/layer2/project", json={
+    requests.post(f"{L2_BASE}/layer2/project", json={
         "layer1_state": {"energy": 50, "hunger": 50, "frustration": 0.1,
                          "social_need": 50, "safety": 80, "task_momentum": 0.5},
         "recent_events": [],
@@ -177,7 +183,7 @@ def check_response_time():
     l2_time = time.time() - t0
 
     t0 = time.time()
-    requests.post(f"{BASE}/layer3/chat", json={
+    requests.post(f"{L3_BASE}/layer3/chat", json={
         "role": "Guard", "npc_name": "Roland", "emotion_summary": "alert",
         "relationship_context": "Trust: 0.5", "recent_events": [],
         "conversation_history": [], "player_message": "Hello",
@@ -195,14 +201,15 @@ if __name__ == "__main__":
 
     # Check server is reachable
     try:
-        requests.get(f"{BASE}/health", timeout=15)
+        requests.get(f"{L2_BASE}/health", timeout=15)
+        requests.get(f"{L3_BASE}/health", timeout=15)
     except requests.ConnectionError:
-        print("ERROR: Server not running at localhost:8420")
-        print("Start it with: python3 server/inference_server.py")
+        print("ERROR: Servers not running. Start with: bash server/start.sh")
         sys.exit(1)
 
     print("\n[Health]")
-    test("health endpoint", check_health)
+    test("Layer 2 health (port 8420)", check_health_l2)
+    test("Layer 3 health (port 8421)", check_health_l3)
 
     print("\n[Layer 2 — Projection/Modulation]")
     test("project: 27-dim vector output", check_layer2_project)
