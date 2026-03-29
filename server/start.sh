@@ -18,11 +18,11 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "Starting Layer 2 server (SmolLM2-135M, port 8420)..."
-uvicorn layer2_server:app --host 127.0.0.1 --port 8420 --log-level warning --workers 1 &
+uvicorn layer2_server:app --host 0.0.0.0 --port 8420 --log-level warning --workers 1 &
 L2_PID=$!
 
 echo "Starting Layer 3 server (SmolLM2-1.7B, port 8421)..."
-uvicorn layer3_server:app --host 127.0.0.1 --port 8421 --log-level warning --workers 1 &
+uvicorn layer3_server:app --host 0.0.0.0 --port 8421 --log-level warning --workers 1 &
 L3_PID=$!
 
 echo "PIDs: Layer2=$L2_PID, Layer3=$L3_PID"
