@@ -273,6 +273,59 @@ class Layer3Model:
         }
         return fallbacks.get(role, {"intent": "greet", "utterance": "Hello there."})
 
+    def chat(self, role: str, npc_name: str, emotion_summary: str,
+             relationship_context: str, recent_events: list[str],
+             conversation_history: list[dict], player_message: str) -> dict:
+        """
+        Generate NPC reply to player's typed message in a back-and-forth conversation.
+        conversation_history is a list of {"speaker": "Player"|npc_name, "text": "..."}
+        """
+        events_str = "; ".join(recent_events[-3:]) if recent_events else "nothing notable"
+
+        # Build conversation context
+        history_str = ""
+        for msg in conversation_history[-6:]:  # last 6 messages for context
+            history_str += f"{msg['speaker']}: {msg['text']}\n"
+        history_str += f"Player: {player_message}\n"
+
+        prompt = (
+            f"You are {npc_name}, a {role} in a medieval town. You are having a conversation with the player.\n"
+            f"Your emotional state: {emotion_summary}\n"
+            f"Relationship with player: {relationship_context}\n"
+            f"Recent events you know about: {events_str}\n\n"
+            f"Conversation so far:\n{history_str}\n"
+            f"Output a JSON object with:\n"
+            f'"utterance": your reply as {npc_name} (one or two sentences, max 30 words, stay in character)\n'
+            f'"mood_shift": how this conversation makes you feel (one word: pleased, annoyed, curious, nervous, neutral, amused, suspicious)\n\n'
+            f"Output ONLY valid JSON."
+        )
+
+        raw = self._generate(prompt, max_new_tokens=100, temperature=0.5)
+
+        try:
+            json_match = re.search(r'\{[^{}]*\}', raw)
+            if json_match:
+                data = json.loads(json_match.group())
+                return {
+                    "utterance": str(data.get("utterance", "Hmm, I see."))[:150],
+                    "mood_shift": str(data.get("mood_shift", "neutral"))[:20],
+                }
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Fallback — acknowledge what the player said
+        fallbacks = [
+            f"I hear you. Things have been busy at the {role.lower()}'s.",
+            "Interesting... I'll keep that in mind.",
+            f"As a {role.lower()}, I've seen a lot. But go on.",
+            "Hmm, is that so?",
+        ]
+        import random
+        return {
+            "utterance": random.choice(fallbacks),
+            "mood_shift": "neutral",
+        }
+
     def converse(self, speaker_role: str, speaker_emotion: str,
                  listener_role: str, listener_emotion: str,
                  shared_context: str, speaker_recent: list[str]) -> dict:

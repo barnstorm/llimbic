@@ -274,17 +274,18 @@ func _arrive() -> void:
 	brain.on_arrived_at_destination()
 
 func interact_with_player() -> void:
-	## Called by InteractionSystem when player presses interact near this NPC
-	if _state == State.TALKING:
+	## Called by InteractionSystem when player opens chat near this NPC
+	if _state == State.TALKING or _state == State.CONVERSING:
 		return
-	_state = State.TALKING
+	_state = State.CONVERSING
 	velocity = Vector2.ZERO
 
-	brain.on_player_interaction(_on_dialogue_received)
-
-func _on_dialogue_received(success: bool, data: Dictionary) -> void:
-	var utterance: String = data.get("utterance", "...")
-	speak(utterance)  # Shows bubble AND broadcasts to nearby NPCs for hearing
+	# Record the interaction in memory
+	if brain:
+		brain.memory.add_tagged_event("Player initiated conversation", 0.5, ["interaction", "player"])
+		if brain.layer1.task_momentum > 0.3:
+			brain.layer1.apply_interruption()
+			brain.memory.update_relationship("Player", -0.02, "Interrupted my work")
 
 func show_speech(text: String) -> void:
 	if _speech_label:

@@ -5,7 +5,7 @@ extends Node
 signal request_completed(request_id: String, success: bool, data: Dictionary)
 
 const BASE_URL: String = "http://127.0.0.1:8420"
-const MAX_CONCURRENT: int = 4
+const MAX_CONCURRENT: int = 10
 const REQUEST_TIMEOUT: float = 5.0
 
 var _queue: Array[Dictionary] = []
@@ -77,6 +77,20 @@ func layer3_dialogue(role: String, emotion_summary: String, relationship_context
 		"recent_events": recent_events
 	}
 	_enqueue(request_id, "/layer3/dialogue", body, callback)
+	return request_id
+
+func layer3_chat(role: String, npc_name_str: String, emotion_summary: String, relationship_context: String, recent_events: Array, conversation_history: Array, player_message: String, callback: Callable) -> String:
+	var request_id: String = _next_id()
+	var body: Dictionary = {
+		"role": role,
+		"npc_name": npc_name_str,
+		"emotion_summary": emotion_summary,
+		"relationship_context": relationship_context,
+		"recent_events": recent_events,
+		"conversation_history": conversation_history,
+		"player_message": player_message
+	}
+	_enqueue(request_id, "/layer3/chat", body, callback)
 	return request_id
 
 func layer3_converse(speaker_role: String, speaker_emotion: String, listener_role: String, listener_emotion: String, shared_context: String, speaker_recent: Array, callback: Callable) -> String:

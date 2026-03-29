@@ -86,6 +86,19 @@ class DialogueResponse(BaseModel):
     intent: str
     utterance: str
 
+class ChatRequest(BaseModel):
+    role: str
+    npc_name: str
+    emotion_summary: str = ""
+    relationship_context: str = ""
+    recent_events: list[str] = []
+    conversation_history: list[dict] = []
+    player_message: str
+
+class ChatResponse(BaseModel):
+    utterance: str
+    mood_shift: str
+
 class ConverseRequest(BaseModel):
     speaker_role: str
     speaker_emotion: str = ""
@@ -194,6 +207,14 @@ async def layer3_dialogue(req: DialogueRequest):
     result = layer3.dialogue(req.role, req.emotion_summary,
                              req.relationship_context, req.recent_events)
     return DialogueResponse(**result)
+
+
+@app.post("/layer3/chat", response_model=ChatResponse)
+async def layer3_chat(req: ChatRequest):
+    result = layer3.chat(req.role, req.npc_name, req.emotion_summary,
+                          req.relationship_context, req.recent_events,
+                          req.conversation_history, req.player_message)
+    return ChatResponse(**result)
 
 
 @app.post("/layer3/converse", response_model=ConverseResponse)
