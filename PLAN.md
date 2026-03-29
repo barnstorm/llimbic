@@ -213,7 +213,7 @@ Uses pre-existing assets from joonspk-research/generative_agents: a pre-rendered
 
 ## 7. Presentation Video (Updated)
 - **Depends on:** 5, 6
-- **Status:** pending
+- **Status:** done
 - **Targets:** test/presentation.gd, screenshots/presentation/gameplay.mp4
 - **Goal:** Create a ~30-second cinematic video showcasing the object knowledge system in action.
 - **Requirements:**

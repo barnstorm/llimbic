@@ -125,3 +125,20 @@
 - Debug overlay shows object IDs in plan chunks via `[object_id]` suffix, and EXAMINE action in purple.
 - `memory.add_object_knowledge()` has a `reliable` parameter (bool) set true when the source NPC's trust > 0.6.
 - Social propagation enriches conversation context with `get_object_dialogue_context()` so LLM-generated dialogue can reference discovered objects.
+
+## Task 7: Presentation Video (Updated — Object Knowledge)
+
+### What worked
+- Keyframe-based camera system from Task 4 reused and extended for object-focused cinematic
+- Tracking NPCs by role (`_find_npc_by_role`) to focus on specific object discovery events (Greta/broken forge, Edith/empty basket, Hugo/empty ale barrel)
+- Direct manipulation of debug overlay (`_active`, `visible`, `_selected_npc`) continues to work for SceneTree scripts
+- `_find_conversing_pair()` checks `_externally_locked` on NPCs to detect active conversations
+- Boosting `social_need = 60.0` on all NPCs at startup increases probability of social propagation conversations during the video window
+- Slowing `time_scale` to 3.0 during social propagation phase gives more real-time ticks for conversation pulses (5s interval)
+- Non-default state objects (bakery_basket_01=empty, smith_forge_01=broken, inn_ale_barrel_01=empty) trigger immediate concern injection + replan, visible in first few seconds of simulation
+
+### Technical details
+- Social propagation pulse interval is 5 real seconds; conversations require NPCs within 64px, both social_need > 30, willingness to interrupt
+- `_externally_locked` is true during active conversations — reliable proxy for detecting conversing NPCs
+- ffmpeg frame extraction: `ffmpeg -ss {seconds} -i video.mp4 -frames:v 1 output.png` for VQA keyframes
+- Video output: 3.6MB MP4 (CRF 28, slow preset) for 30s at 1280px — well under 50MB limit
