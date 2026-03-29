@@ -18,7 +18,8 @@ func _build_nav_grid() -> void:
 	astar.reserve_space(map_width * map_height)
 
 	# Load collision map (140x100 grayscale, white=blocked)
-	var img: Image = Image.load_from_file("res://assets/img/collision_map.png")
+	var tex: Texture2D = load("res://assets/img/collision_map.png")
+	var img: Image = tex.get_image()
 	if img == null:
 		push_error("Failed to load collision_map.png")
 		return

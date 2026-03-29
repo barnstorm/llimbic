@@ -273,6 +273,59 @@ class Layer3Model:
         }
         return fallbacks.get(role, {"intent": "greet", "utterance": "Hello there."})
 
+    def converse(self, speaker_role: str, speaker_emotion: str,
+                 listener_role: str, listener_emotion: str,
+                 shared_context: str, speaker_recent: list[str]) -> dict:
+        """
+        Generate NPC-to-NPC conversation: speaker says something to listener.
+        Returns intent, utterance, and optional topic (event being shared).
+        """
+        events_str = "; ".join(speaker_recent[-3:]) if speaker_recent else "nothing notable"
+
+        prompt = (
+            f"You are a {speaker_role} NPC talking to a {listener_role} in a medieval town.\n"
+            f"Your emotional state: {speaker_emotion}\n"
+            f"The {listener_role} seems: {listener_emotion}\n"
+            f"Context: {shared_context}\n"
+            f"Things you know: {events_str}\n\n"
+            f"Output a JSON object with:\n"
+            f'"intent": one word (gossip, warn, greet, ask, complain, share, joke, inform)\n'
+            f'"utterance": one short sentence (max 15 words) spoken to the {listener_role}\n'
+            f'"topic": what you are talking about in 5 words or less\n\n'
+            f"Output ONLY valid JSON."
+        )
+
+        raw = self._generate(prompt, max_new_tokens=80, temperature=0.5)
+
+        try:
+            json_match = re.search(r'\{[^{}]*\}', raw)
+            if json_match:
+                data = json.loads(json_match.group())
+                return {
+                    "intent": str(data.get("intent", "greet"))[:20],
+                    "utterance": str(data.get("utterance", "Good day."))[:100],
+                    "topic": str(data.get("topic", "small talk"))[:50],
+                }
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Fallback based on role combinations
+        fallbacks = {
+            "Gossip": f"Did you hear what happened at the {listener_role.lower()}'s place?",
+            "Guard": f"Keep your eyes open, {listener_role}.",
+            "Baker": f"Want some bread, {listener_role}?",
+            "Farmer": "Weather's been good for the crops.",
+            "Innkeeper": "Business has been steady lately.",
+            "Courier": "I've got news from the road.",
+            "Herbalist": "The herbs are growing well this season.",
+            "Blacksmith": "I've been busy at the forge.",
+        }
+        return {
+            "intent": "greet",
+            "utterance": fallbacks.get(speaker_role, f"Hello, {listener_role}."),
+            "topic": "small talk",
+        }
+
     def get_location_tile(self, location_name: str) -> list[int] | None:
         """Get tile coordinates for a named location."""
         loc = TOWN_LOCATIONS.get(location_name)

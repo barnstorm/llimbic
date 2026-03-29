@@ -79,6 +79,19 @@ func layer3_dialogue(role: String, emotion_summary: String, relationship_context
 	_enqueue(request_id, "/layer3/dialogue", body, callback)
 	return request_id
 
+func layer3_converse(speaker_role: String, speaker_emotion: String, listener_role: String, listener_emotion: String, shared_context: String, speaker_recent: Array, callback: Callable) -> String:
+	var request_id: String = _next_id()
+	var body: Dictionary = {
+		"speaker_role": speaker_role,
+		"speaker_emotion": speaker_emotion,
+		"listener_role": listener_role,
+		"listener_emotion": listener_emotion,
+		"shared_context": shared_context,
+		"speaker_recent": speaker_recent
+	}
+	_enqueue(request_id, "/layer3/converse", body, callback)
+	return request_id
+
 func is_server_available() -> bool:
 	return _server_available
 

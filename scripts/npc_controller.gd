@@ -19,7 +19,7 @@ var _current_path: PackedVector2Array = PackedVector2Array()
 var _path_index: int = 0
 var _facing: String = "down"
 
-enum State { IDLE, WALKING, ARRIVED, TALKING }
+enum State { IDLE, WALKING, ARRIVED, TALKING, CONVERSING }
 var _state: int = State.IDLE
 
 var _arrived_timer: float = 0.0
@@ -145,11 +145,10 @@ func _physics_process(delta: float) -> void:
 	if brain == null:
 		return
 
-	# Count nearby NPCs
-	_nearby_npc_count = 0
-	for npc in get_tree().get_nodes_in_group("npcs"):
-		if npc != self and global_position.distance_to(npc.global_position) < 64.0:
-			_nearby_npc_count += 1
+	# Perception: FOV vision + hearing (replaces simple proximity)
+	var all_npcs: Array = get_tree().get_nodes_in_group("npcs")
+	brain.update_perception(_facing, global_position, all_npcs)
+	_nearby_npc_count = brain.get_visible_npc_count()
 
 	# Layer 1: every tick
 	brain.update_layer1(delta, global_position, _nearby_npc_count)
@@ -174,6 +173,7 @@ func _physics_process(delta: float) -> void:
 			if _state == State.TALKING:
 				_state = State.IDLE
 				_pick_plan_destination()
+			# CONVERSING state is ended by social_propagation, not speech timer
 
 	match _state:
 		State.IDLE:
@@ -186,6 +186,12 @@ func _physics_process(delta: float) -> void:
 				brain.on_chunk_completed()
 				_state = State.IDLE
 		State.TALKING:
+			velocity = Vector2.ZERO
+			if sprite and sprite.sprite_frames:
+				var idle_name: String = "idle_" + _facing
+				if sprite.animation != StringName(idle_name):
+					sprite.play(StringName(idle_name))
+		State.CONVERSING:
 			velocity = Vector2.ZERO
 			if sprite and sprite.sprite_frames:
 				var idle_name: String = "idle_" + _facing
@@ -278,7 +284,7 @@ func interact_with_player() -> void:
 
 func _on_dialogue_received(success: bool, data: Dictionary) -> void:
 	var utterance: String = data.get("utterance", "...")
-	show_speech(utterance)
+	speak(utterance)  # Shows bubble AND broadcasts to nearby NPCs for hearing
 
 func show_speech(text: String) -> void:
 	if _speech_label:
@@ -291,6 +297,40 @@ func get_valence_color() -> Color:
 		return brain.layer2.get_valence_color()
 	return Color(0.9, 0.9, 0.2)  # yellow default
 
-func set_valence_visible(visible: bool) -> void:
+func set_valence_visible(vis: bool) -> void:
 	if _valence_indicator:
-		_valence_indicator.visible = visible
+		_valence_indicator.visible = vis
+
+func face_toward(target_pos: Vector2) -> void:
+	"""Turn to face a position."""
+	var dir: Vector2 = target_pos - global_position
+	if abs(dir.x) > abs(dir.y):
+		_facing = "right" if dir.x > 0 else "left"
+	else:
+		_facing = "down" if dir.y > 0 else "up"
+	if sprite and sprite.sprite_frames:
+		sprite.play(StringName("idle_" + _facing))
+
+func start_conversation(other_npc: Node) -> void:
+	"""Called by social propagation to initiate a face-to-face conversation."""
+	if _state == State.TALKING or _state == State.CONVERSING:
+		return
+	_state = State.CONVERSING
+	velocity = Vector2.ZERO
+	face_toward(other_npc.global_position)
+
+func end_conversation() -> void:
+	"""Called when conversation finishes."""
+	if _state == State.CONVERSING:
+		_state = State.IDLE
+		_pick_plan_destination()
+
+func speak(text: String) -> void:
+	"""Say something out loud. Shows bubble and broadcasts to nearby NPCs for hearing."""
+	show_speech(text)
+	# Broadcast to all NPCs in hearing range
+	for npc in get_tree().get_nodes_in_group("npcs"):
+		if npc == self:
+			continue
+		if npc.brain:
+			npc.brain.hear_speech(npc_name, text, global_position, npc.global_position)

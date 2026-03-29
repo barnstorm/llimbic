@@ -86,6 +86,19 @@ class DialogueResponse(BaseModel):
     intent: str
     utterance: str
 
+class ConverseRequest(BaseModel):
+    speaker_role: str
+    speaker_emotion: str = ""
+    listener_role: str
+    listener_emotion: str = ""
+    shared_context: str = ""
+    speaker_recent: list[str] = []
+
+class ConverseResponse(BaseModel):
+    intent: str
+    utterance: str
+    topic: str
+
 class HealthResponse(BaseModel):
     status: str
     layer2_model: str
@@ -181,6 +194,14 @@ async def layer3_dialogue(req: DialogueRequest):
     result = layer3.dialogue(req.role, req.emotion_summary,
                              req.relationship_context, req.recent_events)
     return DialogueResponse(**result)
+
+
+@app.post("/layer3/converse", response_model=ConverseResponse)
+async def layer3_converse(req: ConverseRequest):
+    result = layer3.converse(req.speaker_role, req.speaker_emotion,
+                              req.listener_role, req.listener_emotion,
+                              req.shared_context, req.speaker_recent)
+    return ConverseResponse(**result)
 
 
 if __name__ == "__main__":

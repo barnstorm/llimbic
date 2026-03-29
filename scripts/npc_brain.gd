@@ -9,6 +9,7 @@ var layer1: RefCounted = null  # Layer1Substrate
 var layer2: RefCounted = null  # Layer2Projection
 var layer3: RefCounted = null  # Layer3Executive
 var memory: RefCounted = null  # MemorySystem
+var perception: RefCounted = null  # Perception (FOV + hearing)
 
 # References
 var _inference_client: Node = null
@@ -37,6 +38,9 @@ func setup(p_name: String, p_role: String) -> void:
 
 	var MemScript: GDScript = load("res://scripts/memory_system.gd")
 	memory = MemScript.new()
+
+	var PercScript: GDScript = load("res://scripts/perception.gd")
+	perception = PercScript.new()
 
 func set_autoloads(inference_client: Node, game_manager: Node) -> void:
 	_inference_client = inference_client
@@ -169,3 +173,51 @@ func on_path_blocked() -> void:
 
 func on_npc_nearby(other_name: String) -> void:
 	memory.add_observation(npc_name, "", "Near " + other_name)
+
+# --- Perception ---
+
+func update_perception(facing: String, my_pos: Vector2, all_npcs: Array) -> void:
+	"""Update FOV vision. Called every tick from npc_controller."""
+	if perception == null:
+		return
+	perception.set_facing(facing)
+
+	# Build entity list for vision check
+	var entities: Array = []
+	for npc in all_npcs:
+		if npc.npc_name == npc_name:
+			continue
+		entities.append({
+			"name": npc.npc_name,
+			"position": npc.global_position,
+			"doing": npc.brain.get_current_action() if npc.brain else "",
+			"facing": npc._facing if "_facing" in npc else "",
+		})
+
+	perception.update_vision(my_pos, entities)
+
+	# Record observations for newly seen NPCs
+	for seen in perception.visible_entities:
+		var doing: String = seen.get("doing", "")
+		memory.add_observation(seen["name"], "", doing if doing != "" else "walking")
+
+	# Process anything heard this tick
+	var heard: Array = perception.consume_heard()
+	for evt in heard:
+		memory.add_tagged_event(
+			"Heard %s say: %s" % [evt["source"], evt["text"]],
+			0.4,
+			["heard", "overheard"],
+			evt["source"]
+		)
+
+func hear_speech(source_name: String, text: String, source_pos: Vector2, my_pos: Vector2) -> void:
+	"""Called when someone speaks nearby. Omnidirectional hearing check."""
+	if perception == null:
+		return
+	perception.hear(source_name, text, source_pos, my_pos)
+
+func get_visible_npc_count() -> int:
+	if perception:
+		return perception.visible_entities.size()
+	return 0

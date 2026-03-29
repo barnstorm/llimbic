@@ -15,6 +15,7 @@ var _memory_label: Label = null
 var _modulation_label: Label = null
 var _l1_bars: Array = []  # [{label: Label, bar: ColorRect, bg: ColorRect}]
 var _l2_cells: Array = []  # ColorRect[27]
+var _fov_draw_node: Node2D = null  # Draws FOV cones in world space
 
 # Emotion labels for heatmap tooltips
 const EMOTION_LABELS: Array[String] = [
@@ -30,6 +31,22 @@ func _ready() -> void:
 	layer = 10
 	_build_ui()
 	visible = false
+	# Create a Node2D in the main scene for drawing FOV cones in world space
+	call_deferred("_setup_fov_drawing")
+
+func _setup_fov_drawing() -> void:
+	var main: Node = null
+	for child in get_tree().root.get_children():
+		if child.name == "Main":
+			main = child
+			break
+	if main:
+		_fov_draw_node = Node2D.new()
+		_fov_draw_node.name = "FOVDraw"
+		_fov_draw_node.z_index = 10
+		_fov_draw_node.visible = false
+		_fov_draw_node.draw.connect(_draw_fov_cones)
+		main.add_child(_fov_draw_node)
 
 func _input(event: InputEvent) -> void:
 	if event.is_action_pressed("toggle_debug"):
@@ -320,3 +337,26 @@ func _update_npc_indicators() -> void:
 	for npc in get_tree().get_nodes_in_group("npcs"):
 		if npc.has_method("set_valence_visible"):
 			npc.set_valence_visible(_active)
+	# Toggle FOV drawing
+	if _fov_draw_node:
+		_fov_draw_node.visible = _active
+		_fov_draw_node.queue_redraw()
+
+func _draw_fov_cones() -> void:
+	"""Draw FOV cones for all NPCs (or just selected) in world space."""
+	if not _active or _fov_draw_node == null:
+		return
+	for npc in get_tree().get_nodes_in_group("npcs"):
+		if npc.brain == null or npc.brain.perception == null:
+			continue
+		var points: PackedVector2Array = npc.brain.perception.get_fov_cone_points(npc.global_position)
+		if points.size() < 3:
+			continue
+		# Draw filled cone with transparency
+		var color: Color = npc.get_valence_color() if npc.has_method("get_valence_color") else Color.YELLOW
+		color.a = 0.12
+		_fov_draw_node.draw_colored_polygon(points, color)
+		# Draw cone outline
+		color.a = 0.35
+		for i in range(points.size() - 1):
+			_fov_draw_node.draw_line(points[i], points[i + 1], color, 1.0)
