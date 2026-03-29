@@ -93,9 +93,12 @@ func _ready() -> void:
 	# Add to npcs group for easy lookup
 	add_to_group("npcs")
 
-	# Start first plan chunk
+	# Stagger startup so NPCs don't all hit the server at once
+	_l2_timer = randf_range(0.0, 2.0)
 	_state = State.IDLE
-	_pick_plan_destination()
+	# Delay first plan request by a random amount per NPC
+	var stagger: float = randf_range(0.5, 5.0)
+	get_tree().create_timer(stagger).timeout.connect(_pick_plan_destination)
 
 func _on_nav_ready() -> void:
 	_nav_ready = true

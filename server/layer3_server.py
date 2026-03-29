@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import uvicorn
 
-_executor = ThreadPoolExecutor(max_workers=2)
+_executor = ThreadPoolExecutor(max_workers=4)
 sys.path.insert(0, os.path.dirname(__file__))
 
 from layer3_model import Layer3Model
