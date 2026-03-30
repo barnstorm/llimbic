@@ -231,3 +231,56 @@
 - L2 server (port 8420) still runs but unused — projection and modulation are both deterministic GDScript now
 - `update_layer2()` in npc_brain.gd is now a no-op — L2 runs inside `update_layer1()` via `layer2.update_deterministic()`
 - The `_l2_timer` in npc_controller.gd was removed — no separate L2 cadence needed
+
+## Task 10: Perception Foundation — OccluderSystem + SensorSystem
+
+### Architecture
+- OccluderSystem (autoload): extracts wall boundary line segments from collision_map.png using edge detection on horizontal and vertical tile boundaries. Merges collinear edges into runs. Stores in spatial grid (10-tile cells) for fast lookup.
+- SensorSystem (autoload): two-phase vision queries. Phase 1: range + arc broad-phase reject. Phase 2: analytical line-segment intersection raycast against occluder segments — no physics engine dependency.
+- SensorProfile: per-actor sensor config loaded from persona JSON `sensor_profile` section, with sensible defaults (96px range, 90deg arc).
+- SensoryResultTypes: factory functions for VisionResult and HearingResult dictionaries, plus standard sample point offsets.
+
+### What worked
+- Edge detection on tile boundaries (blocked vs walkable transitions) produces clean wall segments. Map edge treated as blocked for boundary detection.
+- Merging collinear edges into runs reduced segment count: 1148 segments from 140x100 map (vs potential thousands of individual tile edges).
+- Parametric cross-product line-segment intersection with epsilon margins (0.001-0.999) avoids edge-touching false positives.
+- Spatial grid with 10-tile (320px) cells provides fast broad-phase: center-of-map rect query returns ~53 candidate segments.
+- Multi-sample raycasting (5 body points for actors, 1 for objects) gives graded exposure values — partial visibility when some samples hit but others are blocked.
+
+### Technical details
+- OccluderSystem autoloads after WorldObjectRegistry in project.godot. SensorSystem autoloads after OccluderSystem.
+- Segment format: `{start: Vector2, end: Vector2, blocks_vision: bool, sound_damping: float, tags: Array}`
+- Grid uses `Vector2i` keys for cells. `get_segment_indices_in_rect()` returns deduplicated indices for ray testing.
+- Vision test at town_square (2096,800) showed 80% exposure for 48px-apart targets — one sample clipped a nearby wall edge. This is correct behavior (partial occlusion).
+- Wall-blocked vision test (through building walls) correctly returned 0% exposure.
+- Actor sample offsets: center + top(0,-8) + left(-10,0) + right(10,0) + bottom(0,8). Object: center only.
+- `_segments_intersect()` is a static method for reuse. Uses parametric t,u in (0.001, 0.999) range.
+- Persona JSON can optionally include `sensor_profile` dict to customize per-NPC vision range, arc, offsets. Falls back to defaults if absent.
+
+## Task 11: StimulusRegistry + Hearing Pipeline
+
+### Architecture
+- StimulusRegistry (autoload): manages world stimuli with spatial grid (320px cells). Each stimulus has position, radius, strength, duration, tags, emitter_id. Transient stimuli auto-expire via `_process()`.
+- SensorSystem gained `query_hearing()` and `query_hearing_all()` for analog hearing with sound attenuation through occluders.
+- 3-ray occlusion: center ray + two perpendicular offset rays (12px spread). Best (least occluded) ray wins. Each wall segment's `sound_damping` (0.8 default) reduces signal multiplicatively: `factor *= (1 - damping)`.
+- Speech stimuli emitted via `npc_controller.speak()` instead of direct `perception.hear()` calls. Player speech emitted via interaction_system.gd.
+- Footstep stimuli emitted from `_follow_path()` every 0.8s while NPC is moving (radius=48px, strength=0.15, duration=0.5s).
+
+### What worked
+- Spatial grid in StimulusRegistry provides fast broad-phase for range queries, same pattern as OccluderSystem.
+- Best-of-3-rays approach for sound occlusion: avoids edge cases where a single ray grazes a wall corner, while keeping computation cheap.
+- Distance falloff `1.0 - dist/radius` (linear) gives natural attenuation without complex physics.
+- Uncertainty in estimated_source_pos: `randf_range(-uncertainty, uncertainty)` proportional to `(1 - clarity) * radius * 0.5` — faint sounds are poorly localized, clear sounds are precise.
+- `_direction_to_name()` static method on npc_brain converts direction vectors to compass names for memory events ("heard something to the east").
+
+### Technical details
+- StimulusRegistry autoloads after OccluderSystem and before SensorSystem in project.godot.
+- SensorSystem finds StimulusRegistry in `_ready()` via root children iteration.
+- npc_brain gains `_sensor_system` and `_sensor_profile` via `set_sensor_autoloads()`, called from npc_controller after brain setup.
+- Hearing pipeline in `update_perception()`: if `_sensor_system` is available, uses `query_hearing_all()` batch query. Falls back to legacy `perception.consume_heard()` if not.
+- Speech stimuli carry the speech text (truncated to 60 chars) in the tags array for retrieval by the hearing pipeline.
+- High clarity (>0.6) hearing produces "Heard X say: Y" memory events. Low clarity produces "Heard someone speaking to the east" — uncertain, imprecise.
+- Footsteps only logged in memory when perceived_volume > 0.3 (prevents spam).
+- Wall occlusion confirmed working: positions (3000,1500)->(3200,1500) have 4 wall segments between them, producing 99.8% occlusion loss.
+- Town square area (2096,800) is open space — 0% occlusion between nearby positions, as expected.
+- Semantic distinction preserved: vision is binary+exposure, hearing is analog+uncertain. Vision: "I see Edith." Hearing: "I heard something east of me."

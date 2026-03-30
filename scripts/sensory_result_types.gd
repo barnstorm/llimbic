@@ -22,6 +22,10 @@ static func make_hearing_result() -> Dictionary:
 		"direction": Vector2.ZERO,
 		"occlusion_loss": 0.0,
 		"estimated_source_pos": Vector2.ZERO,
+		"stimulus_id": "",
+		"stimulus_type": "",
+		"emitter_id": "",
+		"tags": [],
 	}
 
 static func actor_sample_offsets() -> Array:

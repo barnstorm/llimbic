@@ -20,6 +20,7 @@ NavigationManager="*res://scripts/navigation_manager.gd"
 InferenceClient="*res://scripts/inference_client.gd"
 WorldObjectRegistry="*res://scripts/world_object_registry.gd"
 OccluderSystem="*res://scripts/occluder_system.gd"
+StimulusRegistry="*res://scripts/stimulus_registry.gd"
 SensorSystem="*res://scripts/sensor_system.gd"
 
 [rendering]

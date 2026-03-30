@@ -242,3 +242,67 @@ Uses pre-existing assets from joonspk-research/generative_agents: a pre-rendered
 - **Targets:** data/npcs/*.json, data/locations.json, scripts/persona_loader.gd, scripts/emotion_engine.gd, scripts/layer2_projection.gd, scripts/npc_brain.gd, scripts/layer3_executive.gd, scripts/npc_controller.gd, server/persona_loader.py, server/prompt_builder.py, server/layer3_model.py, server/layer3_server.py, scripts/inference_client.gd
 - **Goal:** Three interconnected changes: (A) NPC identity in JSON persona files as single source of truth, (B) persona-grounded prompt wrappers for all L3 LLM calls, (C) closed L1↔L2↔L3 feedback loop with deterministic emotion engine.
 - **Verify:** NPCs load from persona files. L3 prompts include persona preamble. Emotion→drive feedback visible in debug overlay every tick. Urgency replanning fires on frustration spikes.
+
+## 10. Perception Foundation: OccluderSystem + SensorSystem Vision
+- **Depends on:** 1, 5
+- **Status:** done
+- **Targets:** scripts/occluder_system.gd, scripts/sensor_system.gd, scripts/sensor_profile.gd, scripts/sensory_result_types.gd, project.godot
+- **Goal:** Build the shared physical perception layer — occluder geometry extracted from the collision map, observer profiles per actor, and two-phase vision queries with multi-sample line-of-sight raycasting. This replaces the simple angle+range checks with real occlusion.
+- **Requirements:**
+  - **OccluderSystem (autoload):** Extracts wall segments from collision_map.png (140x100 grayscale, white=blocked). Uses marching squares or edge detection to build line segments representing wall boundaries. Each occluder segment has: shape (start/end points), blocks_vision (bool, default true for walls), sound_damping (float, 0.0-1.0, default 0.8 for walls), optional tags (wall, door, window, foliage). Provides `get_occluders_in_rect(rect: Rect2) -> Array` for broad-phase spatial queries. Store segments in a spatial grid (e.g., 10x10 tile cells) for fast lookup.
+  - **SensorProfile (resource/dictionary):** Per-actor sensor configuration: vision_range (default 96px/3 tiles), vision_arc_deg (default 90), eye_offset (Vector2, default Vector2.ZERO), hearing_threshold (default 0.1), hearing_sensitivity (default 1.0), ear_offset (Vector2, default Vector2.ZERO). Loaded from persona JSON (add `sensor_profile` section) with sensible defaults.
+  - **SensoryResultTypes:** VisionResult dictionary: {visible: bool, distance: float, exposure: float (0-1 fraction of visible samples), confidence: float, sample_hits: int, sample_total: int, blocked_by: Array of occluder tags, last_visible_point: Vector2}. HearingResult dictionary: {heard: bool, perceived_volume: float, clarity: float, distance: float, direction: Vector2, occlusion_loss: float, estimated_source_pos: Vector2}.
+  - **SensorSystem (autoload):** `query_vision(observer_pos: Vector2, observer_facing: Vector2, profile: Dictionary, target_pos: Vector2, target_sample_points: Array[Vector2]) -> Dictionary` (VisionResult). Two-phase pipeline: (1) Broad phase: range check + facing arc check, reject cheaply. (2) Narrow phase: raycast from observer eye_offset to each target sample point (center + 4 body offsets for actors, center-only for objects). A ray succeeds if it doesn't intersect any vision-blocking occluder segment. Visible if ANY sample hits. Exposure = hits/total. Confidence = exposure * (1.0 - distance/range).
+  - **Analytical raycasting:** Line-segment intersection against occluder segments. No physics engine dependency. For each ray, query OccluderSystem spatial grid for candidate segments along the ray path, test intersection with each.
+  - **Target sample points for actors:** center + 4 offsets (top ±8px, left ±10px, right ±10px, bottom). For objects: center only.
+  - **Decision locks:** Any visible sample = visible. Explicit occluder data (not scene traversal). Consumers receive graded results.
+- **Verify:** Screenshot shows game running normally (no regression). Print output confirms OccluderSystem loaded N wall segments from collision map. A test call to `SensorSystem.query_vision()` from an NPC position toward another NPC returns a valid VisionResult with exposure > 0 when unobstructed and exposure = 0 when a wall intervenes.
+
+## 11. StimulusRegistry + Hearing Pipeline
+- **Depends on:** 10
+- **Status:** done
+- **Targets:** scripts/stimulus_registry.gd, scripts/sensor_system.gd, scripts/sensory_result_types.gd, project.godot
+- **Goal:** Build the stimulus system for world-emitted events (speech, footsteps, presence) and add hearing queries to SensorSystem with sound attenuation through occluders.
+- **Requirements:**
+  - **StimulusRegistry (autoload):** Manages active world stimuli. Each stimulus: {id: String, type: String (visual_presence/speech/footstep/impact), position: Vector2, radius: float, strength: float (0-1), duration: float (seconds, -1 for persistent), tags: Array, emitter_id: String, created_at: int (ticks)}. Methods: `emit(type, position, radius, strength, duration, tags, emitter_id) -> String` (returns id), `remove(id)`, `get_stimuli_in_range(pos, radius) -> Array`, `tick(delta)` (removes expired stimuli). Spatial grid for fast range queries. Persistent stimuli (visual_presence) updated by actors each tick. Transient stimuli (speech, footstep, impact) auto-expire.
+  - **Hearing query on SensorSystem:** `query_hearing(listener_pos: Vector2, profile: Dictionary, stimulus: Dictionary) -> Dictionary` (HearingResult). Broad phase: check if stimulus within max effective radius (stimulus.radius * stimulus.strength / profile.hearing_threshold). Narrow phase: cast 1-3 rays from stimulus position to listener. Each occluder segment along the ray reduces signal by its sound_damping factor (multiplicative, not additive). Final perceived_volume = stimulus.strength * distance_falloff * occlusion_factor. Heard if perceived_volume >= profile.hearing_threshold. Clarity = perceived_volume / stimulus.strength. Direction = normalized vector from listener to stimulus. Estimated_source_pos = stimulus.position + random offset proportional to (1.0 - clarity) — uncertain hearing produces imprecise localization.
+  - **Batch query:** `query_hearing_all(listener_pos, profile) -> Array[Dictionary]` — queries all stimuli in range, returns only heard results. Uses StimulusRegistry.get_stimuli_in_range() for broad phase.
+  - **Speech integration:** When NPCs speak (social propagation conversations, player interaction), emit a speech stimulus via StimulusRegistry instead of directly calling perception.hear().
+  - **Footstep stimuli:** NPCs emit footstep stimuli while moving (low strength, small radius).
+  - **Semantic choice:** Vision is binary+exposure. Hearing is analog+uncertain. Vision yields "I see Edith." Hearing yields "I heard something east of me."
+- **Verify:** Print output confirms StimulusRegistry tracks active stimuli. A speech stimulus emitted at one position is heard by a nearby listener with appropriate volume. A wall between source and listener reduces perceived_volume. Estimated_source_pos has uncertainty proportional to occlusion.
+
+## 12. Consumer Migration + Debug Visualization
+- **Depends on:** 11
+- **Status:** pending
+- **Targets:** scripts/npc_brain.gd, scripts/perception.gd, scripts/npc_controller.gd, scripts/debug_overlay.gd, scripts/social_propagation.gd, scripts/interaction_system.gd, scripts/player_controller.gd
+- **Goal:** Migrate all perception consumers (NPC brain, social propagation, interaction system, player) to use SensorSystem queries instead of direct cone checks. Reduce perception.gd to a local result cache. Add debug visualization for vision rays and hearing.
+- **Requirements:**
+  - **perception.gd refactor:** Remove all FOV cone math. Becomes a thin cache: stores last VisionResult per entity, last HearingResult per stimulus. Updated by brain from SensorSystem query results. Retains facing_vector for SensorSystem calls.
+  - **NPCBrain migration:** `update_perception()` calls `SensorSystem.query_vision()` for each candidate entity/object (using StimulusRegistry for candidates + direct NPC/player list). Stores graded VisionResults. Uses exposure/confidence for salience instead of binary visible/not-visible. Object perception uses same pipeline. Memory events now include confidence level.
+  - **Hearing migration:** Brain calls `SensorSystem.query_hearing_all()` each tick. Processes HearingResults: high-clarity results create "Heard X say Y" events, low-clarity results create "Heard something from the east" events. Direction and estimated_source_pos feed into memory for spatial awareness.
+  - **Social propagation:** Uses SensorSystem.query_vision() to check mutual visibility before initiating conversation (replaces direct perception.visible_entities check).
+  - **Interaction system:** Player proximity check can optionally use SensorSystem for consistency.
+  - **Brain contract:** npc_brain.gd NEVER computes visibility/audibility directly. All perception goes through SensorSystem. Brain receives graded results, not raw rays.
+  - **Debug visualization:** Extend debug overlay with: (1) Vision rays from selected NPC to visible targets (green=hit, red=blocked, with sample points shown). (2) Hearing indicators: arcs showing sound direction, volume meters. (3) Occluder segments visible as semi-transparent lines when debug active. (4) Active stimuli shown as pulsing circles. Debug output reflects real queries — same code path as gameplay.
+  - **Player sensor profile:** Player gets an ObserverProfile too, enabling future player-side perception features (hearing indicators, visibility feedback).
+  - **Backward compatibility:** All existing behavior preserved — NPCs still see entities, discover objects, hear speech. The results are now richer (graded exposure, uncertain hearing) but the downstream effects (memory events, social propagation, planning) continue working.
+- **Verify:** Screenshot shows debug overlay with vision rays from selected NPC to nearby entities (green lines to visible targets, red to occluded). Hearing direction indicators visible. Occluder segments drawn as overlay. NPCs behave comparably to before — walking routes, social interactions, object discovery all functional. An NPC behind a wall is NOT visible (exposure=0). An NPC in the open IS visible with exposure>0.
+
+## 13. Presentation Video (Perception System)
+- **Depends on:** 10, 11, 12
+- **Status:** pending
+- **Targets:** test/presentation.gd, screenshots/presentation/gameplay.mp4
+- **Goal:** Create a ~30-second cinematic video showcasing the new shared perception system.
+- **Requirements:**
+  - Write test/presentation.gd — a SceneTree script (extends SceneTree)
+  - ~900 frames at 30 FPS (30 seconds)
+  - Use Video Capture from godot-capture (AVI via --write-movie, convert to MP4 with ffmpeg)
+  - Output: screenshots/presentation/gameplay.mp4
+  - Show debug overlay with vision rays tracing from an NPC through open space (green) and being blocked by walls (red)
+  - Show an NPC losing sight of another NPC as they walk behind a building
+  - Show hearing: a speech stimulus propagating, one NPC hearing clearly (close), another hearing with uncertainty (far/occluded)
+  - Show occluder segments overlaid on the map
+  - Show the graded exposure/confidence values changing in the debug panel as an NPC partially emerges from cover
+  - Smooth camera transitions, 2D pans and zooms
+- **Verify:** A smooth MP4 video showing vision raycasting, occlusion, hearing attenuation, and debug visualization with no visual glitches.

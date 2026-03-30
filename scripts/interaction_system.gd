@@ -212,13 +212,22 @@ func _send_player_message(text: String) -> void:
 	_add_message_bubble("Player", text, true)
 	_input_field.text = ""
 
-	# Broadcast player speech to nearby NPCs for hearing
+	# Broadcast player speech as a stimulus
 	if _player:
-		for npc in get_tree().get_nodes_in_group("npcs"):
-			if npc == _active_npc:
-				continue
-			if npc.brain:
-				npc.brain.hear_speech("Player", text, _player.global_position, npc.global_position)
+		var stim_reg: Node = null
+		for child in get_tree().root.get_children():
+			if child.name == "StimulusRegistry":
+				stim_reg = child
+				break
+		if stim_reg:
+			stim_reg.emit("speech", _player.global_position, 160.0, 0.8, 4.0, ["speech", "player", text.substr(0, 60)], "Player")
+		else:
+			# Fallback: direct hearing broadcast
+			for npc in get_tree().get_nodes_in_group("npcs"):
+				if npc == _active_npc:
+					continue
+				if npc.brain:
+					npc.brain.hear_speech("Player", text, _player.global_position, npc.global_position)
 
 	# Request NPC reply
 	_waiting_for_reply = true

@@ -15,6 +15,7 @@ var _nav_manager: Node = null
 var _game_manager: Node = null
 var _inference_client: Node = null
 var _world_object_registry: Node = null
+var _stimulus_registry: Node = null
 var _nav_ready: bool = false
 var _facing: String = "down"
 
@@ -43,6 +44,10 @@ var _valence_indicator: Node2D = null
 # Layer 2 update timer
 var _l2_timer: float = 0.0
 
+# Footstep stimulus state
+var _footstep_timer: float = 0.0
+var _footstep_interval: float = 0.8  # emit footstep every 0.8s while moving
+
 # Nearby NPC tracking
 var _nearby_npc_count: int = 0
 
@@ -56,6 +61,8 @@ func _ready() -> void:
 			_inference_client = child
 		elif child.name == "WorldObjectRegistry":
 			_world_object_registry = child
+		elif child.name == "StimulusRegistry":
+			_stimulus_registry = child
 
 	if _nav_manager:
 		if _nav_manager.has_signal("navigation_ready"):
@@ -75,6 +82,14 @@ func _ready() -> void:
 	brain = BrainScript.new()
 	brain.setup(npc_name, role)
 	brain.set_autoloads(_inference_client, _game_manager, _world_object_registry)
+	# Pass SensorSystem for hearing pipeline
+	var _sensor_system_node: Node = null
+	for child in get_tree().root.get_children():
+		if child.name == "SensorSystem":
+			_sensor_system_node = child
+			break
+	if _sensor_system_node:
+		brain.set_sensor_autoloads(_sensor_system_node)
 
 	# Speech bubble
 	_speech_label = Label.new()
@@ -292,6 +307,12 @@ func _follow_path(delta: float, speed_mul: float) -> void:
 		var actual_dist: float = global_position.distance_to(pos_before)
 		brain.layer1.update_progress(delta, speed * speed_mul, actual_dist)
 
+	# Emit footstep stimuli while moving
+	_footstep_timer += delta
+	if _footstep_timer >= _footstep_interval:
+		_footstep_timer = 0.0
+		emit_footstep()
+
 func _do_wander(delta: float, action: Dictionary) -> void:
 	_wander_timer -= delta
 	if _wander_timer <= 0.0 or _current_path.is_empty():
@@ -377,10 +398,26 @@ func end_conversation() -> void:
 	_current_path = PackedVector2Array()  # force re-path on next action
 
 func speak(text: String) -> void:
-	## Say something out loud. Shows bubble and broadcasts to nearby NPCs for hearing.
+	## Say something out loud. Shows bubble and emits a speech stimulus.
+	## Nearby NPCs hear via StimulusRegistry + SensorSystem hearing pipeline.
 	show_speech(text)
-	for npc in get_tree().get_nodes_in_group("npcs"):
-		if npc == self:
-			continue
-		if npc.brain:
-			npc.brain.hear_speech(npc_name, text, global_position, npc.global_position)
+	if _stimulus_registry:
+		_stimulus_registry.emit(
+			"speech", global_position, 160.0, 0.8, 4.0,
+			["speech", "dialogue", text.substr(0, 60)], npc_name
+		)
+	else:
+		# Fallback: direct hearing broadcast (no stimulus system)
+		for npc in get_tree().get_nodes_in_group("npcs"):
+			if npc == self:
+				continue
+			if npc.brain:
+				npc.brain.hear_speech(npc_name, text, global_position, npc.global_position)
+
+func emit_footstep() -> void:
+	## Emit a low-strength footstep stimulus while moving.
+	if _stimulus_registry:
+		_stimulus_registry.emit(
+			"footstep", global_position, 48.0, 0.15, 0.5,
+			["footstep"], npc_name
+		)

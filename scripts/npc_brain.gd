@@ -108,10 +108,19 @@ func npc_log(msg: String) -> void:
 		_log_file.store_line(line)
 		_log_file.flush()
 
+var _sensor_system: Node = null
+var _sensor_profile: Dictionary = {}
+
 func set_autoloads(inference_client: Node, game_manager: Node, world_object_registry: Node = null) -> void:
 	_inference_client = inference_client
 	_game_manager = game_manager
 	_world_object_registry = world_object_registry
+
+func set_sensor_autoloads(sensor_system: Node) -> void:
+	_sensor_system = sensor_system
+	# Build sensor profile from persona
+	var SPScript: GDScript = load("res://scripts/sensor_profile.gd")
+	_sensor_profile = SPScript.from_persona(_persona)
 
 # Urgency replan state
 var _urgency_replan_cooldown: float = 0.0
@@ -732,15 +741,81 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 		perception.update_object_vision(my_pos, all_objects)
 		_process_visible_objects()
 
-	# Process anything heard this tick
-	var heard: Array = perception.consume_heard()
-	for evt in heard:
-		memory.add_tagged_event(
-			"Heard %s say: %s" % [evt["source"], evt["text"]],
-			0.4,
-			["heard", "overheard"],
-			evt["source"]
-		)
+	# --- Hearing via StimulusRegistry + SensorSystem ---
+	if _sensor_system != null and not _sensor_profile.is_empty():
+		var hearing_results: Array = _sensor_system.query_hearing_all(my_pos, _sensor_profile)
+		for hr in hearing_results:
+			var stim_type: String = hr.get("stimulus_type", "")
+			var emitter: String = hr.get("emitter_id", "")
+			var tags: Array = hr.get("tags", [])
+			var vol: float = hr.get("perceived_volume", 0.0)
+			var clarity: float = hr.get("clarity", 0.0)
+			var est_pos: Vector2 = hr.get("estimated_source_pos", Vector2.ZERO)
+			var direction: Vector2 = hr.get("direction", Vector2.ZERO)
+
+			if emitter == npc_name:
+				continue  # don't hear ourselves
+
+			if stim_type == "speech":
+				# Extract speech text from tags (last tag if it's dialogue content)
+				var speech_text: String = ""
+				for tag in tags:
+					if tag != "speech" and tag != "dialogue" and tag != "player":
+						speech_text = tag
+						break
+				if clarity > 0.6:
+					memory.add_tagged_event(
+						"Heard %s say: %s" % [emitter, speech_text],
+						0.4 * vol,
+						["heard", "overheard"],
+						emitter
+					)
+				else:
+					# Low clarity: uncertain hearing — "heard something"
+					var dir_name: String = _direction_to_name(direction)
+					memory.add_tagged_event(
+						"Heard someone speaking %s of me" % dir_name,
+						0.2 * vol,
+						["heard", "uncertain"],
+						""
+					)
+			elif stim_type == "footstep":
+				# Footsteps only noticed at moderate volume (not always logged)
+				if vol > 0.3:
+					var dir_name: String = _direction_to_name(direction)
+					memory.add_tagged_event(
+						"Heard footsteps %s of me" % dir_name,
+						0.15 * vol,
+						["heard", "footstep", "uncertain"],
+						""
+					)
+			elif stim_type == "impact":
+				var dir_name: String = _direction_to_name(direction)
+				var salience: float = 0.5 * vol
+				if clarity > 0.5:
+					memory.add_tagged_event(
+						"Heard a loud noise from %s's direction" % emitter if emitter != "" else "Heard a loud noise %s of me" % dir_name,
+						salience,
+						["heard", "impact"],
+						emitter
+					)
+				else:
+					memory.add_tagged_event(
+						"Heard something %s of me" % dir_name,
+						salience * 0.5,
+						["heard", "uncertain"],
+						""
+					)
+	else:
+		# Fallback: process anything heard via direct perception.hear() calls
+		var heard: Array = perception.consume_heard()
+		for evt in heard:
+			memory.add_tagged_event(
+				"Heard %s say: %s" % [evt["source"], evt["text"]],
+				0.4,
+				["heard", "overheard"],
+				evt["source"]
+			)
 
 func _process_visible_objects() -> void:
 	"""Process newly visible objects: add to memory, create events for discoveries and state changes."""
@@ -872,10 +947,34 @@ func _find_examinable_object() -> Dictionary:
 	return {}
 
 func hear_speech(source_name: String, text: String, source_pos: Vector2, my_pos: Vector2) -> void:
-	"""Called when someone speaks nearby. Omnidirectional hearing check."""
+	"""Called when someone speaks nearby. Omnidirectional hearing check.
+	Note: With StimulusRegistry active, this is only used as a fallback."""
 	if perception == null:
 		return
 	perception.hear(source_name, text, source_pos, my_pos)
+
+static func _direction_to_name(dir: Vector2) -> String:
+	"""Convert a direction vector to a compass name."""
+	if dir.length_squared() < 0.01:
+		return "nearby"
+	var angle: float = rad_to_deg(dir.angle())
+	# angle: 0=right, 90=down, -90=up, 180/-180=left (Godot 2D coords)
+	if angle >= -22.5 and angle < 22.5:
+		return "to the east"
+	elif angle >= 22.5 and angle < 67.5:
+		return "to the southeast"
+	elif angle >= 67.5 and angle < 112.5:
+		return "to the south"
+	elif angle >= 112.5 and angle < 157.5:
+		return "to the southwest"
+	elif angle >= 157.5 or angle < -157.5:
+		return "to the west"
+	elif angle >= -157.5 and angle < -112.5:
+		return "to the northwest"
+	elif angle >= -112.5 and angle < -67.5:
+		return "to the north"
+	else:
+		return "to the northeast"
 
 func get_visible_npc_count() -> int:
 	if perception:

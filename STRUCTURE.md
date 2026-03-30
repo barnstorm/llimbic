@@ -223,6 +223,59 @@
 ### CameraController
 - **File:** res://scripts/camera_controller.gd
 
+### OccluderSystem (autoload)
+- **File:** res://scripts/occluder_system.gd
+- **Extends:** Node
+- Extracts wall boundary line segments from collision_map.png (140x100 grayscale)
+- Edge detection on horizontal/vertical tile boundaries, merges collinear runs
+- 1148 wall segments stored in spatial grid (10-tile cells) for fast lookup
+- `get_occluders_in_rect(rect: Rect2) -> Array` — broad-phase spatial query returning segment dicts
+- `get_segment_indices_in_rect(rect: Rect2) -> Array` — returns deduplicated indices for ray testing
+- Segment format: `{start: Vector2, end: Vector2, blocks_vision: bool, sound_damping: float, tags: Array}`
+
+### StimulusRegistry (autoload)
+- **File:** res://scripts/stimulus_registry.gd
+- **Extends:** Node
+- Manages active world stimuli (speech, footsteps, presence, impact) with spatial grid for fast range queries
+- Each stimulus: `{id, type, position, radius, strength, duration, tags, emitter_id, created_at}`
+- `emit(type, position, radius, strength, duration, tags, emitter_id) -> String` — returns stimulus id
+- `remove(id)` — manual removal for persistent stimuli
+- `get_stimuli_in_range(pos, radius) -> Array` — broad-phase spatial grid + narrow-phase distance check
+- `tick(delta)` — auto-removes expired transient stimuli (called in `_process`)
+- Persistent stimuli (duration=-1) must be refreshed/removed manually
+- Speech stimuli: radius=160px, strength=0.8, duration=4s
+- Footstep stimuli: radius=48px, strength=0.15, duration=0.5s
+
+### SensorSystem (autoload)
+- **File:** res://scripts/sensor_system.gd
+- **Extends:** Node
+- Two-phase vision queries with multi-sample line-of-sight raycasting
+- `query_vision(observer_pos, observer_facing, profile, target_pos, target_sample_points) -> Dictionary` (VisionResult)
+- Phase 1 (broad): range check + facing arc check, reject cheaply
+- Phase 2 (narrow): analytical line-segment intersection against OccluderSystem segments — no physics engine dependency
+- VisionResult: `{visible, distance, exposure, confidence, sample_hits, sample_total, blocked_by, last_visible_point}`
+- Actor targets use 5 sample points (center + 4 body offsets), objects use center only
+- **Hearing queries:**
+  - `query_hearing(listener_pos, profile, stimulus) -> Dictionary` (HearingResult) — analog hearing with sound attenuation through occluders
+  - `query_hearing_all(listener_pos, profile) -> Array` — batch query, returns only heard results
+  - Broad phase: max effective radius from stimulus strength / hearing threshold
+  - Narrow phase: 3 rays from source to listener, each occluder's sound_damping reduces signal multiplicatively
+  - HearingResult: `{heard, perceived_volume, clarity, distance, direction, occlusion_loss, estimated_source_pos, stimulus_id, stimulus_type, emitter_id, tags}`
+  - Uncertainty: estimated_source_pos has random offset proportional to (1 - clarity)
+
+### SensorProfile
+- **File:** res://scripts/sensor_profile.gd
+- **Extends:** RefCounted (static methods)
+- Per-actor sensor configuration: vision_range (96px), vision_arc_deg (90), eye_offset, hearing_threshold, hearing_sensitivity, ear_offset
+- `make_default()` — returns default profile dictionary
+- `from_persona(persona)` — loads from persona JSON `sensor_profile` section with fallback to defaults
+
+### SensoryResultTypes
+- **File:** res://scripts/sensory_result_types.gd
+- **Extends:** RefCounted (static methods)
+- Factory functions: `make_vision_result()`, `make_hearing_result()`
+- Sample point offsets: `actor_sample_offsets()` (5 points), `object_sample_offsets()` (center only)
+
 ### WorldMap
 - **File:** res://scripts/world_map.gd
 
@@ -241,6 +294,9 @@
 - NavigationManager = res://scripts/navigation_manager.gd
 - InferenceClient = res://scripts/inference_client.gd
 - WorldObjectRegistry = res://scripts/world_object_registry.gd
+- OccluderSystem = res://scripts/occluder_system.gd
+- StimulusRegistry = res://scripts/stimulus_registry.gd
+- SensorSystem = res://scripts/sensor_system.gd
 
 ## Inference Servers
 
