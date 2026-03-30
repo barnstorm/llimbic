@@ -1,28 +1,9 @@
 extends SceneTree
 ## Scene builder — run: timeout 60 godot --headless --script scenes/build_main.gd
 
-# NPC spawn positions from TMX Spawning Blocks layer (first 8 spawns)
-const SPAWN_POSITIONS: Array[Vector2] = [
-	Vector2(1712, 464),   # Spawn 0
-	Vector2(2320, 464),   # Spawn 1
-	Vector2(528, 592),    # Spawn 2
-	Vector2(816, 592),    # Spawn 3
-	Vector2(1168, 592),   # Spawn 4
-	Vector2(2768, 592),   # Spawn 5
-	Vector2(2992, 592),   # Spawn 6
-	Vector2(2096, 624),   # Spawn 7
-]
-
-const NPC_DATA: Array[Dictionary] = [
-	{"name": "Edith", "role": "Baker", "sheet": "res://assets/characters/Character_RM_002.png"},
-	{"name": "Roland", "role": "Guard", "sheet": "res://assets/characters/Character_RM_003.png"},
-	{"name": "Ivy", "role": "Herbalist", "sheet": "res://assets/characters/Character_RM_004.png"},
-	{"name": "Felix", "role": "Courier", "sheet": "res://assets/characters/Character_RM_005.png"},
-	{"name": "Greta", "role": "Blacksmith", "sheet": "res://assets/characters/Character_RM_006.png"},
-	{"name": "Mabel", "role": "Gossip", "sheet": "res://assets/characters/Character_RM_007.png"},
-	{"name": "Aldric", "role": "Farmer", "sheet": "res://assets/characters/Character_RM_008.png"},
-	{"name": "Hugo", "role": "Innkeeper", "sheet": "res://assets/characters/Character_RM_009.png"},
-]
+# NPC data loaded from persona JSON files at build time
+# Order determines spawn index in the scene
+const NPC_NAMES: Array[String] = ["Edith", "Roland", "Ivy", "Felix", "Greta", "Mabel", "Aldric", "Hugo"]
 
 func _initialize() -> void:
 	print("Generating: main.tscn")
@@ -48,16 +29,21 @@ func _initialize() -> void:
 	npcs.name = "NPCs"
 	root.add_child(npcs)
 
-	# Spawn 8 NPCs
+	# Spawn NPCs from persona data files
 	var npc_scene: PackedScene = load("res://scenes/npc.tscn")
-	for i in range(8):
+	var LoaderScript: GDScript = load("res://scripts/persona_loader.gd")
+	for i in range(NPC_NAMES.size()):
+		var persona: Dictionary = LoaderScript.load_persona(NPC_NAMES[i])
+		if persona.is_empty():
+			push_warning("Skipping NPC %s — persona file not found" % NPC_NAMES[i])
+			continue
 		var npc = npc_scene.instantiate()
-		var data: Dictionary = NPC_DATA[i]
 		npc.name = "NPC_" + str(i)
-		npc.position = SPAWN_POSITIONS[i]
-		npc.set("npc_name", data["name"])
-		npc.set("role", data["role"])
-		npc.set("character_sheet_path", data["sheet"])
+		var sp: Array = persona.get("spawn_position", [2096, 800])
+		npc.position = Vector2(float(sp[0]), float(sp[1]))
+		npc.set("npc_name", persona["name"])
+		npc.set("role", persona["role"])
+		npc.set("character_sheet_path", persona.get("sprite_sheet", "res://assets/characters/Character_RM_002.png"))
 		npcs.add_child(npc)
 
 	# Camera with controller script

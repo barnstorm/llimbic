@@ -1,0 +1,33 @@
+{
+  "name": "Ivy",
+  "role": "Herbalist",
+  "sprite_sheet": "res://assets/characters/Character_RM_004.png",
+  "spawn_position": [528, 592],
+  "home_location": "herbalist_shop",
+  "work_location": "herbalist_shop",
+  "personality": {
+    "traits": ["gentle", "observant", "reclusive"],
+    "speech_style": "soft-spoken and measured, uses plant and nature analogies",
+    "vocabulary": ["remedy", "herb", "root", "tincture", "grow", "season"],
+    "backstory": "Came to town five years ago from the eastern woods. Keeps to herself but will help anyone who asks. Knows every plant within a day's walk."
+  },
+  "schedule": [
+    {"location": "herbalist_shop", "duration": 5.0, "priority": 0.9, "purpose": "Prepare remedies", "object_id": "herb_mortar_01", "object_action": "use"},
+    {"location": "farm", "duration": 2.0, "priority": 0.6, "purpose": "Gather herbs from farm"},
+    {"location": "town_square", "duration": 2.0, "priority": 0.4, "purpose": "Rest and socialize"},
+    {"location": "herbalist_shop", "duration": 4.0, "priority": 0.8, "purpose": "Afternoon treatments", "object_id": "herb_remedy_shelf_01", "object_action": "examine"}
+  ],
+  "emotion_baseline": {"caring": 0.4, "curiosity": 0.3},
+  "drive_defaults": {"energy": 80.0, "hunger": 20.0, "social": 30.0, "safety": 85.0},
+  "neural_biases": [
+    {"src": "sense_loc_familiarity", "dst": "action_observe", "weight": 0.02}
+  ],
+  "night_behavior": {"go_home_hour": 21.0, "override": null},
+  "fallback_dialogue": {
+    "greeting": "Need a remedy? I have fresh stock.",
+    "complaint": "The drying rack is almost bare.",
+    "gossip": "The farmer's herbs are coming in strong this year.",
+    "busy": "Careful — I'm measuring a tincture."
+  },
+  "relationships": {"Aldric": 0.6, "Mabel": 0.4}
+}

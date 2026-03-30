@@ -228,3 +228,17 @@ Uses pre-existing assets from joonspk-research/generative_agents: a pre-rendered
   - Fast-forward to show replanning triggered by object discovery
   - Smooth camera transitions, 2D pans and zooms
 - **Verify:** A smooth MP4 video showing object discovery, knowledge sharing, and object-aware planning with no visual glitches.
+
+## 8. Hebbian Neural Network (Layer 1 Substrate)
+- **Depends on:** 3
+- **Status:** done
+- **Targets:** scripts/hebbian_network.gd, scripts/layer1_substrate.gd, scripts/debug_overlay.gd, scripts/npc_brain.gd
+- **Goal:** Replace hardcoded Layer 1 drive/tendency formulas with a genuine Hebbian neural network with neurogenesis.
+- **Verify:** NPCs behave comparably to before. Debug overlay shows neural network section. Neurogenesis events visible after sustained stress.
+
+## 9. Data-Driven Personas, Prompt Wrappers, Closed Control Loop
+- **Depends on:** 8
+- **Status:** done
+- **Targets:** data/npcs/*.json, data/locations.json, scripts/persona_loader.gd, scripts/emotion_engine.gd, scripts/layer2_projection.gd, scripts/npc_brain.gd, scripts/layer3_executive.gd, scripts/npc_controller.gd, server/persona_loader.py, server/prompt_builder.py, server/layer3_model.py, server/layer3_server.py, scripts/inference_client.gd
+- **Goal:** Three interconnected changes: (A) NPC identity in JSON persona files as single source of truth, (B) persona-grounded prompt wrappers for all L3 LLM calls, (C) closed L1↔L2↔L3 feedback loop with deterministic emotion engine.
+- **Verify:** NPCs load from persona files. L3 prompts include persona preamble. Emotion→drive feedback visible in debug overlay every tick. Urgency replanning fires on frustration spikes.

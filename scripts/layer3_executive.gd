@@ -2,82 +2,23 @@ extends RefCounted
 ## res://scripts/layer3_executive.gd — Layer 3 executive planner via HTTP
 ## Slow cadence: ~every 30 game-minutes
 
-# Town location data: name -> world position (tile center)
-const LOCATIONS: Dictionary = {
-	"bakery": Vector2(1712, 464),
-	"guard_post": Vector2(2320, 464),
-	"herbalist_shop": Vector2(528, 592),
-	"courier_office": Vector2(816, 592),
-	"blacksmith": Vector2(1168, 592),
-	"town_square": Vector2(2096, 800),
-	"market": Vector2(2768, 592),
-	"farm": Vector2(2992, 592),
-	"inn": Vector2(2096, 624),
-	"home_north": Vector2(1712, 464),
-	"home_east": Vector2(2768, 592),
-	"home_south": Vector2(2096, 1200),
-	"home_west": Vector2(528, 592),
-	"well": Vector2(1800, 800),
-	"road_east": Vector2(3500, 800),
-	"road_south": Vector2(2096, 1600)
-}
+# Town location data: name -> world position — loaded from data/locations.json
+static var LOCATIONS: Dictionary = {}
+static var _locations_loaded: bool = false
 
-# Role -> home, work, default schedule
-const ROLE_CONFIG: Dictionary = {
-	"Baker": {"home": "bakery", "work": "bakery", "schedule": [
-		{"location": "bakery", "duration": 6.0, "priority": 0.9, "purpose": "Bake morning bread", "object_id": "bakery_oven_01", "object_action": "use"},
-		{"location": "market", "duration": 3.0, "priority": 0.7, "purpose": "Sell bread at market"},
-		{"location": "town_square", "duration": 2.0, "priority": 0.4, "purpose": "Socialize"},
-		{"location": "bakery", "duration": 4.0, "priority": 0.8, "purpose": "Afternoon baking", "object_id": "bakery_oven_01", "object_action": "use"},
-	]},
-	"Guard": {"home": "guard_post", "work": "guard_post", "schedule": [
-		{"location": "guard_post", "duration": 4.0, "priority": 0.9, "purpose": "Morning watch", "object_id": "guard_weapon_rack_01", "object_action": "examine"},
-		{"location": "town_square", "duration": 2.0, "priority": 0.7, "purpose": "Patrol town square"},
-		{"location": "market", "duration": 2.0, "priority": 0.6, "purpose": "Patrol market"},
-		{"location": "road_east", "duration": 3.0, "priority": 0.8, "purpose": "Check east road"},
-		{"location": "guard_post", "duration": 4.0, "priority": 0.9, "purpose": "Evening watch"},
-	]},
-	"Herbalist": {"home": "herbalist_shop", "work": "herbalist_shop", "schedule": [
-		{"location": "herbalist_shop", "duration": 5.0, "priority": 0.9, "purpose": "Prepare remedies", "object_id": "herb_mortar_01", "object_action": "use"},
-		{"location": "farm", "duration": 2.0, "priority": 0.6, "purpose": "Gather herbs from farm"},
-		{"location": "town_square", "duration": 2.0, "priority": 0.4, "purpose": "Rest and socialize"},
-		{"location": "herbalist_shop", "duration": 4.0, "priority": 0.8, "purpose": "Afternoon treatments", "object_id": "herb_remedy_shelf_01", "object_action": "examine"},
-	]},
-	"Courier": {"home": "courier_office", "work": "courier_office", "schedule": [
-		{"location": "courier_office", "duration": 2.0, "priority": 0.8, "purpose": "Sort deliveries"},
-		{"location": "bakery", "duration": 1.0, "priority": 0.7, "purpose": "Deliver to bakery"},
-		{"location": "blacksmith", "duration": 1.0, "priority": 0.7, "purpose": "Deliver to blacksmith"},
-		{"location": "inn", "duration": 1.0, "priority": 0.6, "purpose": "Deliver to inn"},
-		{"location": "market", "duration": 2.0, "priority": 0.5, "purpose": "Check for packages"},
-		{"location": "road_east", "duration": 3.0, "priority": 0.8, "purpose": "Long distance delivery"},
-		{"location": "courier_office", "duration": 2.0, "priority": 0.7, "purpose": "End of day sorting"},
-	]},
-	"Blacksmith": {"home": "blacksmith", "work": "blacksmith", "schedule": [
-		{"location": "blacksmith", "duration": 6.0, "priority": 0.9, "purpose": "Forge tools and weapons", "object_id": "smith_forge_01", "object_action": "use"},
-		{"location": "market", "duration": 2.0, "priority": 0.6, "purpose": "Sell wares"},
-		{"location": "inn", "duration": 2.0, "priority": 0.4, "purpose": "Evening meal and rest"},
-		{"location": "blacksmith", "duration": 3.0, "priority": 0.7, "purpose": "Late forging", "object_id": "smith_anvil_01", "object_action": "use"},
-	]},
-	"Gossip": {"home": "home_south", "work": "town_square", "schedule": [
-		{"location": "market", "duration": 3.0, "priority": 0.7, "purpose": "Gather news at market"},
-		{"location": "town_square", "duration": 3.0, "priority": 0.8, "purpose": "Share stories"},
-		{"location": "inn", "duration": 2.0, "priority": 0.6, "purpose": "Listen to travelers"},
-		{"location": "bakery", "duration": 1.0, "priority": 0.5, "purpose": "Visit baker for gossip"},
-		{"location": "well", "duration": 2.0, "priority": 0.6, "purpose": "Chat at the well"},
-	]},
-	"Farmer": {"home": "farm", "work": "farm", "schedule": [
-		{"location": "farm", "duration": 6.0, "priority": 0.9, "purpose": "Tend crops", "object_id": "farm_plow_01", "object_action": "use"},
-		{"location": "market", "duration": 2.0, "priority": 0.7, "purpose": "Sell produce"},
-		{"location": "inn", "duration": 1.5, "priority": 0.4, "purpose": "Midday meal"},
-		{"location": "farm", "duration": 4.0, "priority": 0.8, "purpose": "Afternoon farming", "object_id": "farm_trough_01", "object_action": "examine"},
-	]},
-	"Innkeeper": {"home": "inn", "work": "inn", "schedule": [
-		{"location": "inn", "duration": 5.0, "priority": 0.9, "purpose": "Prepare breakfast service", "object_id": "inn_pantry_01", "object_action": "examine"},
-		{"location": "market", "duration": 2.0, "priority": 0.6, "purpose": "Buy supplies"},
-		{"location": "inn", "duration": 8.0, "priority": 0.9, "purpose": "Run the inn", "object_id": "inn_ale_barrel_01", "object_action": "examine"},
-		{"location": "inn", "duration": 3.0, "priority": 0.8, "purpose": "Evening service until close"},
-	]},
-}
+static func _ensure_locations_loaded() -> void:
+	if _locations_loaded:
+		return
+	_locations_loaded = true
+	var LoaderScript: GDScript = load("res://scripts/persona_loader.gd")
+	var raw: Dictionary = LoaderScript.load_locations()
+	for loc_name in raw:
+		var loc_data: Dictionary = raw[loc_name]
+		var pos: Array = loc_data.get("position", [2096, 800])
+		LOCATIONS[loc_name] = Vector2(float(pos[0]), float(pos[1]))
+
+# Persona data — loaded from data/npcs/{name}.json at setup
+var _persona: Dictionary = {}
 
 # Current plan
 var agenda: Array[Dictionary] = []
@@ -93,29 +34,28 @@ var _pending_plan: bool = false
 var _pending_dialogue: bool = false
 var _dialogue_callback: Callable
 
-func setup(npc_name: String, role: String) -> void:
+func setup(npc_name: String, role: String, persona: Dictionary = {}) -> void:
 	_npc_name = npc_name
 	_role = role
-	# Start with default schedule
+	_persona = persona
+	_ensure_locations_loaded()
 	_load_default_schedule()
 
 func _load_default_schedule() -> void:
 	agenda.clear()
 	current_chunk_index = 0
-	if ROLE_CONFIG.has(_role):
-		var config: Dictionary = ROLE_CONFIG[_role]
-		for chunk in config["schedule"]:
+	var schedule: Array = _persona.get("schedule", [])
+	for chunk in schedule:
+		if chunk is Dictionary:
 			agenda.append(chunk.duplicate())
+	if agenda.is_empty():
+		agenda.append({"location": "town_square", "duration": 4.0, "priority": 0.5, "purpose": "Idle"})
 
 func get_home_location() -> String:
-	if ROLE_CONFIG.has(_role):
-		return ROLE_CONFIG[_role]["home"]
-	return "town_square"
+	return _persona.get("home_location", "town_square")
 
 func get_work_location() -> String:
-	if ROLE_CONFIG.has(_role):
-		return ROLE_CONFIG[_role]["work"]
-	return "town_square"
+	return _persona.get("work_location", "town_square")
 
 func get_current_chunk() -> Dictionary:
 	if current_chunk_index < agenda.size():
@@ -181,7 +121,7 @@ func update_plan(hour: float, memory_summary: String, emotion_summary: String, i
 	# Enrich context with object knowledge
 	if object_summary != "":
 		context += "\n" + object_summary
-	inference_client.layer3_plan(_role, memory_summary, context, emotion_summary, _on_plan_result)
+	inference_client.layer3_plan(_role, memory_summary, context, emotion_summary, _on_plan_result, _npc_name)
 
 func _on_plan_result(success: bool, data: Dictionary) -> void:
 	_pending_plan = false
@@ -204,7 +144,7 @@ func request_dialogue(emotion_summary: String, relationship_context: String, rec
 		return
 	_pending_dialogue = true
 	_dialogue_callback = callback
-	inference_client.layer3_dialogue(_role, emotion_summary, relationship_context, recent_events, _on_dialogue_result)
+	inference_client.layer3_dialogue(_role, emotion_summary, relationship_context, recent_events, _on_dialogue_result, _npc_name)
 
 func _on_dialogue_result(success: bool, data: Dictionary) -> void:
 	_pending_dialogue = false
@@ -215,25 +155,8 @@ func _on_dialogue_result(success: bool, data: Dictionary) -> void:
 			_dialogue_callback.call(false, {"utterance": _get_default_greeting()})
 
 func _get_default_greeting() -> String:
-	match _role:
-		"Baker":
-			return "Fresh bread today!"
-		"Guard":
-			return "Stay safe, traveler."
-		"Herbalist":
-			return "Need a remedy?"
-		"Courier":
-			return "Got a delivery?"
-		"Blacksmith":
-			return "Fine steel, fair prices."
-		"Gossip":
-			return "Have you heard the latest?"
-		"Farmer":
-			return "Good weather for crops."
-		"Innkeeper":
-			return "Welcome! Take a seat."
-		_:
-			return "Hello there."
+	var dialogue: Dictionary = _persona.get("fallback_dialogue", {})
+	return dialogue.get("greeting", "Hello there.")
 
 func get_chunk_directive() -> String:
 	## Generate a natural-language directive from the current plan chunk for Layer 2 modulation.
@@ -260,16 +183,19 @@ func get_chunk_directive() -> String:
 	return ", ".join(parts)
 
 func should_go_home(hour: float) -> bool:
-	# NPCs return home around 21:00, except special roles
-	if _role == "Innkeeper" and hour < 23.0:
-		return false
-	if _role == "Guard":
-		return false  # Guard patrols at night
-	return hour >= 21.0 or hour < 5.0
+	var night: Dictionary = _persona.get("night_behavior", {})
+	var go_home_hour: float = float(night.get("go_home_hour", 21.0))
+	var override = night.get("override")
+	# If override exists and hour is before go_home_hour, stay out
+	if override != null and override is Dictionary:
+		return false  # NPC has a night activity instead of going home
+	return hour >= go_home_hour or hour < 5.0
 
 func get_night_behavior() -> Dictionary:
-	if _role == "Guard":
-		return {"location": "town_square", "duration": 8.0, "priority": 0.9, "purpose": "Night patrol"}
+	var night: Dictionary = _persona.get("night_behavior", {})
+	var override = night.get("override")
+	if override != null and override is Dictionary:
+		return override
 	return {"location": get_home_location(), "duration": 8.0, "priority": 1.0, "purpose": "Rest at home"}
 
 func inject_object_concern_chunk(concern_text: String, location: String, object_id: String, object_action: String) -> void:

@@ -1,0 +1,33 @@
+{
+  "name": "Aldric",
+  "role": "Farmer",
+  "sprite_sheet": "res://assets/characters/Character_RM_008.png",
+  "spawn_position": [2992, 592],
+  "home_location": "farm",
+  "work_location": "farm",
+  "personality": {
+    "traits": ["patient", "weathered", "superstitious"],
+    "speech_style": "slow and deliberate, references weather and seasons constantly",
+    "vocabulary": ["crop", "soil", "rain", "season", "harvest", "sunrise"],
+    "backstory": "Third generation on this farm. Lost a crop to blight two years ago and has been cautious ever since. Trusts the land more than people."
+  },
+  "schedule": [
+    {"location": "farm", "duration": 6.0, "priority": 0.9, "purpose": "Tend crops", "object_id": "farm_plow_01", "object_action": "use"},
+    {"location": "market", "duration": 2.0, "priority": 0.7, "purpose": "Sell produce"},
+    {"location": "inn", "duration": 1.5, "priority": 0.4, "purpose": "Midday meal"},
+    {"location": "farm", "duration": 4.0, "priority": 0.8, "purpose": "Afternoon farming", "object_id": "farm_trough_01", "object_action": "examine"}
+  ],
+  "emotion_baseline": {"relief": 0.3, "optimism": 0.3},
+  "drive_defaults": {"energy": 85.0, "hunger": 15.0, "social": 30.0, "safety": 80.0},
+  "neural_biases": [
+    {"src": "sense_at_work", "dst": "drive_energy", "weight": -0.01}
+  ],
+  "night_behavior": {"go_home_hour": 21.0, "override": null},
+  "fallback_dialogue": {
+    "greeting": "Good weather for crops today.",
+    "complaint": "Soil's been dry. Need rain soon.",
+    "gossip": "Ivy says the herbs near the creek are dying. Bad sign.",
+    "busy": "Working the field. Sun won't wait."
+  },
+  "relationships": {"Ivy": 0.6, "Edith": 0.55, "Hugo": 0.5}
+}

@@ -1,0 +1,18 @@
+{
+  "bakery": {"position": [1712, 464], "tile": [53, 14], "type": "work", "public": false},
+  "guard_post": {"position": [2320, 464], "tile": [86, 18], "type": "work", "public": true},
+  "herbalist_shop": {"position": [528, 592], "tile": [123, 57], "type": "work", "public": false},
+  "courier_office": {"position": [816, 592], "tile": [65, 19], "type": "work", "public": false},
+  "blacksmith": {"position": [1168, 592], "tile": [20, 65], "type": "work", "public": true},
+  "town_square": {"position": [2096, 800], "tile": [70, 50], "type": "public", "public": true},
+  "market": {"position": [2768, 592], "tile": [57, 74], "type": "public", "public": true},
+  "farm": {"position": [2992, 592], "tile": [36, 65], "type": "work", "public": false},
+  "inn": {"position": [2096, 624], "tile": [93, 74], "type": "work", "public": true},
+  "home_north": {"position": [1712, 464], "tile": [16, 18], "type": "home", "public": false},
+  "home_east": {"position": [2768, 592], "tile": [16, 32], "type": "home", "public": false},
+  "home_south": {"position": [2096, 1200], "tile": [75, 74], "type": "home", "public": false},
+  "home_west": {"position": [528, 592], "tile": [25, 18], "type": "home", "public": false},
+  "well": {"position": [1800, 800], "tile": [60, 45], "type": "public", "public": true},
+  "road_east": {"position": [3500, 800], "tile": [130, 50], "type": "transit", "public": true},
+  "road_south": {"position": [2096, 1600], "tile": [70, 90], "type": "transit", "public": true}
+}

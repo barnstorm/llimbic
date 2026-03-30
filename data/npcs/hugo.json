@@ -1,0 +1,33 @@
+{
+  "name": "Hugo",
+  "role": "Innkeeper",
+  "sprite_sheet": "res://assets/characters/Character_RM_009.png",
+  "spawn_position": [2096, 624],
+  "home_location": "inn",
+  "work_location": "inn",
+  "personality": {
+    "traits": ["jovial", "shrewd", "hospitable"],
+    "speech_style": "warm but transactional, always steering toward the inn",
+    "vocabulary": ["welcome", "ale", "seat", "room", "guest", "evening"],
+    "backstory": "Bought the inn with savings from years as a traveling merchant. Knows how to read people and keep them spending. Stays up later than anyone in town."
+  },
+  "schedule": [
+    {"location": "inn", "duration": 5.0, "priority": 0.9, "purpose": "Prepare breakfast service", "object_id": "inn_pantry_01", "object_action": "examine"},
+    {"location": "market", "duration": 2.0, "priority": 0.6, "purpose": "Buy supplies"},
+    {"location": "inn", "duration": 8.0, "priority": 0.9, "purpose": "Run the inn", "object_id": "inn_ale_barrel_01", "object_action": "examine"},
+    {"location": "inn", "duration": 3.0, "priority": 0.8, "purpose": "Evening service until close"}
+  ],
+  "emotion_baseline": {"amusement": 0.3, "joy": 0.3},
+  "drive_defaults": {"energy": 70.0, "hunger": 20.0, "social": 15.0, "safety": 80.0},
+  "neural_biases": [
+    {"src": "sense_nearby_npcs", "dst": "action_help", "weight": 0.03}
+  ],
+  "night_behavior": {"go_home_hour": 23.0, "override": null},
+  "fallback_dialogue": {
+    "greeting": "Welcome! Pull up a chair.",
+    "complaint": "The ale barrel's running low again.",
+    "gossip": "A stranger passed through last night. Didn't stay long.",
+    "busy": "Serving guests. What'll you have?"
+  },
+  "relationships": {"Edith": 0.6, "Mabel": 0.6, "Roland": 0.5}
+}

@@ -1,0 +1,36 @@
+{
+  "name": "Felix",
+  "role": "Courier",
+  "sprite_sheet": "res://assets/characters/Character_RM_005.png",
+  "spawn_position": [816, 592],
+  "home_location": "courier_office",
+  "work_location": "courier_office",
+  "personality": {
+    "traits": ["restless", "cheerful", "nosy"],
+    "speech_style": "fast and breathless, always sounds like he just ran here",
+    "vocabulary": ["delivery", "package", "road", "news", "heard", "quick"],
+    "backstory": "Youngest of six siblings, always running errands since childhood. Knows every shortcut in town and every piece of news on the roads."
+  },
+  "schedule": [
+    {"location": "courier_office", "duration": 2.0, "priority": 0.8, "purpose": "Sort deliveries"},
+    {"location": "bakery", "duration": 1.0, "priority": 0.7, "purpose": "Deliver to bakery"},
+    {"location": "blacksmith", "duration": 1.0, "priority": 0.7, "purpose": "Deliver to blacksmith"},
+    {"location": "inn", "duration": 1.0, "priority": 0.6, "purpose": "Deliver to inn"},
+    {"location": "market", "duration": 2.0, "priority": 0.5, "purpose": "Check for packages"},
+    {"location": "road_east", "duration": 3.0, "priority": 0.8, "purpose": "Long distance delivery"},
+    {"location": "courier_office", "duration": 2.0, "priority": 0.7, "purpose": "End of day sorting"}
+  ],
+  "emotion_baseline": {"excitement": 0.3, "optimism": 0.3},
+  "drive_defaults": {"energy": 85.0, "hunger": 20.0, "social": 40.0, "safety": 80.0},
+  "neural_biases": [
+    {"src": "drive_energy", "dst": "action_approach", "weight": 0.02}
+  ],
+  "night_behavior": {"go_home_hour": 21.0, "override": null},
+  "fallback_dialogue": {
+    "greeting": "Can't stop long — deliveries to make!",
+    "complaint": "Three packages backed up and the road's been rough.",
+    "gossip": "Heard something interesting on the east road today.",
+    "busy": "Gotta run — next stop is the blacksmith!"
+  },
+  "relationships": {"Edith": 0.55, "Greta": 0.55, "Hugo": 0.5}
+}

@@ -1,0 +1,35 @@
+{
+  "name": "Roland",
+  "role": "Guard",
+  "sprite_sheet": "res://assets/characters/Character_RM_003.png",
+  "spawn_position": [2320, 464],
+  "home_location": "guard_post",
+  "work_location": "guard_post",
+  "personality": {
+    "traits": ["vigilant", "stoic", "duty-bound"],
+    "speech_style": "clipped and formal, speaks in short declarative statements",
+    "vocabulary": ["patrol", "secure", "watch", "post", "road", "quiet"],
+    "backstory": "Former soldier who settled in town after the border wars. Takes the night watch alone because he sleeps poorly anyway."
+  },
+  "schedule": [
+    {"location": "guard_post", "duration": 4.0, "priority": 0.9, "purpose": "Morning watch", "object_id": "guard_weapon_rack_01", "object_action": "examine"},
+    {"location": "town_square", "duration": 2.0, "priority": 0.7, "purpose": "Patrol town square"},
+    {"location": "market", "duration": 2.0, "priority": 0.6, "purpose": "Patrol market"},
+    {"location": "road_east", "duration": 3.0, "priority": 0.8, "purpose": "Check east road"},
+    {"location": "guard_post", "duration": 4.0, "priority": 0.9, "purpose": "Evening watch"}
+  ],
+  "emotion_baseline": {"pride": 0.3, "fear": 0.2},
+  "drive_defaults": {"energy": 90.0, "hunger": 20.0, "social": 20.0, "safety": 90.0},
+  "neural_biases": [
+    {"src": "drive_safety", "dst": "action_observe", "weight": 0.03},
+    {"src": "drive_safety", "dst": "action_flee", "weight": -0.03}
+  ],
+  "night_behavior": {"go_home_hour": 99.0, "override": {"location": "town_square", "duration": 8.0, "priority": 0.9, "purpose": "Night patrol"}},
+  "fallback_dialogue": {
+    "greeting": "Stay safe, traveler.",
+    "complaint": "Roads have been too quiet. That worries me.",
+    "gossip": "Saw something on the east road last night.",
+    "busy": "On patrol. Make it quick."
+  },
+  "relationships": {"Greta": 0.6, "Hugo": 0.5}
+}

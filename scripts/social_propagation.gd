@@ -162,12 +162,17 @@ func _request_speech(convo: Dictionary, speaker: Node, listener: Node) -> void:
 	var location: String = ""
 	if speaker.brain.layer3:
 		location = speaker.brain.layer3.location_name_from_position(speaker.global_position)
-	var context: String = "At %s, %s" % [location, speaker.brain.get_current_action()]
-	# Enrich context with object knowledge for more natural conversation
+	var context: String = "At %s, doing: %s" % [location, speaker.brain.get_current_action()]
+	# Enrich context with object knowledge
 	if speaker.brain.memory:
 		var obj_ctx: String = speaker.brain.memory.get_object_dialogue_context(speaker.role if "role" in speaker else "")
 		if obj_ctx != "":
 			context += ". " + obj_ctx
+	# Add frustration/concerns for more grounded dialogue
+	if speaker.brain.layer1 and speaker.brain.layer1.frustration > 0.3:
+		context += ". Feeling frustrated (%.0f%%)" % (speaker.brain.layer1.frustration * 100.0)
+	if speaker.brain.memory and speaker.brain.memory.concerns.size() > 0:
+		context += ". Worried about: " + speaker.brain.memory.concerns[0]
 	var recent: Array = speaker.brain.memory.get_recent_events_text(3)
 
 	_inference_client.layer3_converse(
@@ -175,7 +180,8 @@ func _request_speech(convo: Dictionary, speaker: Node, listener: Node) -> void:
 		listener.role, listener_emo,
 		context, recent,
 		func(success: bool, data: Dictionary) -> void:
-			_on_speech_received(convo, speaker, success, data)
+			_on_speech_received(convo, speaker, success, data),
+		speaker.npc_name, listener.npc_name
 	)
 
 func _on_speech_received(convo: Dictionary, speaker: Node, success: bool, data: Dictionary) -> void:

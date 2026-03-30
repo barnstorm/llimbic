@@ -35,6 +35,7 @@ startup_time: float = 0
 
 class PlanRequest(BaseModel):
     role: str
+    npc_name: str = ""
     memory_summary: str = ""
     current_context: str = ""
     emotion_summary: str = ""
@@ -44,6 +45,8 @@ class PlanResponse(BaseModel):
     source: str
 
 class ReflectRequest(BaseModel):
+    npc_name: str = ""
+    role: str = ""
     memory_events: list[str] = []
 
 class ReflectResponse(BaseModel):
@@ -52,6 +55,7 @@ class ReflectResponse(BaseModel):
 
 class DialogueRequest(BaseModel):
     role: str
+    npc_name: str = ""
     emotion_summary: str = ""
     relationship_context: str = ""
     recent_events: list[str] = []
@@ -75,8 +79,10 @@ class ChatResponse(BaseModel):
 
 class ConverseRequest(BaseModel):
     speaker_role: str
+    speaker_name: str = ""
     speaker_emotion: str = ""
     listener_role: str
+    listener_name: str = ""
     listener_emotion: str = ""
     shared_context: str = ""
     speaker_recent: list[str] = []
@@ -124,7 +130,7 @@ async def health():
 async def plan(req: PlanRequest):
     log.info(f"PLAN [{req.role}] context='{req.current_context[:60]}' emotion='{req.emotion_summary[:40]}'")
     t0 = time.time()
-    result = await _run(model.plan, req.role, req.memory_summary, req.current_context, req.emotion_summary)
+    result = await _run(model.plan, req.role, req.memory_summary, req.current_context, req.emotion_summary, req.npc_name)
     log.info(f"PLAN [{req.role}] -> {len(result.get('agenda',[]))} chunks ({result.get('source','?')}) [{time.time()-t0:.1f}s]")
     return PlanResponse(**result)
 
@@ -132,7 +138,7 @@ async def plan(req: PlanRequest):
 async def reflect(req: ReflectRequest):
     log.info(f"REFLECT {len(req.memory_events)} events")
     t0 = time.time()
-    result = await _run(model.reflect, req.memory_events)
+    result = await _run(model.reflect, req.memory_events, req.npc_name, req.role)
     log.info(f"REFLECT -> {len(result.get('reflections',[]))} reflections [{time.time()-t0:.1f}s]")
     return ReflectResponse(**result)
 
@@ -141,7 +147,7 @@ async def dialogue(req: DialogueRequest):
     log.info(f"DIALOGUE [{req.role}] emotion='{req.emotion_summary[:40]}'")
     t0 = time.time()
     result = await _run(model.dialogue, req.role, req.emotion_summary,
-                         req.relationship_context, req.recent_events)
+                         req.relationship_context, req.recent_events, req.npc_name)
     log.info(f"DIALOGUE [{req.role}] -> intent={result.get('intent','')} \"{result.get('utterance','')}\" [{time.time()-t0:.1f}s]")
     return DialogueResponse(**result)
 
@@ -164,7 +170,8 @@ async def converse(req: ConverseRequest):
     def _do():
         return model.converse(req.speaker_role, req.speaker_emotion,
                                req.listener_role, req.listener_emotion,
-                               req.shared_context, req.speaker_recent)
+                               req.shared_context, req.speaker_recent,
+                               req.speaker_name, req.listener_name)
     result = await _run(_do)
     log.info(f"CONVERSE [{req.speaker_role}] -> \"{result.get('utterance','')}\" topic={result.get('topic','')} [{time.time()-t0:.1f}s]")
     return ConverseResponse(**result)
@@ -243,14 +250,17 @@ async def _dispatch(method: str, params: dict) -> dict:
         return await _run(model.plan, params.get("role", ""),
                            params.get("memory_summary", ""),
                            params.get("current_context", ""),
-                           params.get("emotion_summary", ""))
+                           params.get("emotion_summary", ""),
+                           params.get("npc_name", ""))
     elif method == "reflect":
-        return await _run(model.reflect, params.get("memory_events", []))
+        return await _run(model.reflect, params.get("memory_events", []),
+                           params.get("npc_name", ""), params.get("role", ""))
     elif method == "dialogue":
         return await _run(model.dialogue, params.get("role", ""),
                            params.get("emotion_summary", ""),
                            params.get("relationship_context", ""),
-                           params.get("recent_events", []))
+                           params.get("recent_events", []),
+                           params.get("npc_name", ""))
     elif method == "chat":
         def _do():
             return model.chat(params.get("role", ""), params.get("npc_name", ""),
@@ -267,7 +277,9 @@ async def _dispatch(method: str, params: dict) -> dict:
                                    params.get("listener_role", ""),
                                    params.get("listener_emotion", ""),
                                    params.get("shared_context", ""),
-                                   params.get("speaker_recent", []))
+                                   params.get("speaker_recent", []),
+                                   params.get("speaker_name", ""),
+                                   params.get("listener_name", ""))
         return await _run(_do)
     else:
         return {"error": f"unknown method: {method}"}

@@ -28,93 +28,43 @@ var modulation: Dictionary = {
 	"persistence_scale": 1.0
 }
 
-var _projection_timer: float = 0.0
-var _projection_interval: float = 0.5
-var _pending_projection: bool = false
 var _npc_name: String = ""
 var _npc_role: String = ""
+var _emotion_engine: RefCounted = null
 
-func setup(npc_name: String, role: String) -> void:
+var _persona: Dictionary = {}
+
+func setup(npc_name: String, role: String, persona: Dictionary = {}) -> void:
 	_npc_name = npc_name
 	_npc_role = role
-	# Initialize with neutral vector
-	emotion_vector.clear()
-	for i in range(27):
-		emotion_vector.append(0.1)
-	# Slight role-based bias
-	match role:
-		"Baker":
-			emotion_vector[7] = 0.4  # joy
-			emotion_vector[3] = 0.3  # caring
-		"Guard":
-			emotion_vector[10] = 0.3  # pride
-			emotion_vector[18] = 0.2  # fear (vigilance)
-		"Herbalist":
-			emotion_vector[3] = 0.4  # caring
-			emotion_vector[24] = 0.3  # curiosity
-		"Courier":
-			emotion_vector[5] = 0.3  # excitement
-			emotion_vector[9] = 0.3  # optimism
-		"Blacksmith":
-			emotion_vector[10] = 0.4  # pride
-			emotion_vector[0] = 0.2  # admiration
-		"Gossip":
-			emotion_vector[24] = 0.5  # curiosity
-			emotion_vector[26] = 0.3  # surprise
-		"Farmer":
-			emotion_vector[11] = 0.3  # relief
-			emotion_vector[9] = 0.3  # optimism
-		"Innkeeper":
-			emotion_vector[1] = 0.3  # amusement
-			emotion_vector[7] = 0.3  # joy
+	_persona = persona
+	# Initialize with persona baseline or neutral vector
+	var LoaderScript: GDScript = load("res://scripts/persona_loader.gd")
+	emotion_vector = LoaderScript.get_emotion_baseline_vector(persona) if not persona.is_empty() else []
+	if emotion_vector.size() != 27:
+		emotion_vector.clear()
+		for i in range(27):
+			emotion_vector.append(0.1)
+	# Create deterministic emotion engine
+	var EngineScript: GDScript = load("res://scripts/emotion_engine.gd")
+	_emotion_engine = EngineScript.new()
+	_emotion_engine.setup(emotion_vector.duplicate())
 	_update_top_dimensions()
 
+func update_deterministic(layer1_state: Dictionary, recent_events: Array, chunk_priority: float) -> void:
+	## Synchronous emotion + modulation update. No LLM, no async. Runs every tick.
+	if _emotion_engine == null:
+		return
+	emotion_vector = _emotion_engine.compute_emotions(layer1_state, recent_events, emotion_vector)
+	emotion_summary_text = ""  # clear cached text, recomputed on demand
+	_update_top_dimensions()
+	_compute_valence()
+	modulation = _emotion_engine.compute_modulation(emotion_vector, chunk_priority)
+
 func update(delta: float, layer1_state: Dictionary, recent_events: Array, inference_client: Node) -> void:
-	_projection_timer += delta
-	if _projection_timer >= _projection_interval and not _pending_projection:
-		_projection_timer = 0.0
-		_request_projection(layer1_state, recent_events, inference_client)
-
-func _request_projection(layer1_state: Dictionary, recent_events: Array, inference_client: Node) -> void:
-	if inference_client == null or not inference_client.is_server_available():
-		return
-	_pending_projection = true
-	inference_client.layer2_project(layer1_state, recent_events, emotion_vector, _on_projection_result)
-
-func _on_projection_result(success: bool, data: Dictionary) -> void:
-	_pending_projection = false
-	if not success:
-		return
-	if data.has("vector") and data["vector"] is Array:
-		var new_vec: Array = data["vector"]
-		if new_vec.size() == 27:
-			emotion_vector = new_vec
-	if data.has("summary"):
-		emotion_summary_text = str(data["summary"])
-	if data.has("top_dimensions"):
-		top_dimensions = data["top_dimensions"]
-	else:
-		_update_top_dimensions()
-	if data.has("valence"):
-		var val: Dictionary = data["valence"]
-		if val.has("label"):
-			valence_summary = str(val["label"])
-		else:
-			_compute_valence()
-	else:
-		_compute_valence()
-
-func request_modulation(directives: String, inference_client: Node) -> void:
-	if inference_client == null or not inference_client.is_server_available():
-		return
-	inference_client.layer2_modulate(directives, emotion_vector, _on_modulation_result)
-
-func _on_modulation_result(success: bool, data: Dictionary) -> void:
-	if not success:
-		return
-	for key in ["learning_rate_mod", "exploration_bias", "attention_weight", "interruption_sensitivity", "persistence_scale"]:
-		if data.has(key):
-			modulation[key] = clampf(float(data[key]), 0.0, 3.0)
+	## Legacy async path — still functional but no longer the primary path.
+	## Called if deterministic engine is not available.
+	update_deterministic(layer1_state, recent_events, 0.5)
 
 func _update_top_dimensions() -> void:
 	top_dimensions.clear()

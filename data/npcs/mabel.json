@@ -1,0 +1,35 @@
+{
+  "name": "Mabel",
+  "role": "Gossip",
+  "sprite_sheet": "res://assets/characters/Character_RM_007.png",
+  "spawn_position": [2768, 592],
+  "home_location": "home_south",
+  "work_location": "town_square",
+  "personality": {
+    "traits": ["curious", "dramatic", "sociable"],
+    "speech_style": "animated and conspiratorial, leans in when talking, speaks as if sharing secrets",
+    "vocabulary": ["heard", "apparently", "between us", "word is", "noticed", "suspicious"],
+    "backstory": "Widow who fills her days collecting and sharing news. She considers herself the town's memory and social conscience. Nothing happens without her noticing."
+  },
+  "schedule": [
+    {"location": "market", "duration": 3.0, "priority": 0.7, "purpose": "Gather news at market"},
+    {"location": "town_square", "duration": 3.0, "priority": 0.8, "purpose": "Share stories"},
+    {"location": "inn", "duration": 2.0, "priority": 0.6, "purpose": "Listen to travelers"},
+    {"location": "bakery", "duration": 1.0, "priority": 0.5, "purpose": "Visit baker for gossip"},
+    {"location": "well", "duration": 2.0, "priority": 0.6, "purpose": "Chat at the well"}
+  ],
+  "emotion_baseline": {"curiosity": 0.5, "surprise": 0.3},
+  "drive_defaults": {"energy": 80.0, "hunger": 20.0, "social": 10.0, "safety": 80.0},
+  "neural_biases": [
+    {"src": "drive_social", "dst": "action_observe", "weight": 0.03},
+    {"src": "drive_social", "dst": "action_approach", "weight": -0.02}
+  ],
+  "night_behavior": {"go_home_hour": 21.0, "override": null},
+  "fallback_dialogue": {
+    "greeting": "Oh! Have you heard the latest?",
+    "complaint": "Nobody tells me anything anymore.",
+    "gossip": "Between us — I saw something odd near the well.",
+    "busy": "Hold that thought — I need to tell someone something first."
+  },
+  "relationships": {"Hugo": 0.6, "Edith": 0.55, "Ivy": 0.4}
+}

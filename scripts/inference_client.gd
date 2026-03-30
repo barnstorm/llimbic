@@ -152,20 +152,20 @@ func layer2_modulate(directives: String, current_vector: Array, callback: Callab
 
 # --- Layer 3 API ---
 
-func layer3_plan(role: String, memory_summary: String, current_context: String, emotion_summary: String, callback: Callable) -> String:
+func layer3_plan(role: String, memory_summary: String, current_context: String, emotion_summary: String, callback: Callable, npc_name_str: String = "") -> String:
 	return _send(_ws3, _ws3_connected, _ws3_pending, "plan", {
-		"role": role, "memory_summary": memory_summary,
+		"role": role, "npc_name": npc_name_str, "memory_summary": memory_summary,
 		"current_context": current_context, "emotion_summary": emotion_summary
 	}, callback)
 
-func layer3_reflect(memory_events: Array, callback: Callable) -> String:
+func layer3_reflect(memory_events: Array, callback: Callable, npc_name_str: String = "", npc_role: String = "") -> String:
 	return _send(_ws3, _ws3_connected, _ws3_pending, "reflect", {
-		"memory_events": memory_events
+		"memory_events": memory_events, "npc_name": npc_name_str, "role": npc_role
 	}, callback)
 
-func layer3_dialogue(role: String, emotion_summary: String, relationship_context: String, recent_events: Array, callback: Callable) -> String:
+func layer3_dialogue(role: String, emotion_summary: String, relationship_context: String, recent_events: Array, callback: Callable, npc_name_str: String = "") -> String:
 	return _send(_ws3, _ws3_connected, _ws3_pending, "dialogue", {
-		"role": role, "emotion_summary": emotion_summary,
+		"role": role, "npc_name": npc_name_str, "emotion_summary": emotion_summary,
 		"relationship_context": relationship_context, "recent_events": recent_events
 	}, callback)
 
@@ -176,10 +176,12 @@ func layer3_chat(role: String, npc_name_str: String, emotion_summary: String, re
 		"conversation_history": conversation_history, "player_message": player_message
 	}, callback)
 
-func layer3_converse(speaker_role: String, speaker_emotion: String, listener_role: String, listener_emotion: String, shared_context: String, speaker_recent: Array, callback: Callable) -> String:
+func layer3_converse(speaker_role: String, speaker_emotion: String, listener_role: String, listener_emotion: String, shared_context: String, speaker_recent: Array, callback: Callable, speaker_name_str: String = "", listener_name_str: String = "") -> String:
 	return _send(_ws3, _ws3_connected, _ws3_pending, "converse", {
-		"speaker_role": speaker_role, "speaker_emotion": speaker_emotion,
-		"listener_role": listener_role, "listener_emotion": listener_emotion,
+		"speaker_role": speaker_role, "speaker_name": speaker_name_str,
+		"speaker_emotion": speaker_emotion,
+		"listener_role": listener_role, "listener_name": listener_name_str,
+		"listener_emotion": listener_emotion,
 		"shared_context": shared_context, "speaker_recent": speaker_recent
 	}, callback)
 

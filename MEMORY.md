@@ -142,3 +142,92 @@
 - `_externally_locked` is true during active conversations — reliable proxy for detecting conversing NPCs
 - ffmpeg frame extraction: `ffmpeg -ss {seconds} -i video.mp4 -frames:v 1 output.png` for VQA keyframes
 - Video output: 3.6MB MP4 (CRF 28, slow preset) for 30s at 1280px — well under 50MB limit
+
+## NPC Collision & Progress Awareness
+
+### Architecture
+- NPC and Player scenes have CollisionShape2D (RectangleShape2D 20x12, offset Y+8 for feet)
+- NPC: collision layer 2, mask 6 (collides with NPCs + player). Player: layer 4, mask 2 (collides with NPCs)
+- Player added to "player" group; NPCs find player via `get_tree().get_first_node_in_group("player")`
+- Player is included in perception entity list — NPCs see the player through the same FOV cone as other NPCs
+
+### Progress tracking (Layer 1)
+- Controller reports intended vs actual movement to `layer1.update_progress()` each tick
+- `is_stalled` = true when <30% expected displacement sustained for >0.4s
+- Onset spike fires once per stall episode: frustration +0.15 to +0.40 (proportional to task_momentum), momentum breaks -0.15
+- Spike re-arms when stall clears — including during observe pauses (velocity=0 → `update_progress` not called → spike re-arms)
+- This means: stall → spike → observe → resume → stall again → NEW spike. Frustration escalates across cycles.
+- Frustration feeds observe tendency generically (`observe = 0.2 + attention*0.3 + frustration*0.4`), no stall-specific flag needed
+- When stalled, observe cooldown bypassed (2s instead of 8s) and `_find_interesting_entity` returns closest entity instead of novel-only
+
+### Dynamic pathfinding
+- On CharacterBody2D collision during `_follow_path`, controller re-paths with obstacle's tile + 4 neighbors disabled in AStar grid
+- 1s cooldown on re-pathing to avoid per-frame recalculation
+- `NavigationManager.get_nav_path()` accepts optional `avoid_positions` array, temporarily disables tiles via `astar.set_point_disabled()`
+
+### Per-NPC logging
+- Brain opens `logs/{name}.log` at setup, logs action changes (with frust/momentum/observe), stall onset/clear, tagged memory events (via callback on MemorySystem), and chunk transitions
+- `tail -f logs/hugo.log` to watch a specific NPC in real time
+
+### What we learned
+- Bolting on a "blocked" handler is wrong — the NPC should perceive obstacles through existing FOV, feel lack of progress through drives, and respond through existing action priorities
+- The missing perception was the root cause: Player wasn't in the entity list, so NPCs literally couldn't see what was blocking them
+- Single-tile AStar avoidance insufficient — player collision shape spans tile boundaries. Disabling center + 4 neighbors forces real detours
+- Stall spike must re-arm after any pause (observe, reorientation) otherwise the NPC gets one reaction then grinds forever
+- Frustration→observe coupling should be general, not stall-gated: frustrated agents attend more to their environment regardless of cause
+
+## Hebbian Neural Network (Layer 1 Substrate Rewrite)
+
+### Architecture
+- HebbianNetwork (RefCounted) lives inside Layer1Substrate — external API unchanged
+- 19 fixed neurons: 4 drive, 3 task, 8 sensory (protected), 5 action
+- Up to 32 dynamic neurons via neurogenesis (stress/novelty/reward)
+- ~25 initial weighted connections, grows via Hebbian learning and spontaneous association
+- Drive/task/action properties are getters/setters that read/write neuron activations
+- Trust and place_familiarity remain non-neural dictionaries
+
+### What worked
+- GDScript property getters/setters (`var energy: float: get: return ...`) maintain perfect backward compatibility — no external code needed changes
+- Baseline drift function preserves exact game feel from the old hardcoded update; network connections add learned adjustments on top
+- Action neuron baselines (floors) prevent tendency collapse — without them, decay drains action neurons to zero
+- Propagation at `weight * 0.1 * delta * 60` scale keeps network effects proportional without overwhelming baseline drift
+- Decay of 0.998/frame (~0.887/sec) balances stability with responsiveness
+- Pair rotation penalty in Hebbian learning prevents the same connection from monopolizing all learning
+
+### Technical details
+- Sensory neurons are protected (network propagation cannot modify them) — set directly each tick from context
+- Task neurons use 0-100 internal scale, exposed as 0-1 via getters to match old interface
+- Stall detection remains mechanical (not neural) — `update_progress()` unchanged
+- Reorientation timer remains mechanical timing
+- Hebbian learning: `delta_w = 0.01 * lr_mod * (v1/100) * (v2/100)`, weight decay 0.001, top K=2 co-activated pairs per 0.5s cycle
+- Neurogenesis triggers: stress (frustration >75% OR sustained >3s), novelty (familiarity <30% sustained >5s), reward (drive recovery after override)
+- Stress neurons inhibit frustration (-0.1 weight) and are activated by frustration (+0.3 weight) — negative feedback loop
+- Neurogenesis caps: stress=5, novelty=6, reward=6, global=32. When cap reached, existing neurons strengthened instead
+- Reference implementation: Dosidicus (Python, github.com/ViciousSquid/Dosidicus) — ported core Hebbian + neurogenesis patterns to GDScript
+
+## Data-Driven Personas, Prompt Wrappers, Closed Loop
+
+### Architecture
+- NPC persona data lives in `data/npcs/{name}.json` — single source of truth per NPC (identity, personality, schedule, drives, neural biases, emotion baseline, fallback dialogue, relationships, night behavior)
+- Location data in `data/locations.json` — eliminates duplication between Python and GDScript
+- `scripts/persona_loader.gd` (GDScript) and `server/persona_loader.py` (Python) both load from same JSON files
+- `server/prompt_builder.py` builds persona preamble for every L3 LLM call (name, traits, speech style, backstory, emotions, situation, anti-boilerplate rules)
+- `scripts/emotion_engine.gd` — deterministic emotion projection + modulation, replaces L2 LLM. Runs every tick.
+
+### What worked
+- JSON persona files work cleanly from both GDScript (`JSON.parse_string`) and Python (`json.load`)
+- GDScript static methods on RefCounted work for persona_loader (no autoload needed)
+- `layer3_executive.gd` static var for LOCATIONS with lazy loading from JSON — preserves the `L3Cls.LOCATIONS` pattern used by npc_brain.gd
+- Emotion engine persona baseline gravity (97% current + 3% baseline per tick) gives each NPC a distinct emotional "home" without being rigid
+- Continuous modulation (every tick instead of chunk-change-only) eliminates the 5-30s dead zone where emotions changed but behavior didn't
+- Urgency replan with 30s debounce prevents flooding while still being responsive to L1 spikes
+
+### Technical details
+- Persona JSON `night_behavior.override` is null for go-home NPCs, a dict for Guard (night patrol) and Innkeeper (late hours). `go_home_hour` of 99.0 for Guard effectively means "never go home"
+- `neural_biases` array in persona JSON maps directly to `_adjust_weight()` calls in HebbianNetwork — adds connections on top of the universal set
+- EmotionEngine event keyword matching is simple `in` substring check — "fled" matches "Fled from Roland", "broken" matches "Discovered broken Forge"
+- L3 server request models all gained `npc_name` field. Server looks up persona by name and builds preamble. Backward compatible — field defaults to ""
+- `_chunk_outcomes` array in npc_brain tracks last 5 chunk results (completed/completed_with_difficulty/failed). Included in L3 planning context
+- L2 server (port 8420) still runs but unused — projection and modulation are both deterministic GDScript now
+- `update_layer2()` in npc_brain.gd is now a no-op — L2 runs inside `update_layer1()` via `layer2.update_deterministic()`
+- The `_l2_timer` in npc_controller.gd was removed — no separate L2 cadence needed

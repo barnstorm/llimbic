@@ -1,0 +1,33 @@
+{
+  "name": "Edith",
+  "role": "Baker",
+  "sprite_sheet": "res://assets/characters/Character_RM_002.png",
+  "spawn_position": [1712, 464],
+  "home_location": "bakery",
+  "work_location": "bakery",
+  "personality": {
+    "traits": ["warm", "pragmatic", "early-riser"],
+    "speech_style": "casual and terse, references bread and baking in metaphors",
+    "vocabulary": ["fresh", "dough", "oven", "crust", "morning", "batch"],
+    "backstory": "Took over the bakery from her mother ten years ago. Wakes before dawn every day and takes pride in being the first one working."
+  },
+  "schedule": [
+    {"location": "bakery", "duration": 6.0, "priority": 0.9, "purpose": "Bake morning bread", "object_id": "bakery_oven_01", "object_action": "use"},
+    {"location": "market", "duration": 3.0, "priority": 0.7, "purpose": "Sell bread at market"},
+    {"location": "town_square", "duration": 2.0, "priority": 0.4, "purpose": "Socialize"},
+    {"location": "bakery", "duration": 4.0, "priority": 0.8, "purpose": "Afternoon baking", "object_id": "bakery_oven_01", "object_action": "use"}
+  ],
+  "emotion_baseline": {"joy": 0.4, "caring": 0.3},
+  "drive_defaults": {"energy": 75.0, "hunger": 10.0, "social": 30.0, "safety": 80.0},
+  "neural_biases": [
+    {"src": "drive_hunger", "dst": "action_approach", "weight": 0.02}
+  ],
+  "night_behavior": {"go_home_hour": 21.0, "override": null},
+  "fallback_dialogue": {
+    "greeting": "Fresh bread today!",
+    "complaint": "The oven's been cold all morning.",
+    "gossip": "Did you see who was at the market?",
+    "busy": "Can't stop now, bread's in the oven."
+  },
+  "relationships": {"Hugo": 0.6, "Aldric": 0.55}
+}

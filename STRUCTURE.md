@@ -41,6 +41,7 @@
 - **Extends:** Node
 - **Signals emitted:** navigation_ready
 - Loads collision_map.png as Texture2D resource, builds AStar2D grid (11936 walkable tiles)
+- `get_nav_path(from, to, avoid_positions)` — optional `avoid_positions` array temporarily disables tiles for dynamic obstacle avoidance
 
 ### InferenceClient (autoload)
 - **File:** res://scripts/inference_client.gd
@@ -53,48 +54,98 @@
 ### PlayerController
 - **File:** res://scripts/player_controller.gd
 - **Extends:** CharacterBody2D
+- **Collision:** layer 4, mask 2 (collides with NPCs)
+- Added to "player" group for NPC perception lookup
 
 ### NPCController
 - **File:** res://scripts/npc_controller.gd
 - **Extends:** CharacterBody2D
+- **Collision:** layer 2, mask 6 (collides with other NPCs and player)
 - **Architecture:** Thin executor — brain selects actions, controller executes them
 - **Actions:** MOVE_TOWARD, PAUSE, OBSERVE, EXAMINE, FLEE_FROM, WANDER, IDLE
 - **External lock:** `_externally_locked` set by conversation/interaction systems, overrides brain
 - Pathfinding is one tool among many, not the controlling abstraction
 - Wander: at destination, NPCs meander within 48px radius instead of standing frozen
+- **Dynamic obstacle avoidance:** On body collision during `_follow_path`, re-paths with obstacle's tile + 4 neighbors disabled in AStar grid (1s cooldown)
+- **Progress reporting:** Each `_follow_path` tick reports intended vs actual movement to Layer 1 `update_progress()`
 
 ### NPCBrain
 - **File:** res://scripts/npc_brain.gd
 - **Extends:** RefCounted
 - **Owns:** Layer1Substrate, Layer2Projection, Layer3Executive, MemorySystem, Perception
+- **Perception includes Player:** `update_perception()` takes player node, adds to entity list alongside NPCs. NPCs see the player through the same FOV cone as everything else.
+- **Per-NPC logging:** Writes to `logs/{name}.log`. Logs action changes (with substrate state), stall onset/clear, tagged memory events, and chunk transitions.
 - **`select_action(delta)`:** Called every tick. Priority-ordered decision tree:
   1. Reorientation pause (after interruption, 0.5-2s based on frustration)
   2. Flee from distrusted entity (trust < 0.2, flee tendency > 0.5)
-  3. Observe interesting entity (new in FOV, observe > 0.6, 8s cooldown)
+  3. Observe interesting entity (observe > 0.6, 8s cooldown — bypassed when stalled to 2s). When stalled, finds closest entity instead of novel-only.
   4. EXAMINE object (1-2s, triggered by chunk arrival with object_id or seeing role-relevant unexamined object)
   5. Wander at destination (within 48px, ticks chunk timer, checks for unexamined chunk objects)
   6. Move toward plan target (drive overrides change WHERE, action system changes HOW)
+- **Stall-triggered observation:** When stalled and observing, creates tagged event ("{name} is in my way while I'm trying to {task}") and erodes trust toward blocker.
 - **Object interaction:** EXAMINE action stops NPC, faces object, updates memory with current state. If object is problematic (broken/empty), creates concern and injects fix chunk into plan.
 - **Drive overrides:** safety<30, energy<20, hunger>80, social>85 → override destination, suspend chunk. Hunger override checks known food objects first.
 - **Reflection:** Every 2 game-hours or 5+ new tagged events
 - **Modulation triggers:** Fires southbound L2 modulation on chunk changes
 
+### HebbianNetwork
+- **File:** res://scripts/hebbian_network.gd
+- **Extends:** RefCounted
+- **Neurons:** 19 fixed (4 drive, 3 task, 8 sensory, 5 action) + up to 32 dynamic via neurogenesis
+- **Connections:** Weighted edges [-1.0, 1.0] between neurons, ~25 initial, grows via Hebbian learning
+- **Propagation:** Every frame: `dst += src * weight * 0.1 * dt_scale`, decay 0.998/frame, noise +-0.05
+- **Hebbian learning:** Every 0.5s, top K=2 co-activated pairs (>70% threshold), `delta_w = lr * (v1/100) * (v2/100)`, weight decay 0.001, pair rotation cooldown
+- **Spontaneous connections:** Highly co-activated neurons with no existing connection form new edges
+- **Neurogenesis:** Every 2s, creates specialized neurons: stress (cap 5), novelty (cap 6), reward (cap 6), global cap 32
+  - Stress: sustained frustration >3s OR frustration >75%, creates inhibitory connections to frustration
+  - Novelty: low familiarity sustained >5s, creates excitatory connections to observe/approach
+  - Reward: drive recovery after override, reinforces drive-action pathway
+- **Action baselines:** Floor values prevent tendency collapse (observe: 20, approach: 20, help: 15)
+- **Data-driven:** Initial drive values and connection biases loaded from `data/npcs/{name}.json` persona files
+
 ### Layer1Substrate
 - **File:** res://scripts/layer1_substrate.gd
 - **Extends:** RefCounted
-- **Drives (0-100):** energy, hunger, social_need, safety
-- **Task state (0-1):** task_momentum, interruption_tolerance, frustration, reorientation_timer
-- **Action tendencies (0-1):** approach, avoid, observe, help, flee — weighted by conditions
-- **Per-entity:** trust (dict), place_familiarity (dict)
-- **Modulation inputs from Layer 2:** learning_rate_mod, exploration_bias, attention_weight, interruption_sensitivity, persistence_scale
+- **Architecture:** Wraps HebbianNetwork internally. External API unchanged — all properties backed by neuron activations via getters/setters
+- **Drives (0-100):** energy, hunger, social_need, safety — neuron activations
+- **Task state (0-1):** task_momentum, interruption_tolerance, frustration — 0-100 internally, scaled at interface
+- **Action tendencies (0-1):** approach, avoid, observe, help, flee — emergent from network dynamics, not hardcoded formulas
+- **Per-entity:** trust (dict), place_familiarity (dict) — non-neural, dictionary-based
+- **Modulation inputs from Layer 2:** learning_rate_mod, exploration_bias, attention_weight, interruption_sensitivity, persistence_scale — now computed deterministically every tick from emotion vector
+- **Emotion feedback:** `apply_emotion_feedback(emotion_vector)` — anger→frustration, curiosity→observe, fear→safety/flee, joy→approach. Closes the L2→L1 bidirectional loop
+- **Baseline drift:** Preserves current game feel (hunger rises, energy depletes) independently of network; network adds learned adjustments on top
+- **Progress tracking:** `update_progress(delta, intended_speed, actual_movement)` called by controller each tick
+  - `is_stalled` — true when intended movement produces <30% expected displacement for >0.4s
+  - Onset spike: frustration +15-40 (0-100 scale), momentum breaks -15, fires once per stall episode
+  - Sustain: frustration +2/s, momentum -1/s while stuck
+  - Spike re-arms when stall clears (including during observe pauses)
+- **Frustration→observe coupling:** Emerges from network connection `task_frustration -> action_observe` (+0.04 initial weight), strengthened by Hebbian learning when both are co-activated
 - `should_interrupt_for(priority)` — evaluates whether current momentum allows interruption
+- `get_network_debug()` — returns neuron counts, connection counts, neurogenesis state for debug overlay
+
+### EmotionEngine
+- **File:** res://scripts/emotion_engine.gd
+- **Extends:** RefCounted
+- **Replaces L2 LLM projection** — deterministic, runs every tick, zero latency
+- **Persona baseline gravity:** emotion vector decays toward persona-defined baseline (3%/tick)
+- **L1 state mapping:** low energy→sadness, high frustration→anger/annoyance, low safety→fear, high social→desire
+- **Event-driven spikes:** keyword matching on recent events (fled→fear, discovered→curiosity, broken→disappointment)
+- **Modulation:** `compute_modulation(emotion_vector, chunk_priority)` — fixed mapping from emotions to L1 parameters (fear→interruption_sensitivity, curiosity→exploration_bias, etc.)
+
+### PersonaLoader
+- **File:** res://scripts/persona_loader.gd
+- **Extends:** RefCounted (static methods)
+- Loads NPC persona JSON from `data/npcs/{name}.json`
+- Loads location data from `data/locations.json`
+- `get_emotion_baseline_vector(persona)` — converts sparse emotion_baseline dict to 27-dim array
 
 ### Layer2Projection
 - **File:** res://scripts/layer2_projection.gd
 - **Extends:** RefCounted
 - 27-dim GoEmotions vector stored per NPC
-- Calls `/layer2/project` every ~2.0 real seconds (staggered per NPC)
-- Southbound modulation via `/layer2/modulate` on Layer 3 directive changes
+- **Deterministic:** Uses EmotionEngine (GDScript, no LLM) every tick via `update_deterministic()`
+- **Continuous modulation:** Modulation parameters computed every tick from emotion vector + chunk priority, not just on chunk changes
+- Persona baseline loaded from `data/npcs/{name}.json`
 
 ### Layer3Executive
 - **File:** res://scripts/layer3_executive.gd
@@ -118,13 +169,14 @@
 - Methods: `add_object_knowledge()`, `get_objects_at_location()`, `get_objects_by_type()`, `get_object_summary()`, `get_problematic_objects()`, `get_food_objects()`, `get_objects_for_sharing()`, `get_object_dialogue_context()`
 - Second-hand object knowledge from trusted sources (trust > 0.6) marked as "reliable"
 - Direct observations don't get overwritten by fresh second-hand info (5-minute protection)
+- `on_tagged_event: Callable` — optional log callback, set by brain to pipe events to per-NPC log file
 
 ### Perception
 - **File:** res://scripts/perception.gd
 - **Extends:** RefCounted
 - **FOV:** 90° cone, 3-tile range (96px), directional based on facing
 - **Hearing:** Omnidirectional, 2.5-tile range (80px)
-- NPCs only observe entities within FOV
+- NPCs observe entities (other NPCs + Player) and objects within FOV
 - Speech broadcasts to all NPCs in hearing range
 - **Object vision:** `visible_objects` array + `update_object_vision()` — same FOV cone rules as entity vision
 
@@ -177,6 +229,12 @@
 ### HUDTime
 - **File:** res://scripts/hud_time.gd
 
+## Data Files
+
+- **NPC Personas:** `data/npcs/{name}.json` — single source of truth per NPC (identity, schedule, personality, drives, neural biases, dialogue fallbacks, relationships)
+- **Locations:** `data/locations.json` — shared location registry (position, tile, type, public flag)
+- Both loaded by GDScript (`scripts/persona_loader.gd`) and Python (`server/persona_loader.py`)
+
 ## Autoloads
 
 - GameManager = res://scripts/game_manager.gd
@@ -200,11 +258,13 @@
 
 | Rate | System | Cadence |
 |------|--------|---------|
-| Fast | Layer 1 substrate | Every physics tick |
-| Medium | Layer 2 projection | Every ~2.0 real seconds (staggered) |
-| Slow | Layer 3 planning | Every ~30 game-minutes |
+| Fast | Layer 1 substrate + L2 emotions + modulation | Every physics tick (closed loop) |
+| Fast | L1 Hebbian learning | Every 0.5 real seconds |
+| Fast | L1 neurogenesis check | Every 2.0 real seconds |
+| Slow | Layer 3 planning | Every ~30 game-minutes + urgency triggers (30s debounce) |
 | Very slow | Social propagation | Every 5 real seconds |
 | Triggered | Layer 3 reflection | Every 2 game-hours or 5+ new events |
+| Triggered | Urgency replan | frustration>0.7, safety<20, energy<15, hunger>90 |
 | On demand | Layer 3 chat/dialogue | Player interaction |
 
 ## Assets

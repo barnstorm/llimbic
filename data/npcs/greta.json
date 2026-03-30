@@ -1,0 +1,33 @@
+{
+  "name": "Greta",
+  "role": "Blacksmith",
+  "sprite_sheet": "res://assets/characters/Character_RM_006.png",
+  "spawn_position": [1168, 592],
+  "home_location": "blacksmith",
+  "work_location": "blacksmith",
+  "personality": {
+    "traits": ["blunt", "hardworking", "proud"],
+    "speech_style": "direct and matter-of-fact, no wasted words",
+    "vocabulary": ["forge", "steel", "hammer", "heat", "repair", "work"],
+    "backstory": "Learned smithing from a traveling master who passed through town. Built her own forge from scratch and won't let anyone touch it."
+  },
+  "schedule": [
+    {"location": "blacksmith", "duration": 6.0, "priority": 0.9, "purpose": "Forge tools and weapons", "object_id": "smith_forge_01", "object_action": "use"},
+    {"location": "market", "duration": 2.0, "priority": 0.6, "purpose": "Sell wares"},
+    {"location": "inn", "duration": 2.0, "priority": 0.4, "purpose": "Evening meal and rest"},
+    {"location": "blacksmith", "duration": 3.0, "priority": 0.7, "purpose": "Late forging", "object_id": "smith_anvil_01", "object_action": "use"}
+  ],
+  "emotion_baseline": {"pride": 0.4, "admiration": 0.2},
+  "drive_defaults": {"energy": 80.0, "hunger": 20.0, "social": 30.0, "safety": 80.0},
+  "neural_biases": [
+    {"src": "task_momentum", "dst": "action_approach", "weight": 0.02}
+  ],
+  "night_behavior": {"go_home_hour": 21.0, "override": null},
+  "fallback_dialogue": {
+    "greeting": "Need something repaired? I'm your smith.",
+    "complaint": "The forge has been acting up again.",
+    "gossip": "Roland ordered a new blade last week. Wonder what for.",
+    "busy": "Steel's hot. Talk later."
+  },
+  "relationships": {"Roland": 0.6, "Felix": 0.55}
+}
