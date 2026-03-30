@@ -17,6 +17,8 @@ func _ready() -> void:
 
 	_setup_sprite_frames("res://assets/characters/Character_RM_001.png")
 
+	add_to_group("player")
+
 	# Place player at a good starting position (near center of town)
 	position = Vector2(2240, 1600)
 

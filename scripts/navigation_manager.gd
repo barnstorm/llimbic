@@ -59,14 +59,28 @@ func _build_nav_grid() -> void:
 
 	print("NavigationManager: built grid with ", astar.get_point_count(), " walkable tiles")
 
-func get_nav_path(from_world: Vector2, to_world: Vector2) -> PackedVector2Array:
+func get_nav_path(from_world: Vector2, to_world: Vector2, avoid_positions: Array = []) -> PackedVector2Array:
 	if astar == null:
 		return PackedVector2Array()
+	# Temporarily disable tiles occupied by dynamic obstacles
+	var disabled_ids: Array[int] = []
+	for pos in avoid_positions:
+		var tile: Vector2i = world_to_tile(pos)
+		var idx: int = tile.y * map_width + tile.x
+		if astar.has_point(idx) and not astar.is_point_disabled(idx):
+			astar.set_point_disabled(idx, true)
+			disabled_ids.append(idx)
 	var from_id: int = astar.get_closest_point(from_world)
 	var to_id: int = astar.get_closest_point(to_world)
+	var path: PackedVector2Array
 	if from_id < 0 or to_id < 0:
-		return PackedVector2Array()
-	return astar.get_point_path(from_id, to_id)
+		path = PackedVector2Array()
+	else:
+		path = astar.get_point_path(from_id, to_id)
+	# Re-enable
+	for idx in disabled_ids:
+		astar.set_point_disabled(idx, false)
+	return path
 
 func world_to_tile(world_pos: Vector2) -> Vector2i:
 	var tx: int = int(world_pos.x / tile_size)

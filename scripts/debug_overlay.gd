@@ -16,6 +16,7 @@ var _modulation_label: Label = null
 var _l1_bars: Array = []  # [{label: Label, bar: ColorRect, bg: ColorRect}]
 var _l2_cells: Array = []  # ColorRect[27]
 var _objects_label: Label = null
+var _network_label: Label = null
 var _fov_draw_node: Node2D = null  # Draws FOV cones in world space
 
 # Emotion labels for heatmap tooltips
@@ -192,6 +193,17 @@ func _build_ui() -> void:
 	_panel.add_child(_memory_label)
 	y_offset += 65.0
 
+	# Section: Neural Network
+	var net_header: Label = _make_label("-- Neural Network --", margin, y_offset, inner_w, 11, Color(0.9, 0.5, 0.9))
+	_panel.add_child(net_header)
+	y_offset += 16.0
+
+	_network_label = _make_label("No network.", margin, y_offset, inner_w, 9, Color(0.8, 0.7, 0.9))
+	_network_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	_network_label.size = Vector2(inner_w, 50)
+	_panel.add_child(_network_label)
+	y_offset += 55.0
+
 	# Section: Known Objects
 	var obj_header: Label = _make_label("-- Known Objects --", margin, y_offset, inner_w, 11, Color(0.4, 0.7, 1.0))
 	_panel.add_child(obj_header)
@@ -338,6 +350,26 @@ func _update_panel() -> void:
 			_memory_label.text = "\n".join(events)
 		else:
 			_memory_label.text = "No notable events."
+
+	# Neural Network
+	if brain.layer1 and _network_label:
+		var net_debug: Dictionary = brain.layer1.get_network_debug()
+		if not net_debug.is_empty():
+			var fixed: int = net_debug.get("neuron_count", 0) - net_debug.get("dynamic_count", 0)
+			var dyn: int = net_debug.get("dynamic_count", 0)
+			var conns: int = net_debug.get("connection_count", 0)
+			var line1: String = "Neurons: %d+%d  Conns: %d" % [fixed, dyn, conns]
+			var line2: String = "S:%d N:%d R:%d" % [net_debug.get("stress_count", 0), net_debug.get("novelty_count", 0), net_debug.get("reward_count", 0)]
+			var evt: Dictionary = net_debug.get("last_event", {})
+			var line3: String = ""
+			if not evt.is_empty():
+				var ago: float = (Time.get_ticks_msec() - evt.get("tick", 0)) / 1000.0
+				line3 = "Last: %s(%s) %.0fs ago" % [evt.get("type", "?"), evt.get("context", ""), ago]
+			else:
+				line3 = "No neurogenesis yet"
+			_network_label.text = "%s  %s\n%s" % [line1, line2, line3]
+		else:
+			_network_label.text = "No network."
 
 	# Known Objects
 	if brain.memory and _objects_label:

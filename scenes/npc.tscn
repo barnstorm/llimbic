@@ -1,11 +1,20 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://scripts/npc_controller.gd" id="1_nh2m4"]
 
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_npc"]
+size = Vector2(20, 12)
+
 [node name="NPC" type="CharacterBody2D"]
+collision_layer = 2
+collision_mask = 6
 script = ExtResource("1_nh2m4")
 
 [node name="AnimatedSprite2D" type="AnimatedSprite2D" parent="."]
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+position = Vector2(0, 8)
+shape = SubResource("RectangleShape2D_npc")
 
 [node name="NameLabel" type="Label" parent="."]
 offset_left = -30.0

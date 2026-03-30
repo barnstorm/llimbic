@@ -7,6 +7,9 @@ const MAX_REFLECTIONS: int = 5
 const MAX_CONCERNS: int = 5
 const MAX_FAILED_STRATEGIES: int = 5
 
+# Optional log callback — set by brain to pipe events to per-NPC log
+var on_tagged_event: Callable
+
 # Raw observations: who, where, doing what
 var observations: Array[Dictionary] = []
 
@@ -49,6 +52,8 @@ func add_observation(who: String, where: String, doing: String) -> void:
 		observations.pop_front()
 
 func add_tagged_event(description: String, salience: float, tags: Array = [], source: String = "direct") -> void:
+	if on_tagged_event.is_valid():
+		on_tagged_event.call(description, salience)
 	var evt: Dictionary = {
 		"description": description,
 		"salience": salience,

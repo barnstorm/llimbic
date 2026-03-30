@@ -25,6 +25,7 @@ var _path_target: Vector2 = Vector2.ZERO  # what we pathed to, for change detect
 
 # Action execution state
 var _action_type: String = ""
+var _repath_cooldown: float = 0.0  # avoid re-pathing every frame on sustained contact
 var _observe_timer: float = 0.0  # countdown for observe action
 var _wander_timer: float = 0.0
 var _wander_subtarget: Vector2 = Vector2.ZERO
@@ -149,21 +150,16 @@ func _physics_process(delta: float) -> void:
 
 	# --- Update brain layers (unchanged cadences) ---
 
-	# Perception
+	# Perception — NPCs see everything in their FOV: other NPCs and the player
 	var all_npcs: Array = get_tree().get_nodes_in_group("npcs")
-	brain.update_perception(_facing, global_position, all_npcs)
+	var player: Node = get_tree().get_first_node_in_group("player")
+	brain.update_perception(_facing, global_position, all_npcs, player)
 	_nearby_npc_count = brain.get_visible_npc_count()
 
-	# Layer 1: every tick
+	# Layer 1 + L2 emotions + modulation: every tick (closed loop)
 	brain.update_layer1(delta, global_position, _nearby_npc_count)
 
-	# Layer 2: medium cadence
-	_l2_timer += delta
-	if _l2_timer >= 2.0:
-		_l2_timer = randf_range(0.0, 0.5)
-		brain.update_layer2(delta)
-
-	# Layer 3: triggered by game time
+	# Layer 3: triggered by game time (+ urgency replans from L1)
 	var hour: float = 6.0
 	if _game_manager:
 		hour = _game_manager.current_hour
@@ -275,7 +271,26 @@ func _follow_path(delta: float, speed_mul: float) -> void:
 
 	velocity = direction * speed * speed_mul
 	_play_walk()
+	var pos_before: Vector2 = global_position
 	move_and_slide()
+
+	# If we collided with a body, re-path around it (once, not every frame)
+	_repath_cooldown = maxf(_repath_cooldown - delta, 0.0)
+	if get_slide_collision_count() > 0 and _repath_cooldown <= 0.0:
+		var collision: KinematicCollision2D = get_slide_collision(0)
+		var collider: Object = collision.get_collider()
+		if collider is CharacterBody2D and collider != self:
+			# Disable the obstacle's tile + immediate neighbors to force a real detour
+			var cpos: Vector2 = collider.global_position
+			var avoid: Array = [cpos, cpos + Vector2(32, 0), cpos + Vector2(-32, 0), cpos + Vector2(0, 32), cpos + Vector2(0, -32)]
+			_current_path = _nav_manager.get_nav_path(global_position, _path_target, avoid) if _nav_manager else PackedVector2Array()
+			_path_index = 1 if _current_path.size() > 1 else 0
+			_repath_cooldown = 1.0
+
+	# Tell Layer 1 how much progress we actually made
+	if brain and brain.layer1:
+		var actual_dist: float = global_position.distance_to(pos_before)
+		brain.layer1.update_progress(delta, speed * speed_mul, actual_dist)
 
 func _do_wander(delta: float, action: Dictionary) -> void:
 	_wander_timer -= delta

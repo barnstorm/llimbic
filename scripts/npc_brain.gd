@@ -45,51 +45,85 @@ var _examine_timer: float = 0.0
 var _examining_object_id: String = ""
 var _last_examine_times: Dictionary = {}  # object_id -> ticks_msec
 
+# Logging
+var _last_logged_action: String = ""
+var _last_logged_stall: bool = false
+
 # Timers
 var _social_pulse_timer: float = 0.0
 var _social_pulse_interval: float = 5.0  # game minutes → real seconds depend on time_scale
 
+var _log_file: FileAccess = null
+
+var _persona: Dictionary = {}
+
 func setup(p_name: String, p_role: String) -> void:
 	npc_name = p_name
 	role = p_role
+	# Per-NPC log file
+	var dir := DirAccess.open("res://")
+	if dir and not dir.dir_exists("logs"):
+		dir.make_dir("logs")
+	_log_file = FileAccess.open("res://logs/%s.log" % p_name.to_lower(), FileAccess.WRITE)
+	if _log_file:
+		_log_file.store_line("=== %s (%s) ===" % [p_name, p_role])
 
-	# Create subsystems
+	# Load persona data
+	var LoaderScript: GDScript = load("res://scripts/persona_loader.gd")
+	_persona = LoaderScript.load_persona(p_name)
+	if _persona.is_empty():
+		_persona = {"name": p_name, "role": p_role}
+
+	# Create subsystems with persona data
 	var L1Script: GDScript = load("res://scripts/layer1_substrate.gd")
 	layer1 = L1Script.new()
-	layer1.setup(role)
+	layer1.setup(_persona)
 
 	var L2Script: GDScript = load("res://scripts/layer2_projection.gd")
 	layer2 = L2Script.new()
-	layer2.setup(npc_name, role)
+	layer2.setup(npc_name, role, _persona)
 
 	var L3Script: GDScript = load("res://scripts/layer3_executive.gd")
 	layer3 = L3Script.new()
-	layer3.setup(npc_name, role)
+	layer3.setup(npc_name, role, _persona)
 
 	var MemScript: GDScript = load("res://scripts/memory_system.gd")
 	memory = MemScript.new()
+	memory.on_tagged_event = func(desc: String, salience: float) -> void:
+		npc_log("MEM [%.1f]: %s" % [salience, desc])
+
+	# Set initial trust from persona relationships
+	var relationships: Dictionary = _persona.get("relationships", {})
+	for entity_name in relationships:
+		memory.update_relationship(str(entity_name), 0.0, "initial")
+		layer1.trust[str(entity_name)] = float(relationships[entity_name])
 
 	var PercScript: GDScript = load("res://scripts/perception.gd")
 	perception = PercScript.new()
+
+func npc_log(msg: String) -> void:
+	if _log_file:
+		var t: float = _game_manager.current_hour if _game_manager else 0.0
+		var line: String = "[%02d:%02d] %s" % [int(t), int(fmod(t, 1.0) * 60), msg]
+		_log_file.store_line(line)
+		_log_file.flush()
 
 func set_autoloads(inference_client: Node, game_manager: Node, world_object_registry: Node = null) -> void:
 	_inference_client = inference_client
 	_game_manager = game_manager
 	_world_object_registry = world_object_registry
 
+# Urgency replan state
+var _urgency_replan_cooldown: float = 0.0
+const URGENCY_REPLAN_MIN_INTERVAL: float = 30.0
+
+# Chunk outcome tracking
+var _chunk_outcomes: Array[Dictionary] = []
+
 func update_layer1(delta: float, world_pos: Vector2, nearby_npcs: int) -> void:
 	if layer1 == null:
 		return
 	_last_world_pos = world_pos
-
-	# Apply Layer 2 modulation to Layer 1
-	if layer2 != null:
-		var mod: Dictionary = layer2.modulation
-		layer1.learning_rate_mod = mod.get("learning_rate_mod", 1.0)
-		layer1.exploration_bias = mod.get("exploration_bias", 0.0)
-		layer1.attention_weight = mod.get("attention_weight", 1.0)
-		layer1.interruption_sensitivity = mod.get("interruption_sensitivity", 0.5)
-		layer1.persistence_scale = mod.get("persistence_scale", 1.0)
 
 	# Determine context
 	var hour: float = 6.0
@@ -111,6 +145,27 @@ func update_layer1(delta: float, world_pos: Vector2, nearby_npcs: int) -> void:
 	var at_work: bool = (current_location == work_loc)
 
 	layer1.set_context(hour, at_home, at_work, current_location, nearby_npcs)
+
+	# --- Closed loop: L2 emotions computed synchronously, every tick ---
+	if layer2 != null:
+		var chunk_priority: float = 0.5
+		if layer3:
+			var chunk: Dictionary = layer3.get_current_chunk()
+			chunk_priority = chunk.get("priority", 0.5)
+		var recent: Array = memory.get_recent_events_text(5)
+		layer2.update_deterministic(layer1.get_state_dict(), recent, chunk_priority)
+
+		# Apply modulation from emotions (continuous, not chunk-gated)
+		var mod: Dictionary = layer2.modulation
+		layer1.learning_rate_mod = mod.get("learning_rate_mod", 1.0)
+		layer1.exploration_bias = mod.get("exploration_bias", 0.0)
+		layer1.attention_weight = mod.get("attention_weight", 1.0)
+		layer1.interruption_sensitivity = mod.get("interruption_sensitivity", 0.5)
+		layer1.persistence_scale = mod.get("persistence_scale", 1.0)
+
+		# Emotion → L1 feedback (closes the bidirectional loop)
+		layer1.apply_emotion_feedback(layer2.emotion_vector)
+
 	layer1.update(delta)
 
 	# Update familiarity
@@ -118,11 +173,13 @@ func update_layer1(delta: float, world_pos: Vector2, nearby_npcs: int) -> void:
 		memory.visit_location(current_location)
 		layer1.place_familiarity[current_location] = memory.get_location_comfort(current_location)
 
-func update_layer2(delta: float) -> void:
-	if layer2 == null or layer1 == null:
-		return
-	var recent: Array = memory.get_recent_events_text(5)
-	layer2.update(delta, layer1.get_state_dict(), recent, _inference_client)
+	# Check urgency → L3 reactive replan
+	_check_urgency_replan(delta, hour)
+
+func update_layer2(_delta: float) -> void:
+	# L2 now runs inside update_layer1() every tick via update_deterministic().
+	# This method is kept for backward compat but does nothing.
+	pass
 
 func update_layer3(hour: float) -> void:
 	if layer3 == null:
@@ -135,13 +192,18 @@ func update_layer3(hour: float) -> void:
 		mem_summary += "\nFrustration is high (%.2f)." % layer1.frustration
 	if memory.failed_strategies.size() > 2:
 		mem_summary += "\nMultiple recent failures (%d)." % memory.failed_strategies.size()
+	# Include chunk outcomes for L3 feedback
+	if _chunk_outcomes.size() > 0:
+		mem_summary += "\nRecent task outcomes:"
+		for co in _chunk_outcomes:
+			mem_summary += "\n- %s at %s: %s" % [co.get("purpose", "?"), co.get("location", "?"), co.get("outcome", "?")]
 	var emo_summary: String = ""
 	if layer2:
 		emo_summary = layer2.get_emotion_summary()
 	var obj_summary: String = memory.get_object_summary()
 	layer3.update_plan(hour, mem_summary, emo_summary, _inference_client, obj_summary)
 
-	# Trigger southbound modulation when chunk changes
+	# Track chunk changes for logging
 	_check_modulation_trigger()
 
 	# Check if reflection is due
@@ -166,7 +228,7 @@ func _check_reflection(hour: float) -> void:
 	_last_reflection_hour = hour
 	_tagged_event_count_at_last_reflection = memory.tagged_events.size()
 	var events_text: Array = memory.get_recent_events_text(10)
-	_inference_client.layer3_reflect(events_text, _on_reflection_result)
+	_inference_client.layer3_reflect(events_text, _on_reflection_result, npc_name, role)
 
 func _on_reflection_result(success: bool, data: Dictionary) -> void:
 	_pending_reflection = false
@@ -283,6 +345,9 @@ func get_target_position() -> Vector2:
 	if not _drive_override.is_empty():
 		if _drive_has_recovered(_drive_override.get("drive", "")):
 			memory.add_tagged_event("Recovered from: " + _drive_override.get("reason", ""), 0.3, ["drive_recovery"])
+			# Signal reward to neural network — drive recovery is a positive outcome
+			if layer1 and layer1._network:
+				layer1._network.signal_reward()
 			_drive_override = {}
 			# Try to resume the suspended plan chunk
 			if layer3.resume_suspended():
@@ -322,6 +387,24 @@ func get_current_action() -> String:
 func select_action(delta: float) -> Dictionary:
 	## Called every tick by the controller. Returns an action dictionary.
 	## Priority: reorientation > flee > observe > wander-at-dest > move-toward
+	var result: Dictionary = _select_action_inner(delta)
+	# Log on action change or stall state change
+	var action_key: String = result.get("type", "") + "|" + result.get("reason", "")
+	if action_key != _last_logged_action:
+		var frust: String = "frust=%.2f" % layer1.frustration
+		var mom: String = "mom=%.2f" % layer1.task_momentum
+		var obs: String = "obs=%.2f" % layer1.observe
+		npc_log("%s: %s [%s %s %s]" % [result.get("type", "?"), result.get("reason", ""), frust, mom, obs])
+		_last_logged_action = action_key
+	if layer1.is_stalled != _last_logged_stall:
+		if layer1.is_stalled:
+			npc_log("STALL onset — frust=%.2f mom=%.2f observe=%.2f" % [layer1.frustration, layer1.task_momentum, layer1.observe])
+		else:
+			npc_log("STALL cleared — frust=%.2f" % layer1.frustration)
+		_last_logged_stall = layer1.is_stalled
+	return result
+
+func _select_action_inner(delta: float) -> Dictionary:
 
 	# 1. Reorientation pause after interruption
 	if layer1.reorientation_timer > 0.0:
@@ -338,13 +421,25 @@ func select_action(delta: float) -> Dictionary:
 			memory.add_tagged_event("Fled from " + threat["name"], 0.5, ["flee", "danger"])
 			return current_action
 
-	# 3. Observe interesting entity (cooldown prevents constant stops)
+	# 3. Observe interesting entity
+	# Cooldown prevents constant stopping during normal movement,
+	# but stalled NPCs bypass it — they need to see what's in front of them
 	_observe_cooldown = maxf(_observe_cooldown - delta, 0.0)
-	if layer1.observe > 0.6 and _observe_cooldown <= 0.0 and perception:
+	var can_observe: bool = (_observe_cooldown <= 0.0) or layer1.is_stalled
+	if layer1.observe > 0.6 and can_observe and perception:
 		var interesting: Dictionary = _find_interesting_entity()
 		if not interesting.is_empty():
-			_observe_cooldown = 8.0
+			_observe_cooldown = 8.0 if not layer1.is_stalled else 2.0
 			memory.add_observation(npc_name, "", "Stopped to observe " + interesting["name"])
+			# Stalled NPCs remember the frustration, not just the observation
+			if layer1.is_stalled:
+				var purpose: String = get_current_action()
+				memory.add_tagged_event(
+					"%s is in my way while I'm trying to %s" % [interesting["name"], purpose],
+					0.4 + layer1.task_momentum * 0.4,
+					["blocked", "frustration"], "direct"
+				)
+				memory.update_relationship(interesting["name"], -0.02, "Blocked my path")
 			current_action = {"type": "observe", "target": interesting["position"], "entity": interesting["name"], "duration": randf_range(0.8, 1.5), "reason": "Observing " + interesting["name"], "speed_mul": 0.0}
 			return current_action
 
@@ -429,7 +524,17 @@ func _find_threat() -> Dictionary:
 	return {}
 
 func _find_interesting_entity() -> Dictionary:
-	## Find a visible entity we haven't observed recently.
+	## Find a visible entity worth observing.
+	## When stalled, the closest entity IS interesting — it's what's blocking us.
+	if layer1.is_stalled and perception.visible_entities.size() > 0:
+		var closest: Dictionary = {}
+		var closest_dist: float = 999999.0
+		for entity in perception.visible_entities:
+			if entity["distance"] < closest_dist:
+				closest_dist = entity["distance"]
+				closest = entity
+		return closest
+	# Normal: find someone we haven't looked at recently
 	var recent_names: Array = []
 	var recent_slice: Array = memory.observations.slice(-5) if memory.observations.size() > 0 else []
 	for obs in recent_slice:
@@ -454,18 +559,71 @@ func on_arrived_at_destination() -> void:
 			memory.add_observation(npc_name, chunk.get("location", ""), "arrived for " + chunk.get("purpose", "task"))
 
 func _check_modulation_trigger() -> void:
-	## When the plan chunk changes, issue a directive to Layer 2 for southbound modulation.
+	# Modulation is now continuous (every tick in update_layer1).
+	# This method tracks chunk changes for logging only.
 	if layer3 == null:
 		return
 	if layer3.current_chunk_index != _last_chunk_index:
 		_last_chunk_index = layer3.current_chunk_index
-		var directive: String = layer3.get_chunk_directive()
-		if directive != "" and layer2 != null and _inference_client != null:
-			layer2.request_modulation(directive, _inference_client)
+
+func _check_urgency_replan(delta: float, hour: float) -> void:
+	## When L1 drives cross critical thresholds, fire immediate L3 replan.
+	_urgency_replan_cooldown = maxf(_urgency_replan_cooldown - delta, 0.0)
+	if _urgency_replan_cooldown > 0.0:
+		return
+	if layer1 == null or layer3 == null:
+		return
+
+	var reason: String = ""
+	if layer1.frustration > 0.7:
+		reason = "frustration_spike"
+	elif layer1.safety < 20.0:
+		reason = "safety_critical"
+	elif layer1.energy < 15.0:
+		reason = "energy_critical"
+	elif layer1.hunger > 90.0:
+		reason = "hunger_critical"
+
+	if reason != "":
+		_urgency_replan_cooldown = URGENCY_REPLAN_MIN_INTERVAL
+		npc_log("URGENCY REPLAN: " + reason)
+		_force_replan(reason, hour)
+
+func _force_replan(reason: String, hour: float) -> void:
+	if layer3 == null:
+		return
+	var mem_summary: String = memory.get_memory_summary()
+	mem_summary += "\nURGENT: " + reason
+	if memory.concerns.size() > 0:
+		mem_summary += "\nConcerns: " + ", ".join(memory.concerns)
+	# Add chunk outcomes to context
+	if _chunk_outcomes.size() > 0:
+		mem_summary += "\nRecent task outcomes:"
+		for co in _chunk_outcomes:
+			mem_summary += "\n- %s at %s: %s" % [co.get("purpose", "?"), co.get("location", "?"), co.get("outcome", "?")]
+	var emo_summary: String = layer2.get_emotion_summary() if layer2 else ""
+	var obj_summary: String = memory.get_object_summary()
+	layer3._last_plan_hour = -1.0  # reset timer gate
+	layer3.update_plan(hour, mem_summary, emo_summary, _inference_client, obj_summary)
 
 func on_chunk_completed() -> void:
 	if layer3:
+		var old_chunk: Dictionary = layer3.get_current_chunk()
+		npc_log("CHUNK done: %s" % old_chunk.get("purpose", "?"))
+		# Track outcome
+		var outcome: String = "completed"
+		if layer1 and layer1.frustration > 0.5:
+			outcome = "completed_with_difficulty"
+		_chunk_outcomes.append({
+			"purpose": old_chunk.get("purpose", "unknown"),
+			"location": old_chunk.get("location", "unknown"),
+			"outcome": outcome
+		})
+		if _chunk_outcomes.size() > 5:
+			_chunk_outcomes.pop_front()
 		layer3.advance_chunk()
+		var new_chunk: Dictionary = layer3.get_current_chunk()
+		npc_log("CHUNK next: %s @ %s" % [new_chunk.get("purpose", "?"), new_chunk.get("location", "?")])
 		layer1.task_momentum = 0.0
 		_check_modulation_trigger()
 
@@ -530,18 +688,19 @@ func on_path_blocked() -> bool:
 	_path_retry_count = 0
 	return true
 
+
 func on_npc_nearby(other_name: String) -> void:
 	memory.add_observation(npc_name, "", "Near " + other_name)
 
 # --- Perception ---
 
-func update_perception(facing: String, my_pos: Vector2, all_npcs: Array) -> void:
+func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player: Node = null) -> void:
 	"""Update FOV vision. Called every tick from npc_controller."""
 	if perception == null:
 		return
 	perception.set_facing(facing)
 
-	# Build entity list for vision check
+	# Build entity list — everything with a position that isn't us
 	var entities: Array = []
 	for npc in all_npcs:
 		if npc.npc_name == npc_name:
@@ -551,6 +710,13 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array) -> void
 			"position": npc.global_position,
 			"doing": npc.brain.get_current_action() if npc.brain else "",
 			"facing": npc._facing if "_facing" in npc else "",
+		})
+	if player and is_instance_valid(player):
+		entities.append({
+			"name": "Player",
+			"position": player.global_position,
+			"doing": "exploring",
+			"facing": player._facing if "_facing" in player else "",
 		})
 
 	perception.update_vision(my_pos, entities)
