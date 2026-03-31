@@ -17,7 +17,10 @@ var _l1_bars: Array = []  # [{label: Label, bar: ColorRect, bg: ColorRect}]
 var _l2_cells: Array = []  # ColorRect[27]
 var _objects_label: Label = null
 var _network_label: Label = null
-var _fov_draw_node: Node2D = null  # Draws FOV cones in world space
+var _fov_draw_node: Node2D = null  # Draws FOV cones, vision rays, occluders, hearing in world space
+var _occluder_system: Node = null
+var _stimulus_registry: Node = null
+var _sensor_system: Node = null
 
 # Emotion labels for heatmap tooltips
 const EMOTION_LABELS: Array[String] = [
@@ -41,13 +44,18 @@ func _setup_fov_drawing() -> void:
 	for child in get_tree().root.get_children():
 		if child.name == "Main":
 			main = child
-			break
+		elif child.name == "OccluderSystem":
+			_occluder_system = child
+		elif child.name == "StimulusRegistry":
+			_stimulus_registry = child
+		elif child.name == "SensorSystem":
+			_sensor_system = child
 	if main:
 		_fov_draw_node = Node2D.new()
 		_fov_draw_node.name = "FOVDraw"
 		_fov_draw_node.z_index = 10
 		_fov_draw_node.visible = false
-		_fov_draw_node.draw.connect(_draw_fov_cones)
+		_fov_draw_node.draw.connect(_draw_debug_world)
 		main.add_child(_fov_draw_node)
 
 func _input(event: InputEvent) -> void:
@@ -440,10 +448,18 @@ func _update_npc_indicators() -> void:
 		_fov_draw_node.visible = _active
 		_fov_draw_node.queue_redraw()
 
-func _draw_fov_cones() -> void:
-	"""Draw FOV cones for all NPCs (or just selected) in world space."""
+func _draw_debug_world() -> void:
+	"""Draw all debug visualization in world space: FOV cones, vision rays, occluders, hearing, stimuli."""
 	if not _active or _fov_draw_node == null:
 		return
+
+	# --- Occluder segments (semi-transparent lines) near camera ---
+	_draw_occluder_segments()
+
+	# --- Active stimuli (pulsing circles) ---
+	_draw_active_stimuli()
+
+	# --- FOV cones for all NPCs ---
 	for npc in get_tree().get_nodes_in_group("npcs"):
 		if npc.brain == null or npc.brain.perception == null:
 			continue
@@ -452,9 +468,179 @@ func _draw_fov_cones() -> void:
 			continue
 		# Draw filled cone with transparency
 		var color: Color = npc.get_valence_color() if npc.has_method("get_valence_color") else Color.YELLOW
-		color.a = 0.12
+		color.a = 0.18
 		_fov_draw_node.draw_colored_polygon(points, color)
 		# Draw cone outline
-		color.a = 0.35
+		color.a = 0.5
 		for i in range(points.size() - 1):
 			_fov_draw_node.draw_line(points[i], points[i + 1], color, 1.0)
+
+	# --- Vision rays from selected NPC to visible targets ---
+	if _selected_npc != null and _selected_npc.brain != null and _selected_npc.brain.perception != null:
+		_draw_vision_rays(_selected_npc)
+		_draw_hearing_indicators(_selected_npc)
+
+func _draw_vision_rays(npc: Node) -> void:
+	"""Draw vision rays from selected NPC: green=visible, red=blocked, with sample points."""
+	var perc = npc.brain.perception
+	var queries: Array = perc.last_vision_queries
+	var npc_pos: Vector2 = npc.global_position
+
+	for query in queries:
+		var target_pos: Vector2 = query.get("target_pos", Vector2.ZERO)
+		var target_name: String = query.get("target_name", "")
+		var result: Dictionary = query.get("result", {})
+		var is_visible: bool = result.get("visible", false)
+		var exposure: float = result.get("exposure", 0.0)
+
+		if is_visible:
+			# Green ray to visible targets, intensity based on exposure
+			var ray_color: Color = Color(0.0, 1.0, 0.0, 0.5 + exposure * 0.4)
+			_fov_draw_node.draw_line(npc_pos, target_pos, ray_color, 2.0)
+			# Draw sample hit points as small green dots
+			var SRTScript: GDScript = load("res://scripts/sensory_result_types.gd")
+			var offsets: Array = SRTScript.actor_sample_offsets()
+			for offset in offsets:
+				var sample_pos: Vector2 = target_pos + offset
+				_fov_draw_node.draw_circle(sample_pos, 3.0, Color(0.0, 1.0, 0.0, 0.8))
+			# Exposure label near target
+			_draw_world_text(target_pos + Vector2(14, -14), "%.0f%%" % (exposure * 100.0), Color(0.0, 1.0, 0.0, 1.0))
+		else:
+			# Only draw red rays if the target is within reasonable range
+			var dist: float = npc_pos.distance_to(target_pos)
+			if dist < 200.0:
+				# Red ray to blocked/out-of-range targets
+				var ray_color: Color = Color(1.0, 0.0, 0.0, 0.35)
+				_fov_draw_node.draw_line(npc_pos, target_pos, ray_color, 1.5)
+				# Draw X at target to indicate blocked
+				var x_size: float = 4.0
+				_fov_draw_node.draw_line(target_pos + Vector2(-x_size, -x_size), target_pos + Vector2(x_size, x_size), Color(1.0, 0.0, 0.0, 0.6), 1.5)
+				_fov_draw_node.draw_line(target_pos + Vector2(x_size, -x_size), target_pos + Vector2(-x_size, x_size), Color(1.0, 0.0, 0.0, 0.6), 1.5)
+
+func _draw_hearing_indicators(npc: Node) -> void:
+	"""Draw hearing indicators: arcs showing sound direction, volume meters."""
+	var perc = npc.brain.perception
+	var hearing_results: Array = perc.last_hearing_results
+	var npc_pos: Vector2 = npc.global_position
+
+	for hr in hearing_results:
+		var direction: Vector2 = hr.get("direction", Vector2.ZERO)
+		var volume: float = hr.get("perceived_volume", 0.0)
+		var clarity: float = hr.get("clarity", 0.0)
+		var est_pos: Vector2 = hr.get("estimated_source_pos", Vector2.ZERO)
+		var stim_type: String = hr.get("stimulus_type", "")
+
+		if direction.length_squared() < 0.01:
+			continue
+
+		# Draw direction arc
+		var arc_radius: float = 20.0 + volume * 30.0
+		var base_angle: float = direction.angle()
+		var arc_spread: float = 0.6 - clarity * 0.4  # wider arc = less clarity
+		var arc_color: Color = Color(0.3, 0.6, 1.0, 0.4 + volume * 0.4)  # blue-ish
+		if stim_type == "speech":
+			arc_color = Color(1.0, 0.8, 0.2, 0.4 + volume * 0.4)  # yellow for speech
+		elif stim_type == "footstep":
+			arc_color = Color(0.5, 0.5, 0.5, 0.3)  # gray for footsteps
+
+		# Draw arc as line segments
+		var arc_steps: int = 8
+		var prev_point: Vector2 = npc_pos + Vector2(cos(base_angle - arc_spread), sin(base_angle - arc_spread)) * arc_radius
+		for i in range(1, arc_steps + 1):
+			var t: float = float(i) / float(arc_steps)
+			var angle: float = base_angle - arc_spread + t * arc_spread * 2.0
+			var point: Vector2 = npc_pos + Vector2(cos(angle), sin(angle)) * arc_radius
+			_fov_draw_node.draw_line(prev_point, point, arc_color, 2.0)
+			prev_point = point
+
+		# Volume meter: small bar at the arc center
+		var meter_pos: Vector2 = npc_pos + direction * (arc_radius + 8.0)
+		var meter_width: float = 16.0
+		var meter_height: float = 3.0
+		_fov_draw_node.draw_rect(Rect2(meter_pos - Vector2(meter_width * 0.5, meter_height * 0.5), Vector2(meter_width, meter_height)), Color(0.2, 0.2, 0.3, 0.5))
+		_fov_draw_node.draw_rect(Rect2(meter_pos - Vector2(meter_width * 0.5, meter_height * 0.5), Vector2(meter_width * volume, meter_height)), arc_color)
+
+func _draw_occluder_segments() -> void:
+	"""Draw occluder segments near the camera viewport as semi-transparent lines."""
+	if _occluder_system == null:
+		return
+
+	# Get viewport bounds in world space
+	var camera: Camera2D = null
+	var main: Node = null
+	for child in get_tree().root.get_children():
+		if child.name == "Main":
+			main = child
+			break
+	if main:
+		camera = main.get_node_or_null("Camera2D") as Camera2D
+	if camera == null:
+		return
+
+	var viewport: Viewport = get_viewport()
+	var vp_size: Vector2 = viewport.get_visible_rect().size
+	var cam_pos: Vector2 = camera.global_position
+	var zoom: Vector2 = camera.zoom
+	var half_view: Vector2 = vp_size / (2.0 * zoom)
+	var view_rect: Rect2 = Rect2(cam_pos - half_view, half_view * 2.0).grow(64.0)
+
+	var segments: Array = _occluder_system.get_occluders_in_rect(view_rect)
+	var seg_color: Color = Color(0.9, 0.3, 0.3, 0.25)
+	for seg in segments:
+		_fov_draw_node.draw_line(seg["start"], seg["end"], seg_color, 1.5)
+
+func _draw_active_stimuli() -> void:
+	"""Draw active stimuli as pulsing circles."""
+	if _stimulus_registry == null:
+		return
+
+	# Get camera viewport bounds
+	var camera: Camera2D = null
+	var main: Node = null
+	for child in get_tree().root.get_children():
+		if child.name == "Main":
+			main = child
+			break
+	if main:
+		camera = main.get_node_or_null("Camera2D") as Camera2D
+	if camera == null:
+		return
+
+	var viewport: Viewport = get_viewport()
+	var vp_size: Vector2 = viewport.get_visible_rect().size
+	var cam_pos: Vector2 = camera.global_position
+	var zoom: Vector2 = camera.zoom
+	var half_view: Vector2 = vp_size / (2.0 * zoom)
+	var query_radius: float = maxf(half_view.x, half_view.y) + 200.0
+
+	var stimuli: Array = _stimulus_registry.get_stimuli_in_range(cam_pos, query_radius)
+	var pulse: float = 0.5 + 0.5 * sin(Time.get_ticks_msec() / 300.0)
+
+	for stim in stimuli:
+		var pos: Vector2 = stim.get("position", Vector2.ZERO)
+		var radius: float = stim.get("radius", 0.0)
+		var strength: float = stim.get("strength", 0.0)
+		var stim_type: String = stim.get("type", "")
+
+		var color: Color = Color(0.4, 0.4, 0.8, 0.15)  # default: bluish
+		if stim_type == "speech":
+			color = Color(1.0, 0.8, 0.2, 0.15)  # yellow
+		elif stim_type == "footstep":
+			color = Color(0.5, 0.5, 0.5, 0.08)  # faint gray
+		elif stim_type == "impact":
+			color = Color(1.0, 0.3, 0.1, 0.2)  # red-orange
+
+		# Pulsing radius
+		var draw_radius: float = radius * (0.8 + 0.2 * pulse)
+		color.a *= (0.7 + 0.3 * pulse) * strength
+
+		# Draw outer circle
+		_fov_draw_node.draw_arc(pos, draw_radius, 0.0, TAU, 32, color, 1.0)
+		# Draw center dot
+		_fov_draw_node.draw_circle(pos, 2.0, Color(color.r, color.g, color.b, color.a * 2.0))
+
+func _draw_world_text(pos: Vector2, text: String, color: Color) -> void:
+	"""Draw text at a world position using the default font."""
+	var font: Font = ThemeDB.fallback_font
+	if font:
+		_fov_draw_node.draw_string(font, pos, text, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, color)

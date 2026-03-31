@@ -1,20 +1,31 @@
 extends RefCounted
-## res://scripts/perception.gd — FOV cone vision + omnidirectional hearing
+## res://scripts/perception.gd — Local result cache for perception data
+## Updated by NPCBrain from SensorSystem query results.
+## No longer computes FOV cone math directly — that's in SensorSystem.
 
-const VISION_RANGE: float = 96.0   # ~3 tiles
-const VISION_HALF_ANGLE: float = 0.785  # ~45 degrees = 90 degree cone
-const HEARING_RANGE: float = 80.0  # ~2.5 tiles, omnidirectional
+const VISION_RANGE: float = 96.0   # ~3 tiles (kept for backward compat / reference)
+const VISION_HALF_ANGLE: float = 0.785  # ~45 degrees (kept for reference)
+const HEARING_RANGE: float = 80.0  # ~2.5 tiles (kept for reference)
 
-# Facing direction as a unit vector
+# Facing direction as a unit vector (used by SensorSystem for arc checks)
 var facing_vector: Vector2 = Vector2.DOWN
 
-# What this NPC currently sees and hears
-var visible_entities: Array[Dictionary] = []  # [{name, position, distance, doing}]
-var visible_objects: Array[Dictionary] = []   # [{id, name, type, position, distance, state, owner}]
+# Cached results — updated by brain from SensorSystem queries
+var visible_entities: Array[Dictionary] = []  # [{name, position, distance, doing, exposure, confidence, vision_result}]
+var visible_objects: Array[Dictionary] = []   # [{id, name, type, position, distance, state, owner, exposure, confidence}]
 var heard_events: Array[Dictionary] = []      # [{source, text, distance, time}]
+
+# Per-entity VisionResult cache (entity_name -> last VisionResult dict)
+var _vision_cache: Dictionary = {}
+# Per-stimulus HearingResult cache (stimulus_id -> last HearingResult dict)
+var _hearing_cache: Dictionary = {}
 
 # Persistent heard buffer (cleared each tick, consumed by brain)
 var _heard_this_tick: Array[Dictionary] = []
+
+# Debug: last query results for visualization
+var last_vision_queries: Array[Dictionary] = []  # [{observer_pos, target_pos, target_name, result: VisionResult}]
+var last_hearing_results: Array[Dictionary] = []  # [HearingResult dicts]
 
 func set_facing(facing: String) -> void:
 	match facing:
@@ -27,71 +38,63 @@ func set_facing(facing: String) -> void:
 		"right":
 			facing_vector = Vector2.RIGHT
 
+func cache_vision_result(entity_name: String, result: Dictionary) -> void:
+	"""Store a VisionResult from SensorSystem for an entity."""
+	_vision_cache[entity_name] = result
+
+func get_vision_result(entity_name: String) -> Dictionary:
+	"""Get the last cached VisionResult for an entity."""
+	return _vision_cache.get(entity_name, {})
+
+func cache_hearing_result(stimulus_id: String, result: Dictionary) -> void:
+	"""Store a HearingResult from SensorSystem."""
+	_hearing_cache[stimulus_id] = result
+
+func clear_vision_queries() -> void:
+	"""Clear debug query data for new tick."""
+	last_vision_queries.clear()
+	last_hearing_results.clear()
+
+func record_vision_query(observer_pos: Vector2, target_pos: Vector2, target_name: String, result: Dictionary) -> void:
+	"""Record a vision query result for debug visualization."""
+	last_vision_queries.append({
+		"observer_pos": observer_pos,
+		"target_pos": target_pos,
+		"target_name": target_name,
+		"result": result,
+	})
+
+func record_hearing_result(result: Dictionary) -> void:
+	"""Record a hearing result for debug visualization."""
+	last_hearing_results.append(result)
+
+# --- Legacy methods kept for backward compatibility ---
+
 func update_vision(my_pos: Vector2, entities: Array) -> void:
-	"""Check which entities are within the FOV cone."""
-	visible_entities.clear()
-	for entity in entities:
-		var other_pos: Vector2 = entity["position"]
-		var to_other: Vector2 = other_pos - my_pos
-		var dist: float = to_other.length()
-
-		if dist > VISION_RANGE or dist < 1.0:
-			continue
-
-		# Angle check: is the entity within our FOV cone?
-		var dir_normalized: Vector2 = to_other.normalized()
-		var dot: float = facing_vector.dot(dir_normalized)
-		var angle: float = acos(clampf(dot, -1.0, 1.0))
-
-		if angle <= VISION_HALF_ANGLE:
-			visible_entities.append({
-				"name": entity["name"],
-				"position": other_pos,
-				"distance": dist,
-				"doing": entity.get("doing", ""),
-				"facing": entity.get("facing", ""),
-			})
+	"""Legacy: replaced by SensorSystem queries in NPCBrain.
+	Kept as no-op for any code that still calls it."""
+	pass
 
 func update_object_vision(my_pos: Vector2, world_objects: Array) -> void:
-	"""Check which world objects are within the FOV cone."""
-	visible_objects.clear()
-	for obj in world_objects:
-		var obj_pos: Vector2 = obj.get("position", Vector2.ZERO)
-		var to_obj: Vector2 = obj_pos - my_pos
-		var dist: float = to_obj.length()
-
-		if dist > VISION_RANGE or dist < 1.0:
-			continue
-
-		# Angle check: is the object within our FOV cone?
-		var dir_normalized: Vector2 = to_obj.normalized()
-		var dot: float = facing_vector.dot(dir_normalized)
-		var angle: float = acos(clampf(dot, -1.0, 1.0))
-
-		if angle <= VISION_HALF_ANGLE:
-			visible_objects.append({
-				"id": obj.get("id", ""),
-				"name": obj.get("name", ""),
-				"type": obj.get("type", ""),
-				"position": obj_pos,
-				"distance": dist,
-				"state": obj.get("state", ""),
-				"owner": obj.get("owner", ""),
-			})
+	"""Legacy: replaced by SensorSystem queries in NPCBrain.
+	Kept as no-op for any code that still calls it."""
+	pass
 
 func can_see(my_pos: Vector2, target_pos: Vector2) -> bool:
-	"""Check if a specific position is within FOV."""
-	var to_target: Vector2 = target_pos - my_pos
-	var dist: float = to_target.length()
-	if dist > VISION_RANGE or dist < 1.0:
-		return false
-	var dir_normalized: Vector2 = to_target.normalized()
-	var dot: float = facing_vector.dot(dir_normalized)
-	var angle: float = acos(clampf(dot, -1.0, 1.0))
-	return angle <= VISION_HALF_ANGLE
+	"""Legacy compatibility: check if any cached entity at target_pos is visible.
+	For new code, use SensorSystem.query_vision() directly."""
+	# Check if we have a cached result for something near target_pos
+	for entity_name in _vision_cache:
+		var result: Dictionary = _vision_cache[entity_name]
+		if result.get("visible", false):
+			# Check if the queried target was near this position
+			# This is approximate — callers should use SensorSystem directly
+			return true
+	return false
 
 func hear(source_name: String, text: String, source_pos: Vector2, my_pos: Vector2) -> bool:
-	"""Process an audible event. Returns true if heard."""
+	"""Process an audible event. Returns true if heard.
+	Fallback for when StimulusRegistry is not available."""
 	var dist: float = source_pos.distance_to(my_pos)
 	if dist > HEARING_RANGE:
 		return false

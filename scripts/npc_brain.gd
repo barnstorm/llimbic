@@ -704,10 +704,13 @@ func on_npc_nearby(other_name: String) -> void:
 # --- Perception ---
 
 func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player: Node = null) -> void:
-	"""Update FOV vision. Called every tick from npc_controller."""
+	"""Update perception via SensorSystem queries. Called every tick from npc_controller.
+	Brain NEVER computes visibility directly — all perception goes through SensorSystem.
+	Results are graded (exposure/confidence), not binary."""
 	if perception == null:
 		return
 	perception.set_facing(facing)
+	perception.clear_vision_queries()
 
 	# Build entity list — everything with a position that isn't us
 	var entities: Array = []
@@ -728,17 +731,69 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 			"facing": player._facing if "_facing" in player else "",
 		})
 
-	perception.update_vision(my_pos, entities)
+	# --- Vision via SensorSystem ---
+	perception.visible_entities.clear()
+	if _sensor_system != null and not _sensor_profile.is_empty():
+		var SRTScript: GDScript = load("res://scripts/sensory_result_types.gd")
+		var actor_offsets: Array = SRTScript.actor_sample_offsets()
 
-	# Record observations for newly seen NPCs
+		for entity in entities:
+			var target_pos: Vector2 = entity["position"]
+			var vr: Dictionary = _sensor_system.query_vision(
+				my_pos, perception.facing_vector, _sensor_profile,
+				target_pos, actor_offsets
+			)
+			# Cache the result
+			perception.cache_vision_result(entity["name"], vr)
+			# Record for debug visualization
+			perception.record_vision_query(my_pos, target_pos, entity["name"], vr)
+
+			if vr.get("visible", false):
+				perception.visible_entities.append({
+					"name": entity["name"],
+					"position": target_pos,
+					"distance": vr.get("distance", 0.0),
+					"doing": entity.get("doing", ""),
+					"facing": entity.get("facing", ""),
+					"exposure": vr.get("exposure", 0.0),
+					"confidence": vr.get("confidence", 0.0),
+					"vision_result": vr,
+				})
+
+	# Record observations for visible entities — include confidence level
 	for seen in perception.visible_entities:
 		var doing: String = seen.get("doing", "")
-		memory.add_observation(seen["name"], "", doing if doing != "" else "walking")
+		var confidence: float = seen.get("confidence", 0.0)
+		var obs_text: String = doing if doing != "" else "walking"
+		if confidence < 0.5:
+			obs_text += " (barely visible)"
+		memory.add_observation(seen["name"], "", obs_text)
 
-	# --- Object perception ---
+	# --- Object perception via SensorSystem ---
+	perception.visible_objects.clear()
 	if _world_object_registry != null:
-		var all_objects: Array = _world_object_registry.get_all_objects()
-		perception.update_object_vision(my_pos, all_objects)
+		if _sensor_system != null and not _sensor_profile.is_empty():
+			var SRTScript2: GDScript = load("res://scripts/sensory_result_types.gd")
+			var obj_offsets: Array = SRTScript2.object_sample_offsets()
+			var all_objects: Array = _world_object_registry.get_all_objects()
+			for obj in all_objects:
+				var obj_pos: Vector2 = obj.get("position", Vector2.ZERO)
+				var vr: Dictionary = _sensor_system.query_vision(
+					my_pos, perception.facing_vector, _sensor_profile,
+					obj_pos, obj_offsets
+				)
+				if vr.get("visible", false):
+					perception.visible_objects.append({
+						"id": obj.get("id", ""),
+						"name": obj.get("name", ""),
+						"type": obj.get("type", ""),
+						"position": obj_pos,
+						"distance": vr.get("distance", 0.0),
+						"state": obj.get("state", ""),
+						"owner": obj.get("owner", ""),
+						"exposure": vr.get("exposure", 0.0),
+						"confidence": vr.get("confidence", 0.0),
+					})
 		_process_visible_objects()
 
 	# --- Hearing via StimulusRegistry + SensorSystem ---
@@ -755,6 +810,9 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 
 			if emitter == npc_name:
 				continue  # don't hear ourselves
+
+			# Record for debug visualization
+			perception.record_hearing_result(hr)
 
 			if stim_type == "speech":
 				# Extract speech text from tags (last tag if it's dialogue content)

@@ -56,6 +56,7 @@
 - **Extends:** CharacterBody2D
 - **Collision:** layer 4, mask 2 (collides with NPCs)
 - Added to "player" group for NPC perception lookup
+- **ObserverProfile:** `sensor_profile` dict with wider range (128px) and arc (120deg) for future player-side perception features
 
 ### NPCController
 - **File:** res://scripts/npc_controller.gd
@@ -73,7 +74,7 @@
 - **File:** res://scripts/npc_brain.gd
 - **Extends:** RefCounted
 - **Owns:** Layer1Substrate, Layer2Projection, Layer3Executive, MemorySystem, Perception
-- **Perception includes Player:** `update_perception()` takes player node, adds to entity list alongside NPCs. NPCs see the player through the same FOV cone as everything else.
+- **Perception via SensorSystem:** `update_perception()` queries SensorSystem.query_vision() for each entity/object candidate. Results include graded exposure and confidence. Brain NEVER computes visibility directly.
 - **Per-NPC logging:** Writes to `logs/{name}.log`. Logs action changes (with substrate state), stall onset/clear, tagged memory events, and chunk transitions.
 - **`select_action(delta)`:** Called every tick. Priority-ordered decision tree:
   1. Reorientation pause (after interruption, 0.5-2s based on frustration)
@@ -174,11 +175,13 @@
 ### Perception
 - **File:** res://scripts/perception.gd
 - **Extends:** RefCounted
-- **FOV:** 90° cone, 3-tile range (96px), directional based on facing
-- **Hearing:** Omnidirectional, 2.5-tile range (80px)
-- NPCs observe entities (other NPCs + Player) and objects within FOV
-- Speech broadcasts to all NPCs in hearing range
-- **Object vision:** `visible_objects` array + `update_object_vision()` — same FOV cone rules as entity vision
+- **Role:** Thin local cache for SensorSystem query results. No direct FOV math — all perception goes through SensorSystem.
+- `facing_vector` retained for SensorSystem arc checks
+- `visible_entities` and `visible_objects` populated by NPCBrain from SensorSystem results (includes `exposure`, `confidence`, `vision_result`)
+- `_vision_cache` (per-entity VisionResult), `_hearing_cache` (per-stimulus HearingResult)
+- `last_vision_queries` and `last_hearing_results` for debug overlay visualization
+- Legacy `update_vision()`, `update_object_vision()`, `can_see()` kept as no-ops/fallbacks for backward compatibility
+- `get_fov_cone_points()` retained for debug overlay rendering
 
 ### WorldObjectRegistry (autoload)
 - **File:** res://scripts/world_object_registry.gd
@@ -191,7 +194,7 @@
 - **File:** res://scripts/social_propagation.gd
 - **Extends:** Node
 - Pulses every 5 real seconds, checks NPC pairs within 64px
-- Requires: both NPCs have social_need > 30, at least one sees the other, both pass interruption check
+- Requires: both NPCs have social_need > 30, at least one sees the other (via SensorSystem.query_vision()), both pass interruption check
 - Role-tag affinity: guards prefer sharing security info, merchants trade info, etc.
 - Trust-weighted salience: events from trusted sources stored with higher salience
 - **Object knowledge exchange:** During conversations, NPCs share known objects (1-2 per conversation). Role-filtered sharing (Baker shares bakery objects, etc.). Trust-weighted: reliable flag set for trusted sources.
@@ -217,7 +220,12 @@
 - Layer 2: 27-dim GoEmotions heatmap (colored cells) + top-3 dimensions + modulation params
 - Layer 3: plan chunks (active highlighted yellow), suspended chunk indicator
 - Drive override display in action label (orange text)
-- FOV cones rendered in world space via Node2D child
+- **World-space debug drawing** (Node2D child):
+  - FOV cones for all NPCs (semi-transparent, colored by valence)
+  - Vision rays from selected NPC: green=visible (with sample dots + exposure %), red=blocked (with X markers)
+  - Hearing direction arcs with volume meters (yellow=speech, blue=generic, gray=footstep)
+  - Occluder wall segments as semi-transparent red lines (viewport-culled)
+  - Active stimuli as pulsing circles (yellow=speech, gray=footstep, red=impact)
 - Valence indicator dots above all NPCs
 
 ### CameraController

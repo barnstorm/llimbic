@@ -284,3 +284,28 @@
 - Wall occlusion confirmed working: positions (3000,1500)->(3200,1500) have 4 wall segments between them, producing 99.8% occlusion loss.
 - Town square area (2096,800) is open space — 0% occlusion between nearby positions, as expected.
 - Semantic distinction preserved: vision is binary+exposure, hearing is analog+uncertain. Vision: "I see Edith." Hearing: "I heard something east of me."
+
+## Task 12: Consumer Migration + Debug Visualization
+
+### Architecture
+- perception.gd is now a thin cache: stores last VisionResult per entity, last HearingResult per stimulus. No FOV cone math — all queries go through SensorSystem.
+- NPCBrain.update_perception() uses SensorSystem.query_vision() for every entity and object candidate. Results include graded exposure (0-1) and confidence.
+- Social propagation uses SensorSystem.query_vision() for mutual visibility check before conversation, with fallback to cached visible_entities.
+- Player gets an ObserverProfile (sensor_profile dict) with wider range (128px) and arc (120deg) for future features.
+- Debug overlay draws: FOV cones (all NPCs), vision rays (selected NPC: green=visible with sample dots and exposure%, red=blocked), occluder wall segments (semi-transparent red), active stimuli (pulsing circles colored by type), hearing direction arcs with volume meters.
+
+### What worked
+- SensoryResultTypes.actor_sample_offsets() / object_sample_offsets() cleanly separate entity vs object query configurations.
+- perception.gd retained facing_vector and get_fov_cone_points() for debug overlay — no downstream breakage.
+- Recording vision queries and hearing results in perception (last_vision_queries, last_hearing_results) provides real debug data without separate debug code paths.
+- Graded exposure (0.60 at 50px, 0.80 at 48px, 1.00 at 71px open area) gives richer information than binary visible/not-visible.
+- Memory events now include confidence-weighted observations ("barely visible" suffix at low confidence).
+- All existing behaviors preserved: object discovery, social propagation, drive overrides, examine actions all continue working.
+
+### Technical details
+- NPCs at spawn (early morning) are typically 100-300px apart — outside 96px vision range. Natural convergence takes several game-hours. Tests requiring visibility must force proximity or wait.
+- `load("res://scripts/sensory_result_types.gd")` is called per-frame inside update_perception() for offsets. GDScript caches loaded resources so this is not a performance concern.
+- Social propagation visibility check loads SensorProfile and SensoryResultTypes scripts each pulse. Since pulses are 5s apart, this is negligible.
+- perception.can_see() retained as legacy fallback but now checks _vision_cache instead of computing cone math. Not recommended for new code — use SensorSystem directly.
+- debug_overlay.gd finds OccluderSystem, StimulusRegistry, SensorSystem in _setup_fov_drawing() via root children iteration.
+- _draw_world_text() uses ThemeDB.fallback_font for world-space text rendering (exposure percentages).

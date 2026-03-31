@@ -274,7 +274,7 @@ Uses pre-existing assets from joonspk-research/generative_agents: a pre-rendered
 
 ## 12. Consumer Migration + Debug Visualization
 - **Depends on:** 11
-- **Status:** pending
+- **Status:** done
 - **Targets:** scripts/npc_brain.gd, scripts/perception.gd, scripts/npc_controller.gd, scripts/debug_overlay.gd, scripts/social_propagation.gd, scripts/interaction_system.gd, scripts/player_controller.gd
 - **Goal:** Migrate all perception consumers (NPC brain, social propagation, interaction system, player) to use SensorSystem queries instead of direct cone checks. Reduce perception.gd to a local result cache. Add debug visualization for vision rays and hearing.
 - **Requirements:**

@@ -7,6 +7,7 @@ extends CharacterBody2D
 
 var _nav_manager: Node = null
 var _facing: String = "down"
+var sensor_profile: Dictionary = {}  # ObserverProfile for future player perception
 
 func _ready() -> void:
 	# Find NavigationManager autoload
@@ -18,6 +19,13 @@ func _ready() -> void:
 	_setup_sprite_frames("res://assets/characters/Character_RM_001.png")
 
 	add_to_group("player")
+
+	# Build sensor profile for player (enables future perception features)
+	var SPScript: GDScript = load("res://scripts/sensor_profile.gd")
+	sensor_profile = SPScript.make_default()
+	# Player has wider vision arc and longer range
+	sensor_profile["vision_range"] = 128.0
+	sensor_profile["vision_arc_deg"] = 120.0
 
 	# Place player at a good starting position (near center of town)
 	position = Vector2(2240, 1600)

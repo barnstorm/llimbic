@@ -8,6 +8,7 @@ var _pulse_interval: float = 5.0  # every 5 real seconds
 var _cooldowns: Dictionary = {}   # "npcA:npcB" -> time remaining
 var _active_conversations: Array[Dictionary] = []  # ongoing conversations
 var _inference_client: Node = null
+var _sensor_system: Node = null
 
 const CONVERSE_RANGE: float = 64.0  # 2 tiles
 const COOLDOWN_DURATION: float = 60.0  # 1 game-minute between conversations for same pair
@@ -31,7 +32,8 @@ func _find_inference_client() -> void:
 	for child in get_tree().root.get_children():
 		if child.name == "InferenceClient":
 			_inference_client = child
-			break
+		elif child.name == "SensorSystem":
+			_sensor_system = child
 
 func _process(delta: float) -> void:
 	# Tick cooldowns
@@ -95,9 +97,41 @@ func _try_start_conversation(npc_a: Node, npc_b: Node) -> void:
 	if _cooldowns.has(key):
 		return
 
-	# Check if they can see each other (at least one must see the other)
-	var a_sees_b: bool = npc_a.brain.perception != null and npc_a.brain.perception.can_see(npc_a.global_position, npc_b.global_position)
-	var b_sees_a: bool = npc_b.brain.perception != null and npc_b.brain.perception.can_see(npc_b.global_position, npc_a.global_position)
+	# Check if they can see each other via SensorSystem (at least one must see the other)
+	var a_sees_b: bool = false
+	var b_sees_a: bool = false
+	if _sensor_system != null:
+		var SPScript: GDScript = load("res://scripts/sensor_profile.gd")
+		var SRTScript: GDScript = load("res://scripts/sensory_result_types.gd")
+		var actor_offsets: Array = SRTScript.actor_sample_offsets()
+		# Check A sees B
+		if npc_a.brain and npc_a.brain.perception:
+			var profile_a: Dictionary = npc_a.brain._sensor_profile if not npc_a.brain._sensor_profile.is_empty() else SPScript.make_default()
+			var vr_a: Dictionary = _sensor_system.query_vision(
+				npc_a.global_position, npc_a.brain.perception.facing_vector, profile_a,
+				npc_b.global_position, actor_offsets
+			)
+			a_sees_b = vr_a.get("visible", false)
+		# Check B sees A
+		if npc_b.brain and npc_b.brain.perception:
+			var profile_b: Dictionary = npc_b.brain._sensor_profile if not npc_b.brain._sensor_profile.is_empty() else SPScript.make_default()
+			var vr_b: Dictionary = _sensor_system.query_vision(
+				npc_b.global_position, npc_b.brain.perception.facing_vector, profile_b,
+				npc_a.global_position, actor_offsets
+			)
+			b_sees_a = vr_b.get("visible", false)
+	else:
+		# Fallback: check cached visible entities
+		if npc_a.brain and npc_a.brain.perception:
+			for ent in npc_a.brain.perception.visible_entities:
+				if ent.get("name", "") == npc_b.npc_name:
+					a_sees_b = true
+					break
+		if npc_b.brain and npc_b.brain.perception:
+			for ent in npc_b.brain.perception.visible_entities:
+				if ent.get("name", "") == npc_a.npc_name:
+					b_sees_a = true
+					break
 	if not a_sees_b and not b_sees_a:
 		return
 
