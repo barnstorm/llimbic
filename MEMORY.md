@@ -309,3 +309,20 @@
 - perception.can_see() retained as legacy fallback but now checks _vision_cache instead of computing cone math. Not recommended for new code — use SensorSystem directly.
 - debug_overlay.gd finds OccluderSystem, StimulusRegistry, SensorSystem in _setup_fov_drawing() via root children iteration.
 - _draw_world_text() uses ThemeDB.fallback_font for world-space text rendering (exposure percentages).
+
+## Task 13: Presentation Video (Perception System)
+
+### What worked
+- Force-positioning NPCs into clusters (within 96px vision range) is essential for showcasing vision rays — natural spawn positions are 100-300px apart, outside vision range.
+- Maintaining cluster via gentle lerp pull-back (`_maintain_cluster`) keeps NPCs from wandering during the vision demo phase.
+- Gradually moving an NPC from behind a wall into view (`lerp` over frames) creates a clear occlusion→visible transition with exposure changing from 0 to >0.
+- Emitting speech stimuli every 30 frames (1s) during hearing phase ensures `last_hearing_results` stays populated for arc visualization.
+- Slowing `time_scale` to 2-3 during hearing phase gives more real-time for stimulus processing and visualization.
+- Red blocked vision rays are only drawn within 200px range — targets must be close enough for the red ray to appear on screen.
+
+### Technical details
+- Video: 4.7MB MP4 (CRF 28, slow preset) for 30s at 1280px — well under 50MB limit.
+- 6 cinematic phases: occluder wide shot → green vision rays → red blocked rays/occlusion → hearing arcs → exposure gradient → wide pullback.
+- `_emit_speech_stimuli()` emits from all NPCs within 200px of observer — ensures multiple hearing results with varying volume/clarity.
+- NPC nameplate overlap when clustered is a known cosmetic issue (note severity, not blocking).
+- Vision ray z-order renders on top of sprites — cosmetic, doesn't affect demo clarity.

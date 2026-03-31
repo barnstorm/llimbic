@@ -291,7 +291,7 @@ Uses pre-existing assets from joonspk-research/generative_agents: a pre-rendered
 
 ## 13. Presentation Video (Perception System)
 - **Depends on:** 10, 11, 12
-- **Status:** pending
+- **Status:** done
 - **Targets:** test/presentation.gd, screenshots/presentation/gameplay.mp4
 - **Goal:** Create a ~30-second cinematic video showcasing the new shared perception system.
 - **Requirements:**

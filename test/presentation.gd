@@ -1,104 +1,99 @@
 extends SceneTree
-## Presentation video — ~30s cinematic showcasing the object knowledge system
-## Camera pans, zoom transitions, debug overlay with object knowledge,
-## object discovery, social propagation of object knowledge, replanning
+## Presentation video — ~30s cinematic showcasing the shared perception system
+## Vision raycasting with green/red rays, occlusion, hearing attenuation,
+## occluder segments, exposure/confidence debug panel, smooth camera transitions
 
 var _frame: int = 0
 var _main: Node = null
 var _camera: Camera2D = null
 var _game_manager: Node = null
 var _debug_overlay: Node = null
+var _stimulus_registry: Node = null
+var _sensor_system: Node = null
 var _npcs: Array = []
 
 # Camera control
-var _cam_target: Vector2 = Vector2(1168, 592)
-var _cam_pos: Vector2 = Vector2(1168, 592)
-var _cam_zoom_target: float = 2.5
-var _cam_zoom: float = 2.5
+var _cam_target: Vector2 = Vector2(2096, 800)
+var _cam_pos: Vector2 = Vector2(2096, 800)
+var _cam_zoom_target: float = 2.0
+var _cam_zoom: float = 2.0
 var _cam_speed: float = 3.0
-var _initialized_cam: bool = false
 
 # Keyframe system
 var _keyframes: Array = []
-var _current_kf: int = 0
+
+# Phase tracking
+var _observer_npc: Node = null
 
 func _initialize() -> void:
-	print("Presentation: Starting object knowledge cinematic")
-
-	# Load main scene
+	print("Presentation: Starting perception system cinematic")
 	var main_scene: PackedScene = load("res://scenes/main.tscn")
 	_main = main_scene.instantiate()
 	root.add_child(_main)
 
 	# Keyframe sequence (30 FPS, ~900 frames = 30 seconds)
-	# Phase 1 (0-180): Establishing shot, pan to blacksmith (Greta has broken forge)
-	# Phase 2 (180-360): Zoom into Greta arriving at blacksmith, debug overlay ON showing object discovery
-	# Phase 3 (360-480): Show debug overlay with Known Objects section populated + EXAMINE action
-	# Phase 4 (480-600): Pan to two NPCs near each other, show social propagation of object knowledge
-	# Phase 5 (600-750): Fast-forward to show replanning triggered by object discovery
-	# Phase 6 (750-900): Final wide shot with debug overlay showing plan with object-targeting chunks
+	# Phase 1 (0-150):   Wide shot with occluder segments visible on buildings
+	# Phase 2 (150-330):  Zoom to NPC cluster — green vision rays to visible targets
+	# Phase 3 (330-500):  NPC behind wall — red blocked rays + exposure drops to 0
+	# Phase 4 (500-660):  Hearing: speech stimulus, arcs, volume meters
+	# Phase 5 (660-810):  Close-up debug panel with changing exposure/confidence
+	# Phase 6 (810-900):  Wide pullback, clean ending
 	_keyframes = [
-		# Opening: wide establishing shot centered on town
-		{"frame": 0, "pos": Vector2(2096, 800), "zoom": 1.6, "speed": 2.0},
-		# Pan toward blacksmith area (Greta discovers broken forge)
-		{"frame": 90, "pos": Vector2(1168, 592), "zoom": 2.2, "speed": 2.5},
-		# Zoom into blacksmith closely
-		{"frame": 180, "pos": Vector2(1168, 592), "zoom": 3.8, "speed": 3.0},
-		# Hold on blacksmith with debug overlay showing objects
-		{"frame": 270, "pos": Vector2(1168, 592), "zoom": 3.5, "speed": 2.0},
-		# Pan to bakery area (Edith discovers empty bread basket)
-		{"frame": 360, "pos": Vector2(1712, 464), "zoom": 3.5, "speed": 2.5},
-		# Pan toward town center to catch NPC pair for social propagation
-		{"frame": 480, "pos": Vector2(2096, 800), "zoom": 3.0, "speed": 2.5},
-		# Fast-forward: show replanning in action
-		{"frame": 600, "pos": Vector2(2096, 800), "zoom": 2.0, "speed": 2.0},
-		# Zoom in on another NPC with object-aware plan
-		{"frame": 700, "pos": Vector2(2096, 624), "zoom": 3.5, "speed": 3.0},
-		# Final wide establishing shot
-		{"frame": 800, "pos": Vector2(2096, 800), "zoom": 1.6, "speed": 2.0},
+		{"frame": 0,   "pos": Vector2(2096, 800), "zoom": 1.5, "speed": 2.0},
+		{"frame": 100, "pos": Vector2(2096, 720), "zoom": 2.0, "speed": 2.0},
+		# Phase 2: zoom to NPC cluster near town square
+		{"frame": 150, "pos": Vector2(2096, 720), "zoom": 3.4, "speed": 2.5},
+		{"frame": 280, "pos": Vector2(2096, 720), "zoom": 3.6, "speed": 1.5},
+		# Phase 3: pan to building edge — occlusion demo
+		{"frame": 330, "pos": Vector2(1800, 520), "zoom": 3.4, "speed": 2.5},
+		{"frame": 460, "pos": Vector2(1800, 520), "zoom": 3.6, "speed": 1.5},
+		# Phase 4: hearing demo
+		{"frame": 500, "pos": Vector2(2096, 720), "zoom": 3.2, "speed": 2.5},
+		{"frame": 630, "pos": Vector2(2096, 720), "zoom": 3.5, "speed": 1.5},
+		# Phase 5: close on exposure values
+		{"frame": 660, "pos": Vector2(2096, 720), "zoom": 3.8, "speed": 2.5},
+		{"frame": 780, "pos": Vector2(2096, 720), "zoom": 3.6, "speed": 1.5},
+		# Phase 6: pull back
+		{"frame": 810, "pos": Vector2(2096, 800), "zoom": 1.8, "speed": 2.0},
+		{"frame": 870, "pos": Vector2(2096, 800), "zoom": 1.5, "speed": 1.5},
 	]
 
-	# Pre-position camera (quirk: frame 0 renders before _process)
 	_cam_pos = _keyframes[0]["pos"]
 	_cam_zoom = _keyframes[0]["zoom"]
 
 func _process(delta: float) -> bool:
 	_frame += 1
 
-	# Frame 2: grab references (autoloads ready after first frame)
+	# Frame 2: grab references
 	if _frame == 2:
 		_camera = _main.get_node_or_null("Camera2D") as Camera2D
 		_debug_overlay = _main.get_node_or_null("DebugOverlay")
 		for child in root.get_children():
 			if child.name == "GameManager":
 				_game_manager = child
-				break
+			elif child.name == "StimulusRegistry":
+				_stimulus_registry = child
+			elif child.name == "SensorSystem":
+				_sensor_system = child
 		_npcs = root.get_tree().get_nodes_in_group("npcs")
-		print("Presentation: Found %d NPCs, camera=%s" % [_npcs.size(), str(_camera != null)])
+		print("Presentation: Found %d NPCs" % _npcs.size())
 
-		# Moderate time speed so NPCs move and discover objects
 		if _game_manager:
-			_game_manager.time_scale = 8.0
+			_game_manager.time_scale = 5.0
 
-		# Boost social need on all NPCs so conversations trigger more reliably
-		for npc in _npcs:
-			if npc.brain and npc.brain.layer1:
-				npc.brain.layer1.social_need = 60.0
-
-		# Snap camera on first real frame
 		if _camera:
 			_camera.position = _cam_pos
 			_camera.zoom = Vector2(_cam_zoom, _cam_zoom)
-			_initialized_cam = true
+
+		# Position NPCs for perception demo
+		_setup_npc_positions()
 
 	if _camera == null:
 		return false
 
-	# Ensure our camera stays current
 	if not _camera.is_current():
 		_camera.make_current()
 
-	# Update keyframe target
 	_update_keyframe_target()
 
 	# Smooth camera interpolation
@@ -107,135 +102,181 @@ func _process(delta: float) -> bool:
 	_camera.position = _cam_pos
 	_camera.zoom = Vector2(_cam_zoom, _cam_zoom)
 
-	# === Scripted Events ===
-
-	# Phase 2 (frame 180): Turn on debug overlay and select Greta (Blacksmith - broken forge)
-	if _frame == 180:
+	# === PHASE 1 (0-150): Occluder segments visible, wide establishing shot ===
+	if _frame == 5:
 		if _debug_overlay:
 			_debug_overlay._active = true
 			_debug_overlay.visible = true
 			_debug_overlay._update_npc_indicators()
-			print("Presentation: Debug overlay ON — object discovery phase")
+			print("Presentation: Debug overlay ON — occluder segments visible")
 
-	# Frame 195: Select Greta (Blacksmith) to show broken forge discovery
-	if _frame == 195:
-		if _debug_overlay and _npcs.size() > 0:
-			var greta: Node = _find_npc_by_role("Blacksmith")
-			if greta:
-				_debug_overlay._selected_npc = greta
-				print("Presentation: Selected Greta (Blacksmith) — shows broken Forge in objects")
+	# === PHASE 2 (150-330): Vision rays demo — green rays to visible targets ===
+	if _frame == 150:
+		# Select Guard (Roland) who has nearby NPCs in his FOV
+		_observer_npc = _find_npc_by_role("Guard")
+		if _observer_npc == null and _npcs.size() > 0:
+			_observer_npc = _npcs[0]
+		if _observer_npc and _debug_overlay:
+			_debug_overlay._selected_npc = _observer_npc
+			print("Presentation: Selected %s for green vision rays" % _observer_npc.npc_name)
 
-	# Frame 180-340: Track Greta closely to show her at the blacksmith
-	if _frame >= 180 and _frame <= 340:
-		var greta: Node = _find_npc_by_role("Blacksmith")
-		if greta:
-			_cam_target = greta.global_position
+	# Keep NPCs in cluster during phase 2 for reliable vision rays
+	if _frame >= 150 and _frame < 330:
+		_maintain_cluster(Vector2(2096, 720))
+		if _observer_npc:
+			_cam_target = _observer_npc.global_position
 
-	# Phase 3 (frame 360): Switch to Baker (Edith) to show empty bread basket
-	if _frame == 360:
-		if _debug_overlay and _npcs.size() > 0:
-			var edith: Node = _find_npc_by_role("Baker")
-			if edith:
-				_debug_overlay._selected_npc = edith
-				print("Presentation: Selected Edith (Baker) — shows empty Bread Basket")
-
-	# Frame 360-470: Track Edith at the bakery
-	if _frame >= 360 and _frame <= 470:
-		var edith: Node = _find_npc_by_role("Baker")
-		if edith:
-			_cam_target = edith.global_position
-
-	# Phase 4 (frame 480): Look for two NPCs near each other for social propagation
-	# Use slower time scale so conversation pulses have more real time to fire
-	if _frame == 480:
+	# === PHASE 3 (330-500): Occlusion demo — red rays through walls ===
+	if _frame == 330:
+		# Set up occlusion scenario: observer on one side of building, target on other
+		var baker: Node = _find_npc_by_role("Baker")
+		var courier: Node = _find_npc_by_role("Courier")
+		if baker:
+			# Place baker at a position where she faces a wall with someone behind it
+			# Building walls run along x~1776 in the bakery area
+			baker.global_position = Vector2(1760, 500)
+			_observer_npc = baker
+			if _debug_overlay:
+				_debug_overlay._selected_npc = baker
+				print("Presentation: Selected %s for occlusion demo" % baker.npc_name)
+		if courier:
+			# Place courier behind the wall from baker's perspective
+			courier.global_position = Vector2(1850, 500)  # Behind building wall
 		if _game_manager:
-			_game_manager.time_scale = 3.0  # Slow down so social propagation has time
+			_game_manager.time_scale = 3.0  # Slow so NPC stays put
 
-	# Frame 480-590: Track the closest NPC pair or any conversing pair
-	if _frame >= 480 and _frame <= 590:
-		# Prefer NPCs currently in conversation (speech bubble visible)
-		var convo_pair = _find_conversing_pair()
-		if convo_pair.size() == 2:
-			var midpoint: Vector2 = (convo_pair[0].global_position + convo_pair[1].global_position) * 0.5
-			_cam_target = midpoint
-		else:
-			var closest_pair = _find_closest_npc_pair()
-			if closest_pair.size() == 2:
-				var midpoint: Vector2 = (closest_pair[0].global_position + closest_pair[1].global_position) * 0.5
-				_cam_target = midpoint
+	if _frame >= 330 and _frame < 500:
+		if _observer_npc:
+			_cam_target = _observer_npc.global_position
+		# Gradually move the "blocked" NPC to emerge from cover (frame 400+)
+		if _frame >= 400:
+			var courier: Node = _find_npc_by_role("Courier")
+			if courier:
+				# Move courier from behind wall into view gradually
+				var t: float = float(_frame - 400) / 100.0  # 0 to 1
+				t = clampf(t, 0.0, 1.0)
+				# Start behind wall (1850,500), end in open (1760,560)
+				courier.global_position = Vector2(1850, 500).lerp(Vector2(1760, 560), t)
 
-	# Frame 500: Select one of the pair NPCs to show object knowledge propagation
+	# === PHASE 4 (500-660): Hearing demonstration ===
 	if _frame == 500:
-		var convo_pair = _find_conversing_pair()
-		if convo_pair.size() == 0:
-			convo_pair = _find_closest_npc_pair()
-		if convo_pair.size() == 2 and _debug_overlay:
-			# Select the NPC with more known objects (likely received second-hand knowledge)
-			var npc_a = convo_pair[0]
-			var npc_b = convo_pair[1]
-			var count_a: int = 0
-			var count_b: int = 0
-			if npc_a.brain and npc_a.brain.memory:
-				count_a = npc_a.brain.memory.known_objects.size()
-			if npc_b.brain and npc_b.brain.memory:
-				count_b = npc_b.brain.memory.known_objects.size()
-			var selected: Node = npc_b if count_b >= count_a else npc_a
-			_debug_overlay._selected_npc = selected
-			print("Presentation: Selected %s for social propagation view (knows %d objects)" % [selected.npc_name, maxi(count_a, count_b)])
-
-	# Phase 5 (frame 600): Fast-forward time to show replanning from object discovery
-	if _frame == 600:
+		# Move NPCs back to cluster for hearing demo
+		var guard: Node = _find_npc_by_role("Guard")
+		var gossip: Node = _find_npc_by_role("Gossip")
+		var innkeeper: Node = _find_npc_by_role("Innkeeper")
+		# Listener (selected NPC) at center
+		if guard:
+			guard.global_position = Vector2(2096, 720)
+			_observer_npc = guard
+			if _debug_overlay:
+				_debug_overlay._selected_npc = guard
+				print("Presentation: Selected %s for hearing demo" % guard.npc_name)
+		# Near speaker (clear hearing)
+		if gossip:
+			gossip.global_position = Vector2(2150, 740)  # ~60px away
+		# Far speaker (uncertain hearing)
+		if innkeeper:
+			innkeeper.global_position = Vector2(2250, 720)  # ~154px away
 		if _game_manager:
-			_game_manager.time_scale = 30.0
-			print("Presentation: Fast-forward (time_scale=30) — replanning from object discovery")
+			_game_manager.time_scale = 2.0  # Very slow for hearing clarity
 
-	# Frame 620: Select an NPC with object-targeting plan chunk
-	if _frame == 620:
-		if _debug_overlay:
-			# Prefer Greta (broken forge should trigger replan) or Edith (empty basket)
-			var target: Node = _find_npc_with_object_plan()
-			if target == null:
-				target = _find_npc_by_role("Blacksmith")
-			if target == null:
-				target = _find_npc_by_role("Baker")
-			if target == null and _npcs.size() > 0:
-				target = _npcs[0]
-			if target:
-				_debug_overlay._selected_npc = target
-				print("Presentation: Selected %s — showing object-aware plan chunks" % target.npc_name)
+	if _frame >= 500 and _frame < 660:
+		if _observer_npc:
+			_cam_target = _observer_npc.global_position
+		# Emit speech stimuli repeatedly so hearing arcs stay visible
+		if _frame % 30 == 0:  # Every second
+			_emit_speech_stimuli()
 
-	# Phase 5 continued (frame 700): Back to normal speed, zoom on inn area
-	if _frame == 700:
+	# === PHASE 5 (660-810): Exposure/confidence close-up ===
+	if _frame == 660:
+		# Place two NPCs at varying distances to show exposure gradient
+		var guard: Node = _find_npc_by_role("Guard")
+		var courier: Node = _find_npc_by_role("Courier")
+		var gossip: Node = _find_npc_by_role("Gossip")
+		if guard:
+			guard.global_position = Vector2(2096, 720)
+			_observer_npc = guard
+			if _debug_overlay:
+				_debug_overlay._selected_npc = guard
+				print("Presentation: Selected %s for exposure gradient" % guard.npc_name)
+		# One NPC close (high exposure), one at edge (lower exposure)
+		if courier:
+			courier.global_position = Vector2(2140, 740)  # ~50px, high exposure
+		if gossip:
+			gossip.global_position = Vector2(2180, 720)   # ~84px, lower exposure
 		if _game_manager:
-			_game_manager.time_scale = 8.0
+			_game_manager.time_scale = 5.0
 
-	# Frame 700-790: Track the selected NPC or Hugo (Innkeeper with empty ale barrel)
-	if _frame >= 700 and _frame <= 790:
-		var hugo: Node = _find_npc_by_role("Innkeeper")
-		if hugo:
-			_cam_target = hugo.global_position
-			if _frame == 710 and _debug_overlay:
-				_debug_overlay._selected_npc = hugo
-				print("Presentation: Selected Hugo (Innkeeper) — empty Ale Barrel")
+	if _frame >= 660 and _frame < 810:
+		if _observer_npc:
+			_cam_target = _observer_npc.global_position
+		# Slowly move one NPC to show exposure changing
+		if _frame >= 700:
+			var courier: Node = _find_npc_by_role("Courier")
+			if courier:
+				var t: float = float(_frame - 700) / 110.0
+				t = clampf(t, 0.0, 1.0)
+				# Move from close to far
+				courier.global_position = Vector2(2140, 740).lerp(Vector2(2200, 720), t)
 
-	# Phase 6 (frame 800): Final wide shot
-	if _frame == 800:
-		if _debug_overlay:
-			# Keep overlay on for the ending — shows the full system
-			var best: Node = _find_npc_with_most_objects()
-			if best and _debug_overlay:
-				_debug_overlay._selected_npc = best
-				print("Presentation: Final shot — %s knows %d objects" % [best.npc_name, best.brain.memory.known_objects.size() if best.brain and best.brain.memory else 0])
+	# === PHASE 6 (810-900): Wide pullback ===
+	if _frame == 810:
+		if _game_manager:
+			_game_manager.time_scale = 5.0
+		print("Presentation: Wide pullback — full debug overview")
 
-	# Frame 870: Turn off debug overlay for clean ending
 	if _frame == 870:
 		if _debug_overlay:
 			_debug_overlay._active = false
 			_debug_overlay.visible = false
 			_debug_overlay._selected_npc = null
-			print("Presentation: Debug overlay OFF — clean ending")
+			print("Presentation: Debug overlay OFF")
 
-	return false  # Keep running — --quit-after handles exit
+	return false
+
+func _setup_npc_positions() -> void:
+	"""Initial NPC positioning for perception demo."""
+	var guard: Node = _find_npc_by_role("Guard")
+	var courier: Node = _find_npc_by_role("Courier")
+	var gossip: Node = _find_npc_by_role("Gossip")
+	var innkeeper: Node = _find_npc_by_role("Innkeeper")
+
+	# Cluster near town square (2096, 720) — open area
+	if guard:
+		guard.global_position = Vector2(2096, 720)
+	if courier:
+		courier.global_position = Vector2(2150, 740)
+	if gossip:
+		gossip.global_position = Vector2(2040, 700)
+	if innkeeper:
+		innkeeper.global_position = Vector2(2180, 700)
+	print("Presentation: Positioned NPCs for perception demo")
+
+func _maintain_cluster(center: Vector2) -> void:
+	"""Keep NPCs from wandering too far from the cluster center during vision demo."""
+	var guard: Node = _find_npc_by_role("Guard")
+	var courier: Node = _find_npc_by_role("Courier")
+	var gossip: Node = _find_npc_by_role("Gossip")
+	# Gently pull back NPCs that stray too far
+	for npc in [guard, courier, gossip]:
+		if npc == null:
+			continue
+		var dist: float = npc.global_position.distance_to(center)
+		if dist > 120.0:
+			npc.global_position = npc.global_position.lerp(center, 0.02)
+
+func _emit_speech_stimuli() -> void:
+	"""Emit speech stimuli from NPCs near the observer for hearing visualization."""
+	if _stimulus_registry == null or _observer_npc == null:
+		return
+	# Emit from nearby NPCs
+	for npc in _npcs:
+		if npc == _observer_npc:
+			continue
+		var d: float = npc.global_position.distance_to(_observer_npc.global_position)
+		if d > 20.0 and d < 200.0:
+			var name_str: String = npc.npc_name if "npc_name" in npc else "npc"
+			_stimulus_registry.emit("speech", npc.global_position, 160.0, 0.8, 2.0, ["perception demo"], name_str)
 
 func _update_keyframe_target() -> void:
 	var active_kf: int = 0
@@ -243,7 +284,12 @@ func _update_keyframe_target() -> void:
 		if _frame >= _keyframes[i]["frame"]:
 			active_kf = i
 	var kf: Dictionary = _keyframes[active_kf]
-	_cam_target = kf["pos"]
+	var tracking: bool = (_frame >= 150 and _frame < 330) or \
+		(_frame >= 330 and _frame < 500) or \
+		(_frame >= 500 and _frame < 660) or \
+		(_frame >= 660 and _frame < 810)
+	if not tracking:
+		_cam_target = kf["pos"]
 	_cam_zoom_target = kf["zoom"]
 	_cam_speed = kf["speed"]
 
@@ -252,67 +298,3 @@ func _find_npc_by_role(target_role: String) -> Node:
 		if npc.role == target_role:
 			return npc
 	return null
-
-func _find_closest_npc_pair() -> Array:
-	var best_dist: float = 99999.0
-	var best_pair: Array = []
-	for i in range(_npcs.size()):
-		for j in range(i + 1, _npcs.size()):
-			var d: float = _npcs[i].global_position.distance_to(_npcs[j].global_position)
-			if d < best_dist and d > 10.0:
-				best_dist = d
-				best_pair = [_npcs[i], _npcs[j]]
-	return best_pair
-
-func _find_conversing_pair() -> Array:
-	"""Find two NPCs that are currently in conversation (externally locked and near each other)."""
-	var locked: Array = []
-	for npc in _npcs:
-		if npc._externally_locked:
-			locked.append(npc)
-	if locked.size() >= 2:
-		# Return the closest locked pair
-		var best_dist: float = 99999.0
-		var best_pair: Array = []
-		for i in range(locked.size()):
-			for j in range(i + 1, locked.size()):
-				var d: float = locked[i].global_position.distance_to(locked[j].global_position)
-				if d < best_dist:
-					best_dist = d
-					best_pair = [locked[i], locked[j]]
-		return best_pair
-	return []
-
-func _find_npc_with_object_plan() -> Node:
-	"""Find an NPC whose current plan chunk targets a specific object."""
-	for npc in _npcs:
-		if npc.brain == null or npc.brain.layer3 == null:
-			continue
-		var l3 = npc.brain.layer3
-		var agenda: Array = l3.agenda
-		var idx: int = l3.current_chunk_index
-		if idx >= 0 and idx < agenda.size():
-			var chunk: Dictionary = agenda[idx]
-			if chunk.get("object_id", "") != "":
-				return npc
-	# Fallback: check any chunk in any NPC's agenda
-	for npc in _npcs:
-		if npc.brain == null or npc.brain.layer3 == null:
-			continue
-		for chunk in npc.brain.layer3.agenda:
-			if chunk.get("object_id", "") != "":
-				return npc
-	return null
-
-func _find_npc_with_most_objects() -> Node:
-	"""Find the NPC that knows about the most world objects."""
-	var best: Node = null
-	var best_count: int = -1
-	for npc in _npcs:
-		if npc.brain == null or npc.brain.memory == null:
-			continue
-		var count: int = npc.brain.memory.known_objects.size()
-		if count > best_count:
-			best_count = count
-			best = npc
-	return best
