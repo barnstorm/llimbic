@@ -89,6 +89,8 @@ func setup(p_name: String, p_role: String) -> void:
 
 	var MemScript: GDScript = load("res://scripts/memory_system.gd")
 	memory = MemScript.new()
+	memory.npc_name = npc_name
+	memory.npc_role = role
 	memory.on_tagged_event = func(desc: String, salience: float) -> void:
 		npc_log("MEM [%.1f]: %s" % [salience, desc])
 
@@ -353,14 +355,14 @@ func get_target_position() -> Vector2:
 	# Check if current override has resolved
 	if not _drive_override.is_empty():
 		if _drive_has_recovered(_drive_override.get("drive", "")):
-			memory.add_tagged_event("Recovered from: " + _drive_override.get("reason", ""), 0.3, ["drive_recovery"])
+			memory.add_tagged_event("Recovered from: " + _drive_override.get("reason", ""), 0.3, ["drive_recovery"], "direct", "drive_recovery")
 			# Signal reward to neural network — drive recovery is a positive outcome
 			if layer1 and layer1._network:
 				layer1._network.signal_reward()
 			_drive_override = {}
 			# Try to resume the suspended plan chunk
 			if layer3.resume_suspended():
-				memory.add_tagged_event("Resuming interrupted task", 0.3, ["plan_resume"])
+				memory.add_tagged_event("Resuming interrupted task", 0.3, ["plan_resume"], "direct", "plan_change")
 		else:
 			return _drive_override["target"]
 
@@ -372,7 +374,7 @@ func get_target_position() -> Vector2:
 		# Log the deviation
 		var chunk: Dictionary = layer3.get_current_chunk()
 		var purpose: String = chunk.get("purpose", "task")
-		memory.add_tagged_event("Skipped task: %s because %s" % [purpose, override["reason"]], 0.6, ["drive_override", override["drive"]])
+		memory.add_tagged_event("Skipped task: %s because %s" % [purpose, override["reason"]], 0.6, ["drive_override", override["drive"]], "direct", "drive_override")
 		_drive_override = override
 		return override["target"]
 
@@ -427,7 +429,7 @@ func _select_action_inner(delta: float) -> Dictionary:
 			var away_dir: Vector2 = (_last_world_pos - threat["position"]).normalized()
 			var flee_target: Vector2 = _last_world_pos + away_dir * 128.0
 			current_action = {"type": "flee_from", "target": flee_target, "entity": threat["name"], "reason": "Fleeing from " + threat["name"], "speed_mul": 1.4}
-			memory.add_tagged_event("Fled from " + threat["name"], 0.5, ["flee", "danger"])
+			memory.add_tagged_event("Fled from " + threat["name"], 0.5, ["flee", "danger"], "direct", "threat_response")
 			return current_action
 
 	# 3. Observe interesting entity
@@ -446,7 +448,7 @@ func _select_action_inner(delta: float) -> Dictionary:
 				memory.add_tagged_event(
 					"%s is in my way while I'm trying to %s" % [interesting["name"], purpose],
 					0.4 + layer1.task_momentum * 0.4,
-					["blocked", "frustration"], "direct"
+					["blocked", "frustration"], "direct", "path_blocked"
 				)
 				memory.update_relationship(interesting["name"], -0.02, "Blocked my path")
 			current_action = {"type": "observe", "target": interesting["position"], "entity": interesting["name"], "duration": randf_range(0.8, 1.5), "reason": "Observing " + interesting["name"], "speed_mul": 0.0}
@@ -655,7 +657,7 @@ func on_player_interaction(callback: Callable) -> void:
 		}
 		var line: String = busy_lines.get(role, "I'm busy right now.")
 		callback.call(true, {"utterance": line, "intent": "dismiss"})
-		memory.add_tagged_event("Refused player — too busy", 0.3, ["interaction", "player"])
+		memory.add_tagged_event("Refused player — too busy", 0.3, ["interaction", "player"], "direct", "player_interaction")
 		memory.update_relationship("Player", -0.01, "Tried to talk but I was busy")
 		return
 
@@ -673,13 +675,13 @@ func on_player_interaction(callback: Callable) -> void:
 	layer3.request_dialogue(emo_summary, rel_context, recent, _inference_client, callback)
 
 	# Record the interaction
-	memory.add_tagged_event("Player spoke to me", 0.6, ["interaction", "player"])
+	memory.add_tagged_event("Player spoke to me", 0.6, ["interaction", "player"], "direct", "player_interaction")
 	memory.update_relationship("Player", 0.02, "Player initiated conversation")
 
 	# Interruption if doing a task
 	if layer1.task_momentum > 0.3:
 		layer1.apply_interruption()
-		memory.add_tagged_event("Player interrupted my task", 0.5, ["interruption"])
+		memory.add_tagged_event("Player interrupted my task", 0.5, ["interruption"], "direct", "interruption")
 		memory.update_relationship("Player", -0.03, "Interrupted my work")
 
 var _path_retry_count: int = 0
@@ -826,7 +828,7 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 						"Heard %s say: %s" % [emitter, speech_text],
 						0.4 * vol,
 						["heard", "overheard"],
-						emitter
+						emitter, "speech", clarity
 					)
 				else:
 					# Low clarity: uncertain hearing — "heard something"
@@ -835,7 +837,7 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 						"Heard someone speaking %s of me" % dir_name,
 						0.2 * vol,
 						["heard", "uncertain"],
-						""
+						"", "speech_uncertain", clarity
 					)
 			elif stim_type == "footstep":
 				# Footsteps only noticed at moderate volume (not always logged)
@@ -845,7 +847,7 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 						"Heard footsteps %s of me" % dir_name,
 						0.15 * vol,
 						["heard", "footstep", "uncertain"],
-						""
+						"", "footstep", clarity
 					)
 			elif stim_type == "impact":
 				var dir_name: String = _direction_to_name(direction)
@@ -855,14 +857,14 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 						"Heard a loud noise from %s's direction" % emitter if emitter != "" else "Heard a loud noise %s of me" % dir_name,
 						salience,
 						["heard", "impact"],
-						emitter
+						emitter, "impact", clarity
 					)
 				else:
 					memory.add_tagged_event(
 						"Heard something %s of me" % dir_name,
 						salience * 0.5,
 						["heard", "uncertain"],
-						""
+						"", "impact_uncertain", clarity
 					)
 	else:
 		# Fallback: process anything heard via direct perception.hear() calls
@@ -872,7 +874,7 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 				"Heard %s say: %s" % [evt["source"], evt["text"]],
 				0.4,
 				["heard", "overheard"],
-				evt["source"]
+				evt["source"], "speech"
 			)
 
 func _process_visible_objects() -> void:
@@ -916,13 +918,15 @@ func _process_visible_objects() -> void:
 		# Create tagged events for discoveries
 		if is_new:
 			var event_text: String = "Discovered %s at %s (state: %s)" % [obj_name, obj_location, obj_state]
-			memory.add_tagged_event(event_text, base_salience, ["object_discovery", obj_type], "direct")
+			var obj_kind: String = "object_problem" if obj_state in ["broken", "empty", "locked"] else "object_discovery"
+			memory.add_tagged_event(event_text, base_salience, ["object_discovery", obj_type], "direct", obj_kind)
 
 		# State change event
 		if state_changed:
 			var old_state: String = known.get("last_seen_state", "unknown")
 			var event_text: String = "Noticed %s at %s changed from %s to %s" % [obj_name, obj_location, old_state, obj_state]
-			memory.add_tagged_event(event_text, base_salience, ["object_state_change", obj_type], "direct")
+			var change_kind: String = "object_problem" if obj_state in ["broken", "empty", "locked"] else "object_state_change"
+			memory.add_tagged_event(event_text, base_salience, ["object_state_change", obj_type], "direct", change_kind)
 
 # --- EXAMINE action helpers ---
 
@@ -965,7 +969,7 @@ func _finish_examine() -> void:
 		var is_my_domain: bool = affinities.size() == 0 or role in affinities
 		var salience: float = 0.8 if is_my_domain else 0.4
 		var event_text: String = "Examined %s at %s — it's %s" % [obj_name, obj_loc, obj_state]
-		memory.add_tagged_event(event_text, salience, ["object_examine", "problematic", obj_type], "direct")
+		memory.add_tagged_event(event_text, salience, ["object_examine", "problematic", obj_type], "direct", "object_problem")
 
 		if is_my_domain:
 			# Add concern and inject a fix chunk into the plan
@@ -983,7 +987,7 @@ func _finish_examine() -> void:
 				layer3.inject_object_concern_chunk(fix_purpose, obj_loc, _examining_object_id, "fix")
 				print("[Brain] %s: Discovered problematic %s (%s) — replanning" % [npc_name, obj_name, obj_state])
 	else:
-		memory.add_tagged_event("Examined %s at %s — %s" % [obj_name, obj_loc, obj_state], 0.3, ["object_examine"], "direct")
+		memory.add_tagged_event("Examined %s at %s — %s" % [obj_name, obj_loc, obj_state], 0.3, ["object_examine"], "direct", "object_examine")
 
 	_examining_object_id = ""
 

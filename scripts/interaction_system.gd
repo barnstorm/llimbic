@@ -187,7 +187,7 @@ func _close_chat() -> void:
 						last_player_msg = msg["text"]
 				if last_player_msg != "":
 					summary = "Player said: \"%s\"" % last_player_msg.substr(0, 50)
-			_active_npc.brain.memory.add_tagged_event(summary, 0.7, ["conversation", "player"])
+			_active_npc.brain.memory.add_tagged_event(summary, 0.7, ["conversation", "player"], "direct", "player_interaction")
 
 	_active_npc = null
 	_conversation_history.clear()

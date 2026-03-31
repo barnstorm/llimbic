@@ -357,7 +357,7 @@ func interact_with_player() -> void:
 	velocity = Vector2.ZERO
 
 	if brain:
-		brain.memory.add_tagged_event("Player initiated conversation", 0.5, ["interaction", "player"])
+		brain.memory.add_tagged_event("Player initiated conversation", 0.5, ["interaction", "player"], "direct", "player_interaction")
 		if brain.layer1.task_momentum > 0.3:
 			brain.layer1.apply_interruption()
 			brain.memory.update_relationship("Player", -0.02, "Interrupted my work")

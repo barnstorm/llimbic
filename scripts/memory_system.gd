@@ -7,13 +7,17 @@ const MAX_REFLECTIONS: int = 5
 const MAX_CONCERNS: int = 5
 const MAX_FAILED_STRATEGIES: int = 5
 
+# NPC identity — set by brain at setup for role-relevance checks
+var npc_name: String = ""
+var npc_role: String = ""
+
 # Optional log callback — set by brain to pipe events to per-NPC log
 var on_tagged_event: Callable
 
-# Raw observations: who, where, doing what
+# Raw observations: structured dicts with kind, subtype, text, source_type, confidence
 var observations: Array[Dictionary] = []
 
-# Tagged events with salience scoring
+# Tagged events with salience scoring, kind classification, and confidence
 var tagged_events: Array[Dictionary] = []
 
 # Relationship state: trust changes with reasons
@@ -40,25 +44,54 @@ var acquired_beliefs: Array[Dictionary] = []
 # Known world objects: object_id -> {name, type, last_seen_position, last_seen_state, last_seen_time, learned_from, location}
 var known_objects: Dictionary = {}
 
+func add_observation_structured(obs: Dictionary) -> void:
+	## Add a structured observation. Shape:
+	## {kind: "vision"|"hearing", subtype: "actor_presence"|"speech"|"object_state"|"impact",
+	##  text: String, source_type: "direct", confidence: float, position: Vector2,
+	##  direction: Vector2, tags: Array, time: int}
+	obs["time"] = obs.get("time", Time.get_ticks_msec())
+	obs["source_type"] = obs.get("source_type", "direct")
+	obs["confidence"] = obs.get("confidence", 1.0)
+	obs["tags"] = obs.get("tags", [])
+	observations.append(obs)
+	if observations.size() > MAX_OBSERVATIONS:
+		observations.pop_front()
+
 func add_observation(who: String, where: String, doing: String) -> void:
+	## Backward-compat wrapper — builds structured observation from simple args.
 	var obs: Dictionary = {
+		"kind": "vision",
+		"subtype": "actor_presence",
+		"text": doing if doing != "" else "Near %s" % who,
+		"source_type": "direct",
+		"confidence": 1.0,
+		"position": Vector2.ZERO,
+		"direction": Vector2.ZERO,
+		"tags": [],
+		"time": Time.get_ticks_msec(),
+		# Legacy fields kept for any code reading observations directly
 		"who": who,
 		"where": where,
 		"doing": doing,
-		"time": Time.get_ticks_msec()
 	}
 	observations.append(obs)
 	if observations.size() > MAX_OBSERVATIONS:
 		observations.pop_front()
 
-func add_tagged_event(description: String, salience: float, tags: Array = [], source: String = "direct") -> void:
+func add_tagged_event(description: String, salience: float, tags: Array = [],
+		source: String = "direct", kind: String = "generic",
+		confidence: float = 1.0) -> void:
 	if on_tagged_event.is_valid():
 		on_tagged_event.call(description, salience)
 	var evt: Dictionary = {
-		"description": description,
+		"text": description,
+		"description": description,  # kept for backward compat reads
 		"salience": salience,
 		"tags": tags,
 		"source": source,
+		"source_type": "direct" if source == "direct" else "second_hand",
+		"kind": kind,
+		"confidence": confidence,
 		"time": Time.get_ticks_msec()
 	}
 	tagged_events.append(evt)
@@ -270,3 +303,304 @@ func get_object_dialogue_context(role: String) -> String:
 	if notable.size() > 3:
 		notable.resize(3)
 	return "Notable objects: " + "; ".join(notable)
+
+# --- Role affinity for relevance scoring ---
+
+const ROLE_TAG_AFFINITY: Dictionary = {
+	"Guard": ["security", "danger", "patrol", "crime", "suspicious", "impact", "flee"],
+	"Gossip": ["rumor", "conversation", "social", "heard", "overheard", "second-hand"],
+	"Baker": ["trade", "supply", "food", "delivery", "object_discovery"],
+	"Farmer": ["trade", "supply", "weather", "food", "resource"],
+	"Innkeeper": ["trade", "social", "travelers", "food", "supply"],
+	"Courier": ["delivery", "road", "news", "travel"],
+	"Herbalist": ["remedy", "illness", "herbs", "supply"],
+	"Blacksmith": ["trade", "supply", "forge", "tool"],
+}
+
+# --- Observation promotion ---
+
+func promote_observation(obs: Dictionary) -> void:
+	## Check whether an observation should be promoted to a tagged event.
+	## Called by brain after adding structured observations.
+	## Only promotes if confidence is sufficient and the observation is notable.
+	var conf: float = obs.get("confidence", 1.0)
+	if conf < 0.4:
+		return  # too uncertain to promote
+
+	var subtype: String = obs.get("subtype", "")
+	var tags: Array = obs.get("tags", [])
+	var text: String = obs.get("text", "")
+	var source_type: String = obs.get("source_type", "direct")
+	var kind_str: String = obs.get("kind", "vision")
+
+	# Determine promotion salience based on observation type
+	var salience: float = 0.0
+	var event_kind: String = "generic"
+	var event_tags: Array = tags.duplicate()
+
+	# Object problems always promote
+	if "object_problem" in tags or "problematic" in tags:
+		salience = 0.7
+		event_kind = "object_problem"
+	# Player-relevant observations promote
+	elif "player" in tags:
+		salience = 0.5
+		event_kind = "player_interaction"
+	# Speech with good clarity promotes
+	elif subtype == "speech" and conf > 0.5:
+		salience = 0.4
+		event_kind = "speech"
+	# State changes promote
+	elif "state_change" in tags:
+		salience = 0.5
+		event_kind = "state_change"
+	# Novel entity sightings: only if not already known
+	elif subtype == "actor_presence" and "novel" in tags:
+		salience = 0.3
+		event_kind = "novel_sighting"
+	# High-confidence impact sounds
+	elif subtype == "impact" and conf > 0.5:
+		salience = 0.4
+		event_kind = "impact"
+
+	if salience < 0.1:
+		return  # not worth promoting
+
+	# Role relevance boost
+	var role_tags: Array = ROLE_TAG_AFFINITY.get(npc_role, [])
+	for tag in event_tags:
+		if tag in role_tags:
+			salience = minf(salience + 0.15, 1.0)
+			break
+
+	add_tagged_event(text, salience, event_tags, "direct" if source_type == "direct" else "",
+		event_kind, conf)
+
+# --- GoEmotions dimension names (27-dim) ---
+
+const EMOTION_NAMES: Array = [
+	"admiration", "amusement", "approval", "caring", "desire", "excitement",
+	"gratitude", "joy", "love", "optimism", "pride", "relief",
+	"anger", "annoyance", "disappointment", "disapproval", "disgust",
+	"embarrassment", "fear", "grief", "nervousness", "remorse", "sadness",
+	"confusion", "curiosity", "realization", "surprise"
+]
+
+# --- Retrieval / Compression Layer ---
+
+func _top_emotions(vector: Array, n: int = 3) -> Array:
+	## Extract top N emotions from 27-dim GoEmotions vector.
+	## Returns [{name: String, value: float}] sorted descending.
+	if vector.is_empty():
+		return []
+	var indexed: Array = []
+	for i in range(mini(vector.size(), EMOTION_NAMES.size())):
+		if float(vector[i]) > 0.05:
+			indexed.append({"name": EMOTION_NAMES[i], "value": float(vector[i])})
+	indexed.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["value"] > b["value"])
+	if indexed.size() > n:
+		indexed.resize(n)
+	return indexed
+
+func _rank_events(events: Array, ctx: Dictionary) -> Array:
+	## Score and sort events by weighted relevance.
+	## ctx may contain: role, current_chunk, hour
+	var now: int = Time.get_ticks_msec()
+	var max_age_ms: float = 600000.0  # 10 minutes
+	var role_str: String = ctx.get("role", npc_role)
+	var role_tags: Array = ROLE_TAG_AFFINITY.get(role_str, [])
+	var chunk: Dictionary = ctx.get("current_chunk", {})
+	var chunk_purpose: String = chunk.get("purpose", "").to_lower()
+	var chunk_location: String = chunk.get("location", "")
+
+	var scored: Array = []
+	for evt in events:
+		var s: float = evt.get("salience", 0.3) * 0.30
+		# Recency
+		var age_ms: float = maxf(float(now - evt.get("time", now)), 0.0)
+		s += (1.0 - clampf(age_ms / max_age_ms, 0.0, 1.0)) * 0.25
+		# Confidence
+		s += evt.get("confidence", 1.0) * 0.20
+		# Role relevance
+		var tags: Array = evt.get("tags", [])
+		var role_hit: bool = false
+		for tag in tags:
+			if tag in role_tags:
+				role_hit = true
+				break
+		if role_hit:
+			s += 0.15
+		# Chunk relevance
+		var chunk_hit: bool = false
+		if chunk_purpose != "":
+			for tag in tags:
+				if tag in chunk_purpose or chunk_purpose in str(evt.get("text", evt.get("description", ""))).to_lower():
+					chunk_hit = true
+					break
+		if chunk_location != "" and chunk_location in str(evt.get("text", evt.get("description", ""))).to_lower():
+			chunk_hit = true
+		if chunk_hit:
+			s += 0.10
+		scored.append({"event": evt, "score": s})
+
+	scored.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["score"] > b["score"])
+
+	var result: Array = []
+	for item in scored:
+		result.append(item["event"])
+	return result
+
+func _dedupe_events(events: Array) -> Array:
+	## Collapse duplicate/similar events.
+	## Same kind + similar text prefix (first 30 chars) -> keep latest, add count.
+	## Same object_id in tags -> keep latest state only.
+	if events.size() <= 1:
+		return events
+
+	var result: Array = []
+	var seen_keys: Dictionary = {}  # dedup key -> index in result
+
+	for evt in events:
+		var kind: String = evt.get("kind", "generic")
+		var text: String = str(evt.get("text", evt.get("description", "")))
+		var dedup_key: String = kind + ":" + text.substr(0, 30).to_lower()
+
+		if seen_keys.has(dedup_key):
+			var existing_idx: int = seen_keys[dedup_key]
+			var existing: Dictionary = result[existing_idx]
+			existing["count"] = existing.get("count", 1) + 1
+			# Keep the more recent one
+			if evt.get("time", 0) > existing.get("time", 0):
+				var count: int = existing["count"]
+				evt["count"] = count
+				result[existing_idx] = evt
+		else:
+			seen_keys[dedup_key] = result.size()
+			result.append(evt)
+
+	return result
+
+func _event_to_packet_entry(evt: Dictionary) -> Dictionary:
+	## Convert internal event dict to a clean packet entry for L3 consumption.
+	var entry: Dictionary = {
+		"text": str(evt.get("text", evt.get("description", ""))),
+		"kind": evt.get("kind", "generic"),
+		"source_type": evt.get("source_type", "direct"),
+		"confidence": evt.get("confidence", 1.0),
+		"salience": evt.get("salience", 0.3),
+		"tags": evt.get("tags", []),
+	}
+	if evt.has("count") and evt["count"] > 1:
+		entry["count"] = evt["count"]
+	return entry
+
+# --- Packet Builders ---
+
+func build_plan_packet(ctx: Dictionary) -> Dictionary:
+	## Build a bounded, purpose-specific packet for Layer 3 planning.
+	## ctx = {npc_name, role, hour, current_location, current_chunk,
+	##        replan_reason, emotion_vector, chunk_outcomes}
+	var packet: Dictionary = {
+		"npc_name": ctx.get("npc_name", npc_name),
+		"role": ctx.get("role", npc_role),
+		"hour": ctx.get("hour", 0.0),
+		"current_location": ctx.get("current_location", ""),
+		"current_chunk": ctx.get("current_chunk", {}),
+		"replan_reason": ctx.get("replan_reason", "none"),
+	}
+
+	# Top 3 emotions
+	packet["top_emotions"] = _top_emotions(ctx.get("emotion_vector", []), 3)
+
+	# Concerns (cap 2)
+	var capped_concerns: Array = []
+	for i in range(mini(concerns.size(), 2)):
+		capped_concerns.append(concerns[i])
+	packet["concerns"] = capped_concerns
+
+	# Problem objects (cap 2)
+	var problems: Array = get_problematic_objects()
+	if problems.size() > 2:
+		problems.resize(2)
+	packet["problem_objects"] = problems
+
+	# Recent failures (cap 2)
+	var failures: Array = []
+	var chunk_outcomes: Array = ctx.get("chunk_outcomes", [])
+	for co in chunk_outcomes:
+		var outcome: String = co.get("outcome", "")
+		if outcome in ["failed", "completed_with_difficulty"]:
+			failures.append({"purpose": co.get("purpose", ""), "location": co.get("location", ""), "outcome": outcome})
+	if failures.size() > 2:
+		failures = failures.slice(failures.size() - 2)
+	packet["recent_failures"] = failures
+
+	# Salient events (ranked, deduped, cap 4)
+	var ranked: Array = _rank_events(tagged_events.duplicate(), ctx)
+	var deduped: Array = _dedupe_events(ranked)
+	var events_out: Array = []
+	for i in range(mini(deduped.size(), 4)):
+		events_out.append(_event_to_packet_entry(deduped[i]))
+	packet["salient_events"] = events_out
+
+	return packet
+
+func build_reflection_packet(ctx: Dictionary) -> Dictionary:
+	## Build a bounded packet for Layer 3 reflection.
+	## ctx = {npc_name, role, active_intention}
+	var packet: Dictionary = {
+		"npc_name": ctx.get("npc_name", npc_name),
+		"role": ctx.get("role", npc_role),
+		"active_intention": ctx.get("active_intention", ""),
+	}
+
+	# Events (ranked, cap 6) — reflection wants broader coverage
+	var ranked: Array = _rank_events(tagged_events.duplicate(), ctx)
+	var deduped: Array = _dedupe_events(ranked)
+	var events_out: Array = []
+	for i in range(mini(deduped.size(), 6)):
+		events_out.append(_event_to_packet_entry(deduped[i]))
+	packet["events"] = events_out
+
+	# Current concerns (cap 2)
+	var capped_concerns: Array = []
+	for i in range(mini(concerns.size(), 2)):
+		capped_concerns.append(concerns[i])
+	packet["current_concerns"] = capped_concerns
+
+	return packet
+
+func build_dialogue_packet(ctx: Dictionary) -> Dictionary:
+	## Build a bounded packet for Layer 3 dialogue/conversation.
+	## ctx = {npc_name, role, target_name, target_type, trust, emotion_vector,
+	##        current_activity, current_chunk}
+	var packet: Dictionary = {
+		"npc_name": ctx.get("npc_name", npc_name),
+		"role": ctx.get("role", npc_role),
+		"target_type": ctx.get("target_type", "player"),
+		"target_name": ctx.get("target_name", ""),
+		"trust": ctx.get("trust", 0.5),
+		"current_activity": ctx.get("current_activity", ""),
+	}
+
+	# Top 3 emotions
+	packet["top_emotions"] = _top_emotions(ctx.get("emotion_vector", []), 3)
+
+	# Top concern (just 1)
+	packet["top_concern"] = concerns[0] if concerns.size() > 0 else ""
+
+	# Notable objects (cap 2) — prefer problematic ones
+	var notable: Array = get_problematic_objects()
+	if notable.size() > 2:
+		notable.resize(2)
+	packet["notable_objects"] = notable
+
+	# Recent relevant events (cap 3) — prefer events relevant to the conversation target
+	var ranked: Array = _rank_events(tagged_events.duplicate(), ctx)
+	var deduped: Array = _dedupe_events(ranked)
+	var events_out: Array = []
+	for i in range(mini(deduped.size(), 3)):
+		events_out.append(_event_to_packet_entry(deduped[i]))
+	packet["recent_relevant_events"] = events_out
+
+	return packet

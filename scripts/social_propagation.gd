@@ -236,7 +236,7 @@ func _on_speech_received(convo: Dictionary, speaker: Node, success: bool, data: 
 	# Record the conversation in both NPCs' memory
 	var listener: Node = convo["listener"] if speaker == convo["speaker"] else convo["speaker"]
 	speaker.brain.memory.add_tagged_event(
-		"Talked to %s about %s" % [listener.npc_name, topic], 0.5, ["conversation"]
+		"Talked to %s about %s" % [listener.npc_name, topic], 0.5, ["conversation"], "direct", "social"
 	)
 
 	# Satisfy social need
@@ -310,7 +310,8 @@ func _exchange_events(from_npc: Node, to_npc: Node) -> void:
 	var new_salience: float = chosen["salience"] * 0.7 * trust_factor
 
 	to_npc.brain.memory.add_tagged_event(
-		str(chosen["description"]), new_salience, ["second-hand"], from_npc.npc_name
+		str(chosen["description"]), new_salience, ["second-hand"], from_npc.npc_name,
+		chosen.get("kind", "generic"), chosen.get("confidence", 0.7) * trust_factor
 	)
 	to_npc.brain.memory.add_acquired_belief(
 		str(chosen["description"]), from_npc.npc_name, trust
@@ -382,7 +383,7 @@ func _exchange_object_knowledge(from_npc: Node, to_npc: Node) -> void:
 				"%s told me the %s at %s is %s" % [from_npc.npc_name, obj.get("name", ""), obj.get("location", ""), state],
 				0.5 * clampf(trust + 0.3, 0.3, 1.0),
 				["object_knowledge", "second-hand"],
-				from_npc.npc_name
+				from_npc.npc_name, "object_problem", 0.7 * clampf(trust + 0.3, 0.3, 1.0)
 			)
 			print("[SocialProp] %s shared object knowledge with %s: %s at %s is %s" % [from_npc.npc_name, to_npc.npc_name, obj.get("name", ""), obj.get("location", ""), state])
 
