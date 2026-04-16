@@ -18,65 +18,24 @@ centered = false
 script = ExtResource("1_choun")
 
 [node name="Player" type="CharacterBody2D" parent="." instance=ExtResource("2_ya4ey")]
+position = Vector2(2130, 800)
 script = ExtResource("3_eb6dy")
 
 [node name="NPCs" type="Node2D" parent="."]
 
-[node name="NPC_0" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
-position = Vector2(1712, 464)
-script = ExtResource("5_a8y0u")
-npc_name = "Edith"
-role = "Baker"
-character_sheet_path = "res://assets/characters/Character_RM_002.png"
-
-[node name="NPC_1" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
-position = Vector2(2320, 464)
-script = ExtResource("5_a8y0u")
-npc_name = "Roland"
-role = "Guard"
-character_sheet_path = "res://assets/characters/Character_RM_003.png"
-
-[node name="NPC_2" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
-position = Vector2(528, 592)
-script = ExtResource("5_a8y0u")
-npc_name = "Ivy"
-role = "Herbalist"
-character_sheet_path = "res://assets/characters/Character_RM_004.png"
-
-[node name="NPC_3" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
-position = Vector2(816, 592)
-script = ExtResource("5_a8y0u")
-npc_name = "Felix"
-role = "Courier"
-character_sheet_path = "res://assets/characters/Character_RM_005.png"
-
-[node name="NPC_4" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
-position = Vector2(1168, 592)
-script = ExtResource("5_a8y0u")
-npc_name = "Greta"
-role = "Blacksmith"
-character_sheet_path = "res://assets/characters/Character_RM_006.png"
-
-[node name="NPC_5" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
-position = Vector2(2768, 592)
-script = ExtResource("5_a8y0u")
-npc_name = "Mabel"
-role = "Gossip"
-character_sheet_path = "res://assets/characters/Character_RM_007.png"
-
-[node name="NPC_6" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
-position = Vector2(2992, 592)
-script = ExtResource("5_a8y0u")
-npc_name = "Aldric"
-role = "Farmer"
-character_sheet_path = "res://assets/characters/Character_RM_008.png"
-
 [node name="NPC_7" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
-position = Vector2(2096, 624)
+position = Vector2(2096, 800)
 script = ExtResource("5_a8y0u")
 npc_name = "Hugo"
 role = "Innkeeper"
 character_sheet_path = "res://assets/characters/Character_RM_009.png"
+
+[node name="NPC_Mabel" type="CharacterBody2D" parent="NPCs" instance=ExtResource("4_trceg")]
+position = Vector2(2060, 800)
+script = ExtResource("5_a8y0u")
+npc_name = "Mabel"
+role = "Gossip"
+character_sheet_path = "res://assets/characters/Character_RM_003.png"
 
 [node name="Camera2D" type="Camera2D" parent="."]
 zoom = Vector2(2.5, 2.5)

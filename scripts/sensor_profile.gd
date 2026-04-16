@@ -3,7 +3,7 @@ extends RefCounted
 
 static func make_default() -> Dictionary:
 	return {
-		"vision_range": 96.0,       # ~3 tiles
+		"vision_range": 192.0,      # ~6 tiles
 		"vision_arc_deg": 90.0,     # full cone angle
 		"eye_offset": Vector2.ZERO,
 		"hearing_threshold": 0.1,

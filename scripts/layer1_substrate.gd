@@ -4,12 +4,18 @@ extends RefCounted
 ## trust, familiarity all accessible as before. Internals are now emergent.
 
 var _network: RefCounted = null  # HebbianNetwork
+var _somatic: RefCounted = null  # SomaticStream
 
 # --- Timers ---
 var _hebbian_timer: float = 0.0
 var _neurogenesis_timer: float = 0.0
+var _somatic_timer: float = 0.0
 const HEBBIAN_INTERVAL: float = 0.5
 const NEUROGENESIS_INTERVAL: float = 2.0
+const SOMATIC_INTERVAL: float = 0.25  # emit tags ~4x per second
+
+# --- Somatic output ---
+var somatic_tags: Array = []  # last emitted tag swarm
 
 # --- Stall detection (mechanical, not neural) ---
 var _stalled_time: float = 0.0
@@ -31,6 +37,9 @@ var exploration_bias: float = 0.0
 var attention_weight: float = 1.0
 var interruption_sensitivity: float = 0.5
 var persistence_scale: float = 1.0
+
+# Cached emotion vector (set via apply_emotion_feedback)
+var _emotion_vector: Array = []
 
 # Context (set externally via set_context)
 var _role: String = ""
@@ -104,15 +113,25 @@ var help: float:
 var flee: float:
 	get: return _network.get_activation("action_flee") / 100.0 if _network else 0.0
 
+var arousal: float:
+	get: return _network.get_activation("drive_arousal") / 100.0 if _network else 0.3
+	set(v):
+		if _network:
+			_network.set_activation("drive_arousal", v * 100.0)
+
 # =========================================================================
 # SETUP
 # =========================================================================
 
-func setup(persona: Dictionary) -> void:
+func setup(persona: Dictionary, memory: RefCounted = null) -> void:
 	_role = persona.get("role", "Villager")
 	var NetScript: GDScript = load("res://scripts/hebbian_network.gd")
 	_network = NetScript.new()
 	_network.setup_default_network(persona)
+	# Somatic stream
+	var SomScript: GDScript = load("res://scripts/somatic_stream.gd")
+	_somatic = SomScript.new()
+	_somatic.setup(_network, memory)
 
 # =========================================================================
 # UPDATE — called every physics tick
@@ -162,6 +181,12 @@ func update(delta: float) -> void:
 	if _neurogenesis_timer >= NEUROGENESIS_INTERVAL:
 		_neurogenesis_timer -= NEUROGENESIS_INTERVAL
 		_network.check_neurogenesis()
+
+	# 10. Somatic tag emission (~4x per second)
+	_somatic_timer += delta
+	if _somatic_timer >= SOMATIC_INTERVAL and _somatic != null:
+		_somatic_timer -= SOMATIC_INTERVAL
+		somatic_tags = _somatic.emit(_emotion_vector)
 
 func _update_sensory_neurons() -> void:
 	_network.set_activation("sense_at_home", 100.0 if _is_at_home else 0.0)
@@ -291,6 +316,7 @@ func get_state_dict() -> Dictionary:
 		"hunger": hunger,
 		"social_need": social_need,
 		"safety": safety,
+		"arousal": arousal,
 		"task_momentum": task_momentum,
 		"interruption_tolerance": interruption_tolerance,
 		"frustration": frustration,
@@ -300,6 +326,15 @@ func get_state_dict() -> Dictionary:
 		"help": help,
 		"flee": flee
 	}
+
+func get_somatic_tags() -> Array:
+	## Get the last emitted somatic tag swarm.
+	return somatic_tags
+
+func get_somatic_debug() -> Dictionary:
+	if _somatic:
+		return _somatic.get_debug_state()
+	return {}
 
 func update_progress(delta: float, intended_speed: float, actual_movement: float) -> void:
 	if intended_speed < 1.0:
@@ -337,6 +372,7 @@ func apply_emotion_feedback(emotion_vector: Array) -> void:
 	## Emotions feed back into drives/actions. Small per-tick nudges.
 	if _network == null or emotion_vector.size() < 27:
 		return
+	_emotion_vector = emotion_vector
 	var rate: float = 0.02  # small influence per tick
 
 	# Anger (12) boosts frustration

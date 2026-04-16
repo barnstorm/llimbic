@@ -54,6 +54,16 @@ const ACTION_BASELINES: Dictionary = {
 	"action_flee": 0.0,
 }
 
+# Quality neuron emission threshold
+const QUALITY_EMIT_THRESHOLD: float = 40.0
+
+# Quality neurogenesis: co-activation tracking
+var _quality_coactivation: Dictionary = {}  # "q1:q2" -> {count: int, last_tick: int}
+const QUALITY_COACT_THRESHOLD: int = 8  # co-activations before spawning compound
+const QUALITY_COACT_WINDOW: int = 30000  # 30s window for co-activation counting
+var _compound_quality_count: int = 0
+const MAX_COMPOUND_QUALITIES: int = 16
+
 # =========================================================================
 # SETUP
 # =========================================================================
@@ -103,6 +113,12 @@ func setup_default_network(persona: Dictionary) -> void:
 	_add_neuron("action_help", "action", 30.0, false, "", "Help")
 	_add_neuron("action_flee", "action", 0.0, false, "", "Flee")
 
+	# --- Arousal drive (master gain) ---
+	_add_neuron("drive_arousal", "drive", 30.0, false, "", "Arousal")
+
+	# --- Quality neurons (somatic tag emitters) ---
+	_seed_quality_neurons()
+
 	# --- Initial connections ---
 	var role: String = persona.get("role", "Villager")
 	_seed_connections(role)
@@ -126,10 +142,173 @@ func _add_neuron(id: String, type: String, activation: float, protected: bool, c
 	neurons.append(neuron)
 	_neuron_map[id] = neuron
 
+func _add_quality_neuron(id: String, tag_text: String, regions: Array, activation: float = 10.0) -> void:
+	## Add a quality neuron — emits somatic tags when activated.
+	## tag_text: the quality word (e.g. "tight", "churning")
+	## regions: body regions this quality can bind to (e.g. ["chest", "gut"])
+	var neuron: Dictionary = {
+		"id": id,
+		"type": "quality",
+		"activation": activation,
+		"protected": false,
+		"category": "quality",
+		"age": 1000,
+		"label": tag_text,
+		"tag_text": tag_text,
+		"regions": regions,
+	}
+	neurons.append(neuron)
+	_neuron_map[id] = neuron
+
 func _add_connection(src: String, dst: String, weight: float) -> void:
 	connections.append({"src": src, "dst": dst, "weight": weight})
 
+func _seed_quality_neurons() -> void:
+	## Seed base quality neurons — the body's vocabulary for felt experience.
+	## Each quality can bind to multiple body regions.
+	## Connections to drives/emotions determine WHEN they fire.
+
+	# SENSATION
+	_add_quality_neuron("q_tight",     "tight",       ["chest", "gut", "throat", "muscles"])
+	_add_quality_neuron("q_loose",     "loose",       ["muscles", "chest"])
+	_add_quality_neuron("q_heavy",     "heavy",       ["muscles", "head", "body"])
+	_add_quality_neuron("q_light",     "light",       ["chest", "muscles"])
+	_add_quality_neuron("q_hollow",    "hollow",      ["chest", "gut"])
+	_add_quality_neuron("q_full",      "full",        ["gut", "chest"])
+
+	# MOVEMENT
+	_add_quality_neuron("q_pounding",  "pounding",    ["chest", "head"])
+	_add_quality_neuron("q_churning",  "churning",    ["gut"])
+	_add_quality_neuron("q_buzzing",   "buzzing",     ["head", "skin"])
+	_add_quality_neuron("q_prickling", "prickling",   ["skin"])
+	_add_quality_neuron("q_fluttering","fluttering",  ["chest", "gut"])
+	_add_quality_neuron("q_crawling",  "crawling",    ["skin"])
+
+	# TEMPERATURE
+	_add_quality_neuron("q_warm",      "warm",        ["chest", "skin"])
+	_add_quality_neuron("q_cold",      "cold",        ["skin", "chest"])
+	_add_quality_neuron("q_numb",      "numb",        ["skin", "muscles", "body"])
+
+	# PRESSURE / STATE
+	_add_quality_neuron("q_pressure",  "pressure",    ["head", "chest"])
+	_add_quality_neuron("q_constricted","constricted", ["throat", "chest"])
+	_add_quality_neuron("q_open",      "open",        ["chest", "throat"])
+	_add_quality_neuron("q_restless",  "restless",    ["muscles", "body"])
+	_add_quality_neuron("q_settled",   "settled",     ["gut", "body"])
+	_add_quality_neuron("q_foggy",     "foggy",       ["head"])
+	_add_quality_neuron("q_clear",     "clear",       ["head"])
+	_add_quality_neuron("q_coiled",    "coiled",      ["muscles"])
+	_add_quality_neuron("q_aching",    "aching",      ["muscles", "head"])
+	_add_quality_neuron("q_raw",       "raw",         ["throat", "skin"])
+	_add_quality_neuron("q_dry",       "dry",         ["throat"])
+
+	# WHOLE-BODY
+	_add_quality_neuron("q_aroused",   "aroused",     ["body"])
+	_add_quality_neuron("q_sluggish",  "sluggish",    ["body"])
+	_add_quality_neuron("q_drawn",     "drawn",       ["body"])
+	_add_quality_neuron("q_urgent",    "urgent",      ["body"])
+	_add_quality_neuron("q_empty_need","yearning",    ["body", "chest"])
+
+func _seed_quality_connections() -> void:
+	## Wire quality neurons to their source signals.
+	## Multiple sources per quality = ambiguity by design.
+
+	# tight: frustration, low safety (inverted via emotion feedback path)
+	# Note: drive_safety is HIGH=safe. Direct negative conn means high safety SUPPRESSES tight.
+	# Tight activation comes from emotion feedback (fear, anger) and frustration.
+	_add_connection("task_frustration", "q_tight", 0.06)
+	# loose: safety high
+	_add_connection("drive_safety", "q_loose", 0.04)
+	# heavy: low energy (inverted — emotion feedback sadness handles this too)
+	_add_connection("task_frustration", "q_heavy", 0.03)
+	# light: energy high, joy
+	_add_connection("drive_energy", "q_light", 0.03)
+	# hollow: social need high, hunger high, grief
+	_add_connection("drive_social", "q_hollow", 0.05)        # lonely → hollow
+	_add_connection("drive_hunger", "q_hollow", 0.04)        # hungry → hollow
+	# full: hunger low, safety high
+	_add_connection("drive_hunger", "q_full", -0.04)         # sated → full
+	_add_connection("drive_safety", "q_full", 0.02)
+
+	# pounding: flee high, arousal high
+	_add_connection("action_flee", "q_pounding", 0.08)
+	_add_connection("drive_arousal", "q_pounding", 0.04)
+	# churning: hunger (fear/nervousness via emotion feedback)
+	_add_connection("drive_hunger", "q_churning", 0.04)
+	# buzzing: curiosity/arousal (via action_observe + arousal)
+	_add_connection("action_observe", "q_buzzing", 0.04)
+	_add_connection("drive_arousal", "q_buzzing", 0.03)
+	# prickling: flee tendency (low safety via fear emotion feedback)
+	_add_connection("action_flee", "q_prickling", 0.06)
+	# fluttering: arousal + social (excitement/nervousness ambiguity)
+	_add_connection("drive_arousal", "q_fluttering", 0.04)
+	_add_connection("drive_social", "q_fluttering", 0.03)
+	# crawling: sustained fear (via emotion feedback)
+	_add_connection("action_flee", "q_crawling", 0.03)
+
+	# warm: social presence, help tendency
+	_add_connection("sense_nearby_npcs", "q_warm", 0.05)
+	_add_connection("action_help", "q_warm", 0.03)
+	# cold: isolation (low energy via sadness emotion feedback)
+	_add_connection("drive_social", "q_cold", 0.03)         # lonely → cold
+	# numb: sustained stress (energy collapse via emotion feedback)
+	_add_connection("task_frustration", "q_numb", 0.03)
+
+	# pressure: frustration + stalled
+	_add_connection("task_frustration", "q_pressure", 0.06)
+	_add_connection("sense_is_stalled", "q_pressure", 0.05)
+	# constricted: nervousness/fear (via emotion feedback)
+	_add_connection("action_flee", "q_constricted", 0.04)
+	# open: safety high, social satisfied
+	_add_connection("drive_safety", "q_open", 0.04)
+	_add_connection("sense_nearby_npcs", "q_open", 0.02)
+
+	# restless: approach high + momentum low
+	_add_connection("action_approach", "q_restless", 0.04)
+	_add_connection("task_momentum", "q_restless", -0.03)
+	# settled: home, fed, safe
+	_add_connection("sense_at_home", "q_settled", 0.04)
+	_add_connection("drive_safety", "q_settled", 0.03)
+	_add_connection("drive_hunger", "q_settled", -0.03)
+	# foggy: low energy
+	# foggy: sadness/low energy (via emotion feedback)
+	_add_connection("task_frustration", "q_foggy", 0.03)
+	# clear: high energy, low frustration
+	_add_connection("drive_energy", "q_clear", 0.04)
+	# coiled: flee + anger/frustration
+	_add_connection("action_flee", "q_coiled", 0.05)
+	_add_connection("task_frustration", "q_coiled", 0.04)
+	# aching: low energy + sustained frustration
+	_add_connection("drive_energy", "q_aching", -0.03)
+	_add_connection("task_frustration", "q_aching", 0.03)
+	# raw: high frustration
+	_add_connection("task_frustration", "q_raw", 0.05)
+	# dry: nervousness, social need
+	_add_connection("drive_social", "q_dry", 0.04)
+
+	# Whole-body states
+	_add_connection("drive_arousal", "q_aroused", 0.06)
+	_add_connection("drive_energy", "q_sluggish", -0.05)
+	_add_connection("drive_arousal", "q_sluggish", -0.04)
+	_add_connection("action_approach", "q_drawn", 0.04)
+	_add_connection("drive_social", "q_drawn", 0.03)
+	_add_connection("task_momentum", "q_urgent", 0.05)
+	_add_connection("drive_hunger", "q_urgent", 0.03)
+	_add_connection("drive_social", "q_empty_need", 0.05)    # yearning from loneliness
+	_add_connection("drive_hunger", "q_empty_need", 0.03)    # yearning from hunger
+
+	# Arousal drive: fed by action neuron activations + novelty
+	_add_connection("action_flee", "drive_arousal", 0.06)
+	_add_connection("action_approach", "drive_arousal", 0.03)
+	_add_connection("action_observe", "drive_arousal", 0.02)
+	# Note: familiarity high suppresses arousal via negative weight (correct: high familiarity * -0.03 = lower arousal)
+	_add_connection("sense_loc_familiarity", "drive_arousal", -0.02)
+	_add_connection("task_frustration", "drive_arousal", 0.03)
+
 func _seed_connections(role: String) -> void:
+	# --- Quality neuron connections ---
+	_seed_quality_connections()
+
 	# --- Sensory -> Drive (homeostatic) ---
 	_add_connection("sense_at_home", "drive_energy", 0.3)    # energy recovers at home
 	_add_connection("sense_at_home", "drive_safety", 0.2)    # safe at home
@@ -518,6 +697,162 @@ func update_novelty_tracking(familiarity_01: float, delta: float) -> void:
 
 func signal_reward() -> void:
 	recent_reward_signal = 1.0
+
+# =========================================================================
+# SOMATIC TAG EMISSION — called every tick by somatic stream
+# =========================================================================
+
+func emit_quality_tags(suppression: Dictionary = {}) -> Array:
+	## Emit somatic tags from active quality neurons.
+	## Returns Array of strings like ["gut:empty:churning", "chest:tight"].
+	## suppression: {region: float} — reduces emission probability for suppressed regions.
+	var region_qualities: Dictionary = {}  # region -> [quality_text, ...]
+
+	for neuron in neurons:
+		if neuron["type"] != "quality":
+			continue
+		if neuron["activation"] < QUALITY_EMIT_THRESHOLD:
+			continue
+
+		var tag_text: String = neuron.get("tag_text", "")
+		if tag_text == "":
+			continue
+		var regions: Array = neuron.get("regions", [])
+		if regions.is_empty():
+			continue
+
+		# Emission probability scales with activation above threshold
+		var intensity: float = (neuron["activation"] - QUALITY_EMIT_THRESHOLD) / (100.0 - QUALITY_EMIT_THRESHOLD)
+		var prob: float = clampf(0.2 + intensity * 0.6, 0.1, 0.9)
+
+		# Arousal modulates probability (higher arousal = more tags fire)
+		var arousal: float = get_activation("drive_arousal") / 100.0
+		prob = clampf(prob + (arousal - 0.3) * 0.3, 0.05, 0.95)
+
+		if randf() > prob:
+			continue
+
+		# Assign to regions (pick most relevant based on what drives are active)
+		for region in regions:
+			# Apply suppression
+			var supp: float = suppression.get(region, 0.0)
+			if supp > 0.0 and randf() < supp:
+				continue
+			if not region_qualities.has(region):
+				region_qualities[region] = []
+			if tag_text not in region_qualities[region]:
+				region_qualities[region].append(tag_text)
+
+	# Concatenate: region:quality[:quality...]
+	var tags: Array = []
+	for region in region_qualities:
+		var qualities: Array = region_qualities[region]
+		# Cap at 3 qualities per region to avoid noise
+		if qualities.size() > 3:
+			qualities = qualities.slice(0, 3)
+		tags.append(region + ":" + ":".join(qualities))
+
+	return tags
+
+func get_active_quality_ids() -> Array:
+	## Return IDs of quality neurons above emission threshold.
+	## Used by quality neurogenesis to detect co-activation.
+	var active: Array = []
+	for neuron in neurons:
+		if neuron["type"] == "quality" and neuron["activation"] >= QUALITY_EMIT_THRESHOLD:
+			active.append(neuron["id"])
+	return active
+
+# =========================================================================
+# QUALITY NEUROGENESIS — compound qualities from sustained co-activation
+# =========================================================================
+
+func check_quality_neurogenesis() -> void:
+	## Spawn compound quality neurons when base qualities co-activate repeatedly.
+	## These are felt patterns unique to this being — born from experience.
+	if _compound_quality_count >= MAX_COMPOUND_QUALITIES:
+		return
+
+	var active: Array = get_active_quality_ids()
+	if active.size() < 2:
+		return
+
+	var now: int = Time.get_ticks_msec()
+
+	# Track co-activation pairs
+	for i in range(active.size()):
+		for j in range(i + 1, active.size()):
+			var key: String = active[i] + ":" + active[j]
+			if not _quality_coactivation.has(key):
+				_quality_coactivation[key] = {"count": 0, "last_tick": now}
+
+			var entry: Dictionary = _quality_coactivation[key]
+			# Only count if enough time passed since last count (avoid frame-spam)
+			if now - entry["last_tick"] > 2000:  # 2s minimum between counts
+				entry["count"] += 1
+				entry["last_tick"] = now
+
+			# Spawn compound if threshold reached
+			if entry["count"] >= QUALITY_COACT_THRESHOLD:
+				_spawn_compound_quality(active[i], active[j])
+				_quality_coactivation.erase(key)
+				return  # one per check cycle
+
+	# Expire stale co-activation tracking
+	var expired: Array = []
+	for key in _quality_coactivation:
+		if now - _quality_coactivation[key]["last_tick"] > QUALITY_COACT_WINDOW:
+			expired.append(key)
+	for key in expired:
+		_quality_coactivation.erase(key)
+
+func _spawn_compound_quality(parent_a_id: String, parent_b_id: String) -> void:
+	## Create a compound quality neuron that inherits tag fragments from both parents.
+	var parent_a: Dictionary = _neuron_map.get(parent_a_id, {})
+	var parent_b: Dictionary = _neuron_map.get(parent_b_id, {})
+	if parent_a.is_empty() or parent_b.is_empty():
+		return
+
+	var tag_a: String = parent_a.get("tag_text", "")
+	var tag_b: String = parent_b.get("tag_text", "")
+	if tag_a == "" or tag_b == "":
+		return
+
+	# Compound tag = bound pair of parent qualities
+	var compound_tag: String = tag_a + ":" + tag_b
+
+	# Inherit regions from both parents (union)
+	var regions_a: Array = parent_a.get("regions", [])
+	var regions_b: Array = parent_b.get("regions", [])
+	var compound_regions: Array = regions_a.duplicate()
+	for r in regions_b:
+		if r not in compound_regions:
+			compound_regions.append(r)
+
+	var compound_id: String = "q_compound_%d" % _next_id
+	_next_id += 1
+
+	_add_quality_neuron(compound_id, compound_tag, compound_regions, 40.0)
+	neurons[-1]["age"] = 0  # new neuron — learns at 2x rate
+
+	# Connect to the same sources as parents (inherit their wiring)
+	for conn in connections:
+		if conn["dst"] == parent_a_id or conn["dst"] == parent_b_id:
+			# Check if connection to this source already exists
+			if not _connection_exists(conn["src"], compound_id):
+				_add_connection(conn["src"], compound_id, conn["weight"] * 0.5)
+
+	# Also connect parents to compound (co-activation reinforces it)
+	_add_connection(parent_a_id, compound_id, 0.15)
+	_add_connection(parent_b_id, compound_id, 0.15)
+
+	_compound_quality_count += 1
+	last_neurogenesis_event = {
+		"type": "compound_quality",
+		"context": compound_tag,
+		"parents": [parent_a_id, parent_b_id],
+		"tick": Time.get_ticks_msec(),
+	}
 
 # =========================================================================
 # DEBUG
