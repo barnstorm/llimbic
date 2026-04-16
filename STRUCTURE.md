@@ -144,8 +144,11 @@
 - **File:** res://scripts/layer2_projection.gd
 - **Extends:** RefCounted
 - 27-dim GoEmotions vector stored per NPC
-- **Deterministic:** Uses EmotionEngine (GDScript, no LLM) every tick via `update_deterministic()`
-- **Continuous modulation:** Modulation parameters computed every tick from emotion vector + chunk priority, not just on chunk changes
+- **Dual-path architecture:**
+  - **Fast path:** EmotionEngine (GDScript, deterministic) every tick via `update_deterministic()`
+  - **Slow path:** Limbic server (TinyLlama-1.1B+LoRA) every ~2s via `request_limbic_update()`, overrides emotion vector
+- **Limbic outputs:** `limbic_emotions` (label dict), `limbic_attention` (focus targets), `limbic_drives` (motivational drives)
+- **Continuous modulation:** Modulation parameters computed every tick from emotion vector + chunk priority
 - Persona baseline loaded from `data/npcs/{name}.json`
 
 ### Layer3Executive
@@ -162,14 +165,21 @@
 ### MemorySystem
 - **File:** res://scripts/memory_system.gd
 - **Extends:** RefCounted
-- Observations (last 20), tagged events (last 10 with salience + decay)
+- **Identity:** `npc_name`, `npc_role` — set by brain at setup for role-relevance scoring
+- **Observations (last 20):** Structured dicts with `kind` (vision/hearing), `subtype`, `text`, `source_type`, `confidence`, `position`, `direction`, `tags`, `time`
+- **Tagged events (last 10):** Structured with `text`, `salience`, `kind` (object_problem/speech/drive_override/player_interaction/etc.), `source_type` (direct/second_hand), `confidence`, `tags`, `time`
 - Relationship tracking (trust per entity), place familiarity
 - Unresolved concerns, reflections, failed strategies, socially acquired beliefs
 - Event decay over time
 - **Object knowledge:** `known_objects` dict (object_id -> {name, type, last_seen_position, last_seen_state, last_seen_time, learned_from, location, reliable})
-- Methods: `add_object_knowledge()`, `get_objects_at_location()`, `get_objects_by_type()`, `get_object_summary()`, `get_problematic_objects()`, `get_food_objects()`, `get_objects_for_sharing()`, `get_object_dialogue_context()`
-- Second-hand object knowledge from trusted sources (trust > 0.6) marked as "reliable"
-- Direct observations don't get overwritten by fresh second-hand info (5-minute protection)
+- **Promotion:** `promote_observation()` — confidence + novelty + role-relevance gating for observation → tagged event promotion
+- **Retrieval/compression layer — three packet builders:**
+  - `build_plan_packet(ctx)` — bounded packet for L3 planning: top_emotions(3), concerns(2), problem_objects(2), recent_failures(2), salient_events(4)
+  - `build_reflection_packet(ctx)` — bounded packet for L3 reflection: events(6), current_concerns(2), active_intention
+  - `build_dialogue_packet(ctx)` — bounded packet for L3 dialogue: top_emotions(3), top_concern, notable_objects(2), recent_relevant_events(3)
+- **Ranking:** `_rank_events()` — weighted score from salience, recency, confidence, role relevance, chunk relevance
+- **Dedupe:** `_dedupe_events()` — collapse repeated events by kind+text prefix, keep latest with count
+- **Legacy methods kept:** `get_memory_summary()`, `get_object_summary()`, `get_object_dialogue_context()`, `add_observation(who,where,doing)`
 - `on_tagged_event: Callable` — optional log callback, set by brain to pipe events to per-NPC log file
 
 ### Perception
@@ -310,13 +320,55 @@
 
 | Server | Port | Model | Protocol | Purpose |
 |--------|------|-------|----------|---------|
-| Layer 2 | 8420 | SmolLM2-135M-Instruct (transformers) | WebSocket (/ws) + HTTP fallback | Fast emotion projection/modulation |
-| Layer 3 | 8421 | SmolLM2-1.7B-Instruct (transformers) | WebSocket (/ws) + HTTP fallback | Planning, dialogue, chat, NPC conversation |
+| Layer 2 (Limbic) | 8420 | TinyLlama-1.1B + LoRA (4-bit, peft) | WebSocket (/ws) + HTTP fallback | Trained emotion projection, attention focus, motivational drives |
+| Layer 3 | 8421 | SmolLM2-1.7B-Instruct (transformers) | WebSocket (/ws) + HTTP fallback | Thought loop, planning, dialogue, chat, NPC conversation |
 
 - Start both: `bash server/start.sh`
 - Logs: `tail -f /tmp/burg_l2.log /tmp/burg_l3.log`
-- L3 plans use role defaults by default; LLM only triggered for replanning on high frustration/concerns/failures
+- L3 server hosts the **thought loop** — an async per-NPC coroutine that generates thoughts, intentions, beliefs, and pushes them to the client
+- L3 also loads L2 model for thought coloring (limbic interpretation of executive thoughts)
 - All L3 calls log method, input summary, response, and timing
+
+## Thought Loop Architecture
+
+```
+CLIENT (every physics tick):                SERVER (async per-NPC, every 2-8s):
+  L1 Hebbian network                          Receive state snapshot from client
+  Deterministic emotion engine (fallback)        ↓
+  Softmax action selection over L1 neurons     L3 Executive: generate_thought()
+  Execute action                                 → think(), intend(), believe(), bias_action()
+  Send state snapshot (every ~2s)                ↓
+  Process server push commands               L2 Limbic: color the thoughts emotionally
+                                                ↓
+                                              Push commands to client:
+                                                update_emotion, set_intention,
+                                                store_belief, bias_action, set_thought
+```
+
+- **Server drives behavior** by pushing commands; client doesn't poll for replan triggers
+- **Action selection** uses softmax competition over Hebbian action neurons — no priority queue
+- **Intentions** replace canned schedules as the primary behavior driver
+- **Beliefs** are structured (subject/predicate/object) and influence trust computation
+- **Thoughts** are internal stimuli that pass through the limbic model for emotional coloring
+- **Graceful degradation**: if server is down, L1+deterministic L2+fallback schedule still run
+
+### Server-Side Modules
+
+- `server/npc_state.py` — Per-NPC state: intentions, beliefs, thought history, adaptive cadence
+- `server/thought_loop.py` — Async engine: one coroutine per NPC, L2+L3 cycle, push delivery
+
+### Push Protocol
+
+Server sends unsolicited messages over the L3 WebSocket:
+```json
+{"push": true, "npc": "Edith", "commands": [
+  {"cmd": "update_emotion", "vector": [...], "summary": "..."},
+  {"cmd": "set_intention", "goal": "...", "location": "...", "priority": 0.8, "reason": "..."},
+  {"cmd": "store_belief", "subject": "...", "predicate": "...", "object": "...", "confidence": 0.7},
+  {"cmd": "bias_action", "biases": {"approach": 0.5}},
+  {"cmd": "set_thought", "text": "..."}
+]}
+```
 
 ## Time Scales
 
@@ -325,10 +377,10 @@
 | Fast | Layer 1 substrate + L2 emotions + modulation | Every physics tick (closed loop) |
 | Fast | L1 Hebbian learning | Every 0.5 real seconds |
 | Fast | L1 neurogenesis check | Every 2.0 real seconds |
-| Slow | Layer 3 planning | Every ~30 game-minutes + urgency triggers (30s debounce) |
+| Adaptive | Thought loop (server) | Every 2-8 real seconds per NPC (urgency-driven) |
+| Slow | State snapshots (client → server) | Every 2 real seconds |
 | Very slow | Social propagation | Every 5 real seconds |
 | Triggered | Layer 3 reflection | Every 2 game-hours or 5+ new events |
-| Triggered | Urgency replan | frustration>0.7, safety<20, energy<15, hunger>90 |
 | On demand | Layer 3 chat/dialogue | Player interaction |
 
 ## Assets

@@ -5,6 +5,7 @@ extends Node
 ## Layer 3: ws://127.0.0.1:8421/ws  (planning, dialogue, chat)
 
 signal request_completed(request_id: String, success: bool, data: Dictionary)
+signal server_push_received(npc_name: String, commands: Array)
 
 const LAYER2_WS_URL: String = "ws://127.0.0.1:8420/ws"
 const LAYER3_WS_URL: String = "ws://127.0.0.1:8421/ws"
@@ -103,6 +104,15 @@ func _handle_ws_message(text: String, which: String) -> void:
 	if json.parse(text) != OK:
 		return
 	var data: Dictionary = json.data if json.data is Dictionary else {}
+
+	# Handle server push messages (unsolicited, from thought loop)
+	if data.get("push", false):
+		var npc_name: String = data.get("npc", "")
+		var commands: Array = data.get("commands", [])
+		if npc_name != "" and commands.size() > 0:
+			server_push_received.emit(npc_name, commands)
+		return
+
 	var req_id: String = data.get("id", "")
 	var pending: Dictionary = get(which + "_pending")
 	if req_id == "" or not pending.has(req_id):
@@ -153,10 +163,41 @@ func layer2_modulate(directives: String, current_vector: Array, callback: Callab
 # --- Layer 3 API ---
 
 func layer3_plan(role: String, memory_summary: String, current_context: String, emotion_summary: String, callback: Callable, npc_name_str: String = "") -> String:
+	## Legacy prose-based plan request.
 	return _send(_ws3, _ws3_connected, _ws3_pending, "plan", {
 		"role": role, "npc_name": npc_name_str, "memory_summary": memory_summary,
 		"current_context": current_context, "emotion_summary": emotion_summary
 	}, callback)
+
+func layer3_plan_packet(packet: Dictionary, callback: Callable) -> String:
+	## Structured packet-based plan request. Sends the full packet as-is.
+	# Convert Vector2 and non-JSON-safe types in current_chunk
+	var safe_packet: Dictionary = packet.duplicate()
+	var chunk: Dictionary = safe_packet.get("current_chunk", {})
+	if not chunk.is_empty():
+		var safe_chunk: Dictionary = {}
+		for key in chunk:
+			var val = chunk[key]
+			if val is Vector2:
+				safe_chunk[key] = [val.x, val.y]
+			else:
+				safe_chunk[key] = val
+		safe_packet["current_chunk"] = safe_chunk
+	# Convert top_emotions value floats (already safe)
+	# Convert problem_objects position fields
+	var problems: Array = safe_packet.get("problem_objects", [])
+	var safe_problems: Array = []
+	for p in problems:
+		var sp: Dictionary = p.duplicate()
+		if sp.has("position") and sp["position"] is Vector2:
+			sp["position"] = [sp["position"].x, sp["position"].y]
+		safe_problems.append(sp)
+	safe_packet["problem_objects"] = safe_problems
+	return _send(_ws3, _ws3_connected, _ws3_pending, "plan_v2", safe_packet, callback)
+
+func layer3_reflect_packet(packet: Dictionary, callback: Callable) -> String:
+	## Structured packet-based reflection request.
+	return _send(_ws3, _ws3_connected, _ws3_pending, "reflect_v2", packet, callback)
 
 func layer3_reflect(memory_events: Array, callback: Callable, npc_name_str: String = "", npc_role: String = "") -> String:
 	return _send(_ws3, _ws3_connected, _ws3_pending, "reflect", {
@@ -164,10 +205,30 @@ func layer3_reflect(memory_events: Array, callback: Callable, npc_name_str: Stri
 	}, callback)
 
 func layer3_dialogue(role: String, emotion_summary: String, relationship_context: String, recent_events: Array, callback: Callable, npc_name_str: String = "") -> String:
+	## Legacy prose-based dialogue request.
 	return _send(_ws3, _ws3_connected, _ws3_pending, "dialogue", {
 		"role": role, "npc_name": npc_name_str, "emotion_summary": emotion_summary,
 		"relationship_context": relationship_context, "recent_events": recent_events
 	}, callback)
+
+func layer3_dialogue_packet(packet: Dictionary, callback: Callable) -> String:
+	## Structured packet-based dialogue request.
+	return _send(_ws3, _ws3_connected, _ws3_pending, "dialogue_v2", packet, callback)
+
+func layer3_chat_packet(packet: Dictionary, conversation_history: Array, player_message: String, callback: Callable) -> String:
+	## Structured packet-based chat request. Merges packet with conversation context.
+	var payload: Dictionary = packet.duplicate()
+	payload["conversation_history"] = conversation_history
+	payload["player_message"] = player_message
+	return _send(_ws3, _ws3_connected, _ws3_pending, "chat_v2", payload, callback)
+
+func layer3_converse_packet(speaker_packet: Dictionary, listener_packet: Dictionary, callback: Callable) -> String:
+	## Structured packet-based NPC-to-NPC conversation request.
+	var payload: Dictionary = {
+		"speaker": speaker_packet,
+		"listener": listener_packet,
+	}
+	return _send(_ws3, _ws3_connected, _ws3_pending, "converse_v2", payload, callback)
 
 func layer3_chat(role: String, npc_name_str: String, emotion_summary: String, relationship_context: String, recent_events: Array, conversation_history: Array, player_message: String, callback: Callable) -> String:
 	return _send(_ws3, _ws3_connected, _ws3_pending, "chat", {
@@ -184,6 +245,26 @@ func layer3_converse(speaker_role: String, speaker_emotion: String, listener_rol
 		"listener_emotion": listener_emotion,
 		"shared_context": shared_context, "speaker_recent": speaker_recent
 	}, callback)
+
+# --- Thought loop API ---
+
+func register_npc(npc_name: String, persona: Dictionary) -> String:
+	## Register an NPC with the server thought loop.
+	return _send(_ws3, _ws3_connected, _ws3_pending, "register_npc", {
+		"npc_name": npc_name, "persona": persona
+	}, func(_s: bool, _d: Dictionary) -> void: pass)
+
+func send_state_snapshot(snapshot: Dictionary) -> String:
+	## Send a state snapshot for the thought loop. Fire-and-forget.
+	return _send(_ws3, _ws3_connected, _ws3_pending, "state_update", snapshot,
+		func(_s: bool, _d: Dictionary) -> void: pass)
+
+func notify_speech(listener_name: String, listener_role: String, utterance: String, speaker_name: String) -> String:
+	## Notify the server that an NPC heard speech — triggers belief extraction.
+	return _send(_ws3, _ws3_connected, _ws3_pending, "extract_beliefs", {
+		"listener_name": listener_name, "listener_role": listener_role,
+		"utterance": utterance, "speaker_name": speaker_name,
+	}, func(_s: bool, _d: Dictionary) -> void: pass)
 
 # --- Availability check ---
 

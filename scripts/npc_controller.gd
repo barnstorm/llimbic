@@ -51,6 +51,10 @@ var _footstep_interval: float = 0.8  # emit footstep every 0.8s while moving
 # Nearby NPC tracking
 var _nearby_npc_count: int = 0
 
+# State snapshot for thought loop
+var _snapshot_timer: float = 0.0
+var _snapshot_interval: float = 2.0  # send state to server every 2 real seconds
+
 func _ready() -> void:
 	for child in get_tree().root.get_children():
 		if child.name == "NavigationManager":
@@ -117,6 +121,14 @@ func _ready() -> void:
 
 	# Stagger startup
 	_l2_timer = randf_range(0.0, 2.0)
+	_snapshot_timer = randf_range(0.0, 2.0)  # stagger snapshots across NPCs
+
+	# Connect to server push signal for thought loop commands
+	if _inference_client and _inference_client.has_signal("server_push_received"):
+		_inference_client.server_push_received.connect(_on_server_push)
+
+	# Register this NPC with the server thought loop
+	_register_with_server.call_deferred()
 
 func _on_nav_ready() -> void:
 	_nav_ready = true
@@ -174,6 +186,14 @@ func _physics_process(delta: float) -> void:
 	# Layer 1 + L2 emotions + modulation: every tick (closed loop)
 	brain.update_layer1(delta, global_position, _nearby_npc_count)
 
+	# Layer 2 limbic: async call every ~5 real seconds (only when thought loop is NOT active)
+	# When the thought loop runs, it handles L2 coloring server-side and pushes emotions
+	if not brain.is_thought_loop_active():
+		_l2_timer += delta
+		if _l2_timer >= 5.0:
+			_l2_timer = 0.0
+			brain.update_layer2(delta)
+
 	# Layer 3: triggered by game time (+ urgency replans from L1)
 	var hour: float = 6.0
 	if _game_manager:
@@ -185,6 +205,12 @@ func _physics_process(delta: float) -> void:
 		_speech_timer -= delta
 		if _speech_timer <= 0.0 and _speech_label:
 			_speech_label.visible = false
+
+	# Send state snapshot to server thought loop
+	_snapshot_timer += delta
+	if _snapshot_timer >= _snapshot_interval:
+		_snapshot_timer = 0.0
+		_send_state_snapshot()
 
 	# --- External lock: conversation/interaction takes priority ---
 	if _externally_locked:
@@ -238,6 +264,15 @@ func _execute_action(action: Dictionary, delta: float) -> void:
 				_update_facing(flee_dir)
 				_play_walk()
 				move_and_slide()
+
+		"speak":
+			# Adventure-command SAY: emit speech then idle
+			var speech_text: String = action.get("text", "")
+			if speech_text and _action_type != "speak":
+				speak(speech_text)
+			velocity = Vector2.ZERO
+			_play_idle()
+			move_and_slide()
 
 		"wander":
 			_do_wander(delta, action)
@@ -355,6 +390,10 @@ func interact_with_player() -> void:
 		return
 	_externally_locked = true
 	velocity = Vector2.ZERO
+	# Face the player so they're in our FOV for perception
+	var player: Node = get_tree().get_first_node_in_group("player")
+	if player:
+		face_toward(player.global_position)
 
 	if brain:
 		brain.memory.add_tagged_event("Player initiated conversation", 0.5, ["interaction", "player"], "direct", "player_interaction")
@@ -421,3 +460,103 @@ func emit_footstep() -> void:
 			"footstep", global_position, 48.0, 0.15, 0.5,
 			["footstep"], npc_name
 		)
+
+# --- Thought loop: server push + state snapshots ---
+
+func _on_server_push(push_npc_name: String, commands: Array) -> void:
+	## Receive push commands from server thought loop, filtered by NPC name.
+	if push_npc_name == npc_name and brain:
+		brain.process_server_commands(commands)
+
+func _register_with_server() -> void:
+	## Register this NPC with the server thought loop on startup.
+	if _inference_client == null or brain == null:
+		return
+	if not _inference_client.is_layer3_available():
+		# Retry after a delay (server may not be up yet)
+		get_tree().create_timer(5.0).timeout.connect(_register_with_server)
+		return
+	_inference_client.register_npc(npc_name, brain._persona)
+
+func _send_state_snapshot() -> void:
+	## Send current state to server for thought loop processing.
+	## Includes rich perception data — what the NPC actually sees and hears.
+	if _inference_client == null or brain == null:
+		return
+	if not _inference_client.is_layer3_available():
+		return
+
+	var hour: float = _game_manager.current_hour if _game_manager else 6.0
+
+	# Perception: only real visible things — other characters (NPCs + player).
+	# World is a pre-rendered bitmap with no labeled scenery or objects.
+	var visible: Array = []
+	if brain.perception:
+		for entity in brain.perception.visible_entities:
+			var dir: Vector2 = entity.get("position", global_position) - global_position
+			var cardinal: String = _direction_name(dir)
+			visible.append({
+				"name": entity.get("name", "someone"),
+				"distance": snapped(entity.get("distance", 0.0) / 32.0, 0.1),
+				"direction": cardinal,
+				"exposure": entity.get("exposure", 1.0),
+			})
+
+	# Recent hearing
+	var heard: Array = []
+	if brain.perception:
+		for h in brain.perception.heard_events:
+			heard.append({
+				"source": h.get("source", "unknown"),
+				"text": h.get("text", "").substr(0, 80),
+				"distance": snapped(h.get("distance", 0.0) / 32.0, 0.1),
+			})
+
+	# Visible objects (for adventure-command noun grounding)
+	var visible_objects: Array = []
+	if brain.perception:
+		for obj in brain.perception.visible_objects:
+			visible_objects.append({
+				"name": obj.get("name", ""),
+				"id": obj.get("id", ""),
+				"state": obj.get("state", ""),
+				"distance": snapped(obj.get("distance", 0.0) / 32.0, 0.1),
+			})
+
+	var snapshot: Dictionary = {
+		"npc_name": npc_name,
+		"position": [global_position.x, global_position.y],
+		"hour": hour,
+		"drives": brain.layer1.get_state_dict() if brain.layer1 else {},
+		"somatic_tags": brain.layer1.get_somatic_tags() if brain.layer1 else [],
+		"emotion_vector": brain.layer2.emotion_vector if brain.layer2 else [],
+		"location": brain.layer3.location_name_from_position(global_position) if brain.layer3 else "",
+		"current_action": brain.get_current_action(),
+		"visible": visible,
+		"visible_objects": visible_objects,
+		"heard": heard,
+		"recent_events": brain.memory.get_recent_events_text(3) if brain.memory else [],
+		"active_intentions": brain.active_intentions,
+	}
+	_inference_client.send_state_snapshot(snapshot)
+
+static func _direction_name(dir: Vector2) -> String:
+	if dir.length() < 1.0:
+		return "here"
+	var angle: float = rad_to_deg(atan2(dir.y, dir.x))
+	if angle < -157.5 or angle >= 157.5:
+		return "west"
+	elif angle < -112.5:
+		return "northwest"
+	elif angle < -67.5:
+		return "north"
+	elif angle < -22.5:
+		return "northeast"
+	elif angle < 22.5:
+		return "east"
+	elif angle < 67.5:
+		return "southeast"
+	elif angle < 112.5:
+		return "south"
+	else:
+		return "southwest"

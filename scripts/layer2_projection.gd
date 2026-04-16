@@ -1,6 +1,7 @@
 extends RefCounted
-## res://scripts/layer2_projection.gd — Layer 2 projection/modulation via HTTP
-## Medium cadence: ~every 0.5 game-seconds
+## res://scripts/layer2_projection.gd — Layer 2 projection via limbic model + local emotion engine
+## Fast path: EmotionEngine runs every tick (deterministic, zero latency)
+## Slow path: Limbic server corrects every ~2s (trained model, context-aware)
 
 const EMOTION_LABELS: Array[String] = [
 	"admiration", "amusement", "approval", "caring", "desire",
@@ -28,11 +29,22 @@ var modulation: Dictionary = {
 	"persistence_scale": 1.0
 }
 
+# Limbic model outputs (new — from trained model)
+var limbic_emotions: Dictionary = {}      # {emotion_name: intensity}
+var limbic_attention: Array = []          # ["threat_source", "escape_route", ...]
+var limbic_drives: Dictionary = {}        # {drive_name: intensity}
+var limbic_last_update: int = 0           # ticks_msec of last limbic response
+
 var _npc_name: String = ""
 var _npc_role: String = ""
 var _emotion_engine: RefCounted = null
-
 var _persona: Dictionary = {}
+
+# Async limbic call state
+var _limbic_pending: bool = false
+
+# Log callback — set by brain to pipe limbic events to per-NPC log
+var on_limbic_event: Callable = Callable()
 
 func setup(npc_name: String, role: String, persona: Dictionary = {}) -> void:
 	_npc_name = npc_name
@@ -52,19 +64,79 @@ func setup(npc_name: String, role: String, persona: Dictionary = {}) -> void:
 	_update_top_dimensions()
 
 func update_deterministic(layer1_state: Dictionary, recent_events: Array, chunk_priority: float) -> void:
-	## Synchronous emotion + modulation update. No LLM, no async. Runs every tick.
+	## Fast path: synchronous emotion + modulation update. Runs every tick.
+	## When the server thought loop has recently pushed an emotion vector (limbic_last_update fresh),
+	## the deterministic engine interpolates toward it rather than computing from scratch.
 	if _emotion_engine == null:
 		return
-	emotion_vector = _emotion_engine.compute_emotions(layer1_state, recent_events, emotion_vector)
-	emotion_summary_text = ""  # clear cached text, recomputed on demand
+
+	var server_fresh: bool = is_limbic_fresh(3000)  # server pushed within 3 seconds
+	if server_fresh:
+		# Gently interpolate toward current vector (server is authoritative)
+		# The deterministic engine only provides smooth frame-to-frame continuity
+		var det_vec: Array = _emotion_engine.compute_emotions(layer1_state, recent_events, emotion_vector)
+		for i in range(mini(emotion_vector.size(), det_vec.size())):
+			emotion_vector[i] = emotion_vector[i] * 0.9 + det_vec[i] * 0.1
+	else:
+		# Server unavailable — deterministic engine runs standalone
+		emotion_vector = _emotion_engine.compute_emotions(layer1_state, recent_events, emotion_vector)
+
+	emotion_summary_text = ""
 	_update_top_dimensions()
 	_compute_valence()
 	modulation = _emotion_engine.compute_modulation(emotion_vector, chunk_priority)
+
+func request_limbic_update(layer1_state: Dictionary, recent_events: Array, inference_client: Node) -> void:
+	## Slow path: async call to limbic server. Called every ~2s by controller.
+	## On response, overrides emotion_vector with trained model output.
+	if _limbic_pending:
+		return
+	if inference_client == null or not inference_client.is_layer2_available():
+		return
+	_limbic_pending = true
+	inference_client.layer2_project(layer1_state, recent_events, emotion_vector, _on_limbic_response)
+
+func _on_limbic_response(success: bool, data: Dictionary) -> void:
+	_limbic_pending = false
+	if not success or data.is_empty():
+		if on_limbic_event.is_valid():
+			on_limbic_event.call("LIMBIC FAIL: %s" % [str(data).left(80)])
+		return
+	# Override emotion vector with limbic model output (already blended server-side)
+	var new_vec: Array = data.get("vector", [])
+	if new_vec.size() == 27:
+		emotion_vector = new_vec
+		_update_top_dimensions()
+		_compute_valence()
+		emotion_summary_text = data.get("summary", "")
+
+	# Store limbic-specific outputs
+	limbic_emotions = data.get("emotions", {})
+	limbic_attention = data.get("attention", [])
+	limbic_drives = data.get("drives", {})
+	limbic_last_update = Time.get_ticks_msec()
+
+	# Log
+	if on_limbic_event.is_valid():
+		var emo_str: String = ""
+		for k in limbic_emotions:
+			emo_str += "%s=%.2f " % [k, limbic_emotions[k]]
+		var attn_str: String = ", ".join(limbic_attention.slice(0, 3))
+		var drv_str: String = ""
+		for k in limbic_drives:
+			drv_str += "%s=%.2f " % [k, limbic_drives[k]]
+		on_limbic_event.call("LIMBIC: %s| attn=[%s] | drv=[%s]" % [emo_str, attn_str, drv_str])
 
 func update(delta: float, layer1_state: Dictionary, recent_events: Array, inference_client: Node) -> void:
 	## Legacy async path — still functional but no longer the primary path.
 	## Called if deterministic engine is not available.
 	update_deterministic(layer1_state, recent_events, 0.5)
+
+func is_limbic_fresh(max_age_ms: int = 5000) -> bool:
+	## Returns true if limbic data was updated within max_age_ms.
+	if limbic_last_update == 0:
+		return false
+	return (Time.get_ticks_msec() - limbic_last_update) < max_age_ms
 
 func _update_top_dimensions() -> void:
 	top_dimensions.clear()

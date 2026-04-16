@@ -10,8 +10,27 @@ signal day_changed(day: int)
 var current_hour: float = 6.0
 var current_day: int = 1
 
+var _convo_log: FileAccess = null
+
 func _ready() -> void:
 	current_hour = start_hour
+	var dir := DirAccess.open("res://")
+	if dir and not dir.dir_exists("logs"):
+		dir.make_dir("logs")
+	_convo_log = FileAccess.open("res://logs/conversations.log", FileAccess.WRITE)
+	if _convo_log:
+		_convo_log.store_line("=== Conversations Log ===")
+
+func log_conversation(speaker: String, listener: String, utterance: String, context: String = "") -> void:
+	## Write a conversation line to the shared log.
+	var timestamp: String = "Day %d %s" % [current_day, get_time_string()]
+	var line: String = "[%s] %s → %s: \"%s\"" % [timestamp, speaker, listener, utterance]
+	if context != "":
+		line += " (%s)" % context
+	if _convo_log:
+		_convo_log.store_line(line)
+		_convo_log.flush()
+	print("[CONVO] " + line)
 
 func _process(delta: float) -> void:
 	# 1 game-minute per real-second at time_scale=1.0

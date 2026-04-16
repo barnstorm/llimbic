@@ -16,13 +16,7 @@ var _inference_client: Node = null
 var _game_manager: Node = null
 var _world_object_registry: Node = null
 
-# Drive override state
-var _drive_override: Dictionary = {}  # {target: Vector2, reason: String, drive: String}
 var _last_world_pos: Vector2 = Vector2.ZERO
-
-# Food and public locations for drive overrides
-const FOOD_LOCATIONS: Array = ["bakery", "inn", "market", "farm"]
-const PUBLIC_LOCATIONS: Array = ["town_square", "market", "inn", "well"]
 
 # Chunk tracking for modulation triggers
 var _last_chunk_index: int = -1
@@ -37,13 +31,23 @@ var _tagged_event_count_at_last_reflection: int = 0
 var current_action: Dictionary = {}
 var _observe_cooldown: float = 0.0
 var _at_destination: bool = false
-var _destination_timer: float = 0.0
-var _destination_duration: float = 0.0
+var _arrival_hour: float = -1.0       # game-hour when NPC arrived at destination
+var _chunk_end_hour: float = -1.0     # game-hour when current chunk should complete
 
 # EXAMINE action state
 var _examine_timer: float = 0.0
 var _examining_object_id: String = ""
 var _last_examine_times: Dictionary = {}  # object_id -> ticks_msec
+
+# Hearing dedup — skip stimuli already processed
+var _heard_stimulus_ids: Dictionary = {}  # stimulus_id -> tick when heard
+
+# --- Thought loop state (server-pushed) ---
+var active_intentions: Array[Dictionary] = []  # [{goal, location, priority, reason, timestamp}]
+var current_thought: String = ""
+var _server_action_biases: Dictionary = {}  # {action_name: bias_value} from server
+var _server_action_override: Dictionary = {}  # one-shot forced action from server
+var _last_server_push_tick: int = 0  # ticks_msec of last server push — used to detect thought loop active
 
 # Logging
 var _last_logged_action: String = ""
@@ -77,22 +81,25 @@ func setup(p_name: String, p_role: String) -> void:
 	# Create subsystems with persona data
 	var L1Script: GDScript = load("res://scripts/layer1_substrate.gd")
 	layer1 = L1Script.new()
-	layer1.setup(_persona)
-
-	var L2Script: GDScript = load("res://scripts/layer2_projection.gd")
-	layer2 = L2Script.new()
-	layer2.setup(npc_name, role, _persona)
-
-	var L3Script: GDScript = load("res://scripts/layer3_executive.gd")
-	layer3 = L3Script.new()
-	layer3.setup(npc_name, role, _persona)
-
+	# Memory created before L1 so somatic stream can read place conditioning
 	var MemScript: GDScript = load("res://scripts/memory_system.gd")
 	memory = MemScript.new()
 	memory.npc_name = npc_name
 	memory.npc_role = role
 	memory.on_tagged_event = func(desc: String, salience: float) -> void:
 		npc_log("MEM [%.1f]: %s" % [salience, desc])
+
+	layer1.setup(_persona, memory)
+
+	var L2Script: GDScript = load("res://scripts/layer2_projection.gd")
+	layer2 = L2Script.new()
+	layer2.setup(npc_name, role, _persona)
+	layer2.on_limbic_event = func(msg: String) -> void:
+		npc_log(msg)
+
+	var L3Script: GDScript = load("res://scripts/layer3_executive.gd")
+	layer3 = L3Script.new()
+	layer3.setup(npc_name, role, _persona)
 
 	# Set initial trust from persona relationships
 	var relationships: Dictionary = _persona.get("relationships", {})
@@ -123,6 +130,258 @@ func set_sensor_autoloads(sensor_system: Node) -> void:
 	# Build sensor profile from persona
 	var SPScript: GDScript = load("res://scripts/sensor_profile.gd")
 	_sensor_profile = SPScript.from_persona(_persona)
+
+# --- Server push command processing ---
+
+func is_thought_loop_active() -> bool:
+	## Returns true if the server thought loop has pushed commands recently.
+	return (Time.get_ticks_msec() - _last_server_push_tick) < 10000  # 10 seconds
+
+func process_server_commands(commands: Array) -> void:
+	## Process commands pushed by the server thought loop.
+	_last_server_push_tick = Time.get_ticks_msec()
+	for cmd in commands:
+		if cmd is not Dictionary:
+			continue
+		var cmd_type: String = cmd.get("cmd", "")
+		match cmd_type:
+			"update_emotion":
+				var vec: Array = cmd.get("vector", [])
+				if layer2 and vec.size() == 27:
+					layer2.emotion_vector = vec
+					layer2._update_top_dimensions()
+					layer2._compute_valence()
+					layer2.limbic_last_update = Time.get_ticks_msec()
+			"set_intention":
+				_add_intention(cmd)
+			"clear_intention":
+				_remove_intention(cmd.get("goal", ""))
+			"store_belief":
+				if memory:
+					memory.add_belief(
+						cmd.get("subject", ""),
+						cmd.get("predicate", ""),
+						cmd.get("object", ""),
+						cmd.get("confidence", 0.5),
+						cmd.get("source", "self"),
+					)
+			"bias_action":
+				_server_action_biases = cmd.get("biases", {})
+			"set_thought":
+				current_thought = cmd.get("text", "")
+				npc_log("THOUGHT: " + current_thought)
+			"trigger_action":
+				_server_action_override = cmd
+			"speak":
+				# Adventure-command SAY: trigger speech via controller
+				var speech_text: String = cmd.get("text", "")
+				if speech_text:
+					npc_log("SAY: " + speech_text)
+					_server_action_override = {
+						"type": "speak",
+						"text": speech_text,
+						"target": cmd.get("target", ""),
+					}
+			"examine":
+				# Adventure-command EXAMINE: trigger object examination
+				var obj_id: String = cmd.get("object_id", "")
+				if obj_id:
+					npc_log("EXAMINE: " + obj_id)
+					_server_action_override = {
+						"type": "examine",
+						"object_id": obj_id,
+						"target": cmd.get("target"),
+					}
+			"motor_command":
+				# Adventure-command: convert to action override for entity-targeted commands
+				var motor_cmd: String = cmd.get("command", "")
+				var motor_target: Variant = cmd.get("target")
+				if motor_cmd:
+					npc_log("CMD: " + motor_cmd)
+					_handle_motor_command(motor_cmd, motor_target)
+
+func _add_intention(cmd: Dictionary) -> void:
+	var goal: String = cmd.get("goal", "")
+	if goal == "":
+		return
+	# Replace existing intention with same goal if priority is higher
+	for i in range(active_intentions.size()):
+		if active_intentions[i].get("goal", "") == goal:
+			if cmd.get("priority", 0.0) > active_intentions[i].get("priority", 0.0):
+				active_intentions[i] = {
+					"goal": goal,
+					"location": cmd.get("location", ""),
+					"priority": cmd.get("priority", 0.5),
+					"reason": cmd.get("reason", ""),
+					"timestamp": Time.get_ticks_msec(),
+				}
+			return
+	active_intentions.append({
+		"goal": goal,
+		"location": cmd.get("location", ""),
+		"priority": cmd.get("priority", 0.5),
+		"reason": cmd.get("reason", ""),
+		"timestamp": Time.get_ticks_msec(),
+	})
+	npc_log("INTENTION: %s at %s (%.1f)" % [goal, cmd.get("location", "?"), cmd.get("priority", 0.5)])
+
+func _remove_intention(goal: String) -> void:
+	if goal == "":
+		return
+	var new_list: Array[Dictionary] = []
+	for intent in active_intentions:
+		if intent.get("goal", "") != goal:
+			new_list.append(intent)
+	active_intentions = new_list
+
+func _handle_motor_command(cmd_str: String, target: Variant) -> void:
+	## Convert a motor_command string into a concrete action override or intention.
+	## Entity-targeted commands (APPROACH, FLEE FROM, LOOK AT) become one-shot overrides.
+	## Location-targeted commands (GO TO, WANDER AT) become intentions (already pushed separately).
+	## SAY and EXAMINE are handled by their own push commands before this.
+	var target_dict: Dictionary = target if target is Dictionary else {}
+	var target_type: String = target_dict.get("type", "")
+	var target_name: String = target_dict.get("name", "")
+
+	if cmd_str.begins_with("APPROACH ") and target_type == "entity":
+		# Find entity position from perception
+		var pos: Vector2 = _resolve_entity_position(target_name)
+		if pos != Vector2.ZERO:
+			_server_action_override = {
+				"type": "move_toward",
+				"target": pos,
+				"reason": "CMD: APPROACH " + target_name,
+				"speed_mul": 0.8,
+			}
+	elif cmd_str.begins_with("FLEE FROM ") and target_type == "entity":
+		var pos: Vector2 = _resolve_entity_position(target_name)
+		if pos != Vector2.ZERO:
+			_server_action_override = {
+				"type": "flee",
+				"target": pos,
+				"reason": "CMD: FLEE FROM " + target_name,
+			}
+	elif cmd_str.begins_with("LOOK AT "):
+		var pos: Vector2 = _resolve_target_position(target_dict)
+		if pos != Vector2.ZERO:
+			_server_action_override = {
+				"type": "observe",
+				"target": pos,
+				"reason": "CMD: LOOK AT " + target_name,
+				"speed_mul": 0.0,
+			}
+	elif cmd_str == "WAIT":
+		_server_action_override = {
+			"type": "pause",
+			"reason": "CMD: WAIT",
+			"speed_mul": 0.0,
+		}
+	elif cmd_str == "WANDER" or cmd_str.begins_with("WANDER AT "):
+		_server_action_override = {
+			"type": "wander",
+			"target": _last_world_pos,
+			"reason": "CMD: " + cmd_str,
+			"speed_mul": 0.4,
+		}
+	# GO TO <location> is handled via set_intention push — no override needed
+
+func _resolve_entity_position(entity_name: String) -> Vector2:
+	## Look up an entity's position from current perception.
+	if perception == null:
+		return Vector2.ZERO
+	for entity in perception.visible_entities:
+		if entity.get("name", "") == entity_name:
+			return entity.get("position", Vector2.ZERO)
+	return Vector2.ZERO
+
+func _resolve_target_position(target_dict: Dictionary) -> Vector2:
+	## Resolve a target dict to a world position.
+	var target_type: String = target_dict.get("type", "")
+	var target_name: String = target_dict.get("name", "")
+	if target_type == "entity":
+		return _resolve_entity_position(target_name)
+	if target_type == "object" and perception:
+		for obj in perception.visible_objects:
+			if obj.get("name", "") == target_name or obj.get("id", "") == target_name:
+				return obj.get("position", Vector2.ZERO)
+	if target_type == "location" and layer3:
+		var L3Cls: GDScript = load("res://scripts/layer3_executive.gd")
+		if L3Cls.LOCATIONS.has(target_name):
+			return L3Cls.LOCATIONS[target_name]
+	return Vector2.ZERO
+
+func get_top_intention() -> Dictionary:
+	## Return the highest priority active intention, or empty dict.
+	if active_intentions.is_empty():
+		return {}
+	var best: Dictionary = active_intentions[0]
+	for intent in active_intentions:
+		if intent.get("priority", 0.0) > best.get("priority", 0.0):
+			best = intent
+	return best
+
+const INTENTION_MAX_AGE_MS: int = 600000  # 10 minutes
+
+func _maintain_intentions(hour: float) -> void:
+	## Expire stale intentions. Inject night-time go-home fallback.
+	var now: int = Time.get_ticks_msec()
+
+	# Expire old non-routine intentions
+	var fresh: Array[Dictionary] = []
+	for intent in active_intentions:
+		var age: int = now - intent.get("timestamp", now)
+		if age < INTENTION_MAX_AGE_MS:
+			fresh.append(intent)
+		# Routine intentions don't expire
+		elif intent.get("reason", "") == "daily routine":
+			fresh.append(intent)
+	active_intentions = fresh
+
+	# Night fallback: if the server hasn't pushed a go-home intention by go_home_hour,
+	# inject one locally so NPCs go home even without the server.
+	if layer3 and _persona:
+		var night: Dictionary = _persona.get("night_behavior", {})
+		var go_home_hour: float = float(night.get("go_home_hour", 21.0))
+		if hour >= go_home_hour or hour < 5.0:
+			# Check if we already have a go-home intention
+			var has_home_intent: bool = false
+			for intent in active_intentions:
+				if "home" in intent.get("goal", "").to_lower() or "rest" in intent.get("goal", "").to_lower() or "sleep" in intent.get("goal", "").to_lower():
+					has_home_intent = true
+					break
+				if intent.get("location", "") == layer3.get_home_location():
+					has_home_intent = true
+					break
+			if not has_home_intent:
+				var night_override = night.get("override")
+				if night_override != null and night_override is Dictionary:
+					# Special night behavior (e.g., guard patrol)
+					_add_intention({
+						"goal": night_override.get("purpose", "Night activity"),
+						"location": night_override.get("location", layer3.get_home_location()),
+						"priority": 0.85,
+						"reason": "night fallback",
+					})
+				else:
+					_add_intention({
+						"goal": "Rest at home",
+						"location": layer3.get_home_location(),
+						"priority": 0.85,
+						"reason": "night fallback",
+					})
+
+func get_intention_target() -> Vector2:
+	## Get position for the top active intention, or Vector2.ZERO if none.
+	var intent: Dictionary = get_top_intention()
+	if intent.is_empty():
+		return Vector2.ZERO
+	var loc_name: String = intent.get("location", "")
+	if loc_name == "" or layer3 == null:
+		return Vector2.ZERO
+	var L3Cls: GDScript = load("res://scripts/layer3_executive.gd")
+	if L3Cls.LOCATIONS.has(loc_name):
+		return L3Cls.LOCATIONS[loc_name]
+	return Vector2.ZERO
 
 # Urgency replan state
 var _urgency_replan_cooldown: float = 0.0
@@ -184,35 +443,61 @@ func update_layer1(delta: float, world_pos: Vector2, nearby_npcs: int) -> void:
 		memory.visit_location(current_location)
 		layer1.place_familiarity[current_location] = memory.get_location_comfort(current_location)
 
-	# Check urgency → L3 reactive replan
-	_check_urgency_replan(delta, hour)
+	# Maintain intentions — expire old ones, inject night fallback
+	_maintain_intentions(hour)
+
+	# Legacy urgency replan — only when thought loop is NOT active
+	if not is_thought_loop_active():
+		_check_urgency_replan(delta, hour)
 
 func update_layer2(_delta: float) -> void:
-	# L2 now runs inside update_layer1() every tick via update_deterministic().
-	# This method is kept for backward compat but does nothing.
-	pass
+	## Async limbic server call — corrects emotion vector with trained model output.
+	## Called every ~2 real seconds from npc_controller.gd.
+	if layer2 == null or _inference_client == null:
+		return
+	var recent: Array = memory.get_recent_events_text(5)
+	layer2.request_limbic_update(layer1.get_state_dict(), recent, _inference_client)
+
+func get_limbic_attention() -> Array:
+	## Returns limbic model's attention focus targets (if fresh).
+	if layer2 != null and layer2.is_limbic_fresh(5000):
+		return layer2.limbic_attention
+	return []
+
+func get_limbic_drives() -> Dictionary:
+	## Returns limbic model's motivational drives (if fresh).
+	if layer2 != null and layer2.is_limbic_fresh(5000):
+		return layer2.limbic_drives
+	return {}
 
 func update_layer3(hour: float) -> void:
 	if layer3 == null:
 		return
-	var mem_summary: String = memory.get_memory_summary()
-	# Enrich summary with state info for adaptive planning triggers
-	if memory.concerns.size() > 0:
-		mem_summary += "\nConcerns: " + ", ".join(memory.concerns)
-	if layer1.frustration > 0.5:
-		mem_summary += "\nFrustration is high (%.2f)." % layer1.frustration
-	if memory.failed_strategies.size() > 2:
-		mem_summary += "\nMultiple recent failures (%d)." % memory.failed_strategies.size()
-	# Include chunk outcomes for L3 feedback
-	if _chunk_outcomes.size() > 0:
-		mem_summary += "\nRecent task outcomes:"
-		for co in _chunk_outcomes:
-			mem_summary += "\n- %s at %s: %s" % [co.get("purpose", "?"), co.get("location", "?"), co.get("outcome", "?")]
-	var emo_summary: String = ""
-	if layer2:
-		emo_summary = layer2.get_emotion_summary()
-	var obj_summary: String = memory.get_object_summary()
-	layer3.update_plan(hour, mem_summary, emo_summary, _inference_client, obj_summary)
+
+	# When the thought loop is active, it drives planning via intentions.
+	# Skip the legacy poll-based replan path entirely.
+	if is_thought_loop_active():
+		# Still track chunk changes for logging
+		_check_modulation_trigger()
+		# Still run reflection (thought loop doesn't replace this yet)
+		_check_reflection(hour)
+		memory.decay_events(0.5)
+		return
+
+	# Legacy fallback: poll-based replanning when server is down
+	var replan_reason: String = _get_replan_reason()
+	var ctx: Dictionary = {
+		"npc_name": npc_name,
+		"role": role,
+		"hour": hour,
+		"current_location": layer3.location_name_from_position(_last_world_pos),
+		"current_chunk": layer3.get_current_chunk(),
+		"replan_reason": replan_reason,
+		"emotion_vector": layer2.emotion_vector if layer2 else [],
+		"chunk_outcomes": _chunk_outcomes,
+	}
+	var packet: Dictionary = memory.build_plan_packet(ctx)
+	layer3.update_plan_from_packet(packet, _inference_client)
 
 	# Track chunk changes for logging
 	_check_modulation_trigger()
@@ -238,8 +523,9 @@ func _check_reflection(hour: float) -> void:
 	_pending_reflection = true
 	_last_reflection_hour = hour
 	_tagged_event_count_at_last_reflection = memory.tagged_events.size()
-	var events_text: Array = memory.get_recent_events_text(10)
-	_inference_client.layer3_reflect(events_text, _on_reflection_result, npc_name, role)
+	var ctx: Dictionary = {"npc_name": npc_name, "role": role, "active_intention": get_current_action()}
+	var packet: Dictionary = memory.build_reflection_packet(ctx)
+	_inference_client.layer3_reflect_packet(packet, _on_reflection_result)
 
 func _on_reflection_result(success: bool, data: Dictionary) -> void:
 	_pending_reflection = false
@@ -251,20 +537,6 @@ func _on_reflection_result(success: bool, data: Dictionary) -> void:
 	if data.has("concerns"):
 		for c in data["concerns"]:
 			memory.add_concern(str(c))
-
-func _nearest_location(candidates: Array) -> Vector2:
-	## Find the nearest location from a list of location names.
-	var L3Cls: GDScript = load("res://scripts/layer3_executive.gd")
-	var best_pos: Vector2 = Vector2(2096, 800)
-	var best_dist: float = 999999.0
-	for loc_name in candidates:
-		if L3Cls.LOCATIONS.has(loc_name):
-			var pos: Vector2 = L3Cls.LOCATIONS[loc_name]
-			var dist: float = _last_world_pos.distance_to(pos)
-			if dist < best_dist:
-				best_dist = dist
-				best_pos = pos
-	return best_pos
 
 func _safest_familiar_location() -> Vector2:
 	## Find the location with highest familiarity, or home.
@@ -280,112 +552,33 @@ func _safest_familiar_location() -> Vector2:
 		return L3Cls.LOCATIONS[best_loc]
 	return Vector2(2096, 800)
 
-func _find_best_food_target() -> Vector2:
-	## Check known food-related objects first, fallback to generic food locations.
-	if memory:
-		var food_objs: Array = memory.get_food_objects()
-		if food_objs.size() > 0:
-			# Pick the nearest food location with known stocked objects
-			var L3Cls: GDScript = load("res://scripts/layer3_executive.gd")
-			var best_pos: Vector2 = Vector2.ZERO
-			var best_dist: float = 999999.0
-			for fobj in food_objs:
-				var loc_name: String = fobj["location"]
-				if L3Cls.LOCATIONS.has(loc_name):
-					var pos: Vector2 = L3Cls.LOCATIONS[loc_name]
-					var dist: float = _last_world_pos.distance_to(pos)
-					if dist < best_dist:
-						best_dist = dist
-						best_pos = pos
-			if best_pos != Vector2.ZERO:
-				return best_pos
-	return _nearest_location(FOOD_LOCATIONS)
-
-func check_drive_override() -> Dictionary:
-	## Check if any Layer 1 drive has crossed an urgent threshold.
-	## Returns override dict or empty if no override needed.
-	if layer1 == null:
-		return {}
-	# Priority order: safety, energy, hunger, social
-	if layer1.safety < 30.0:
-		return {"target": _safest_familiar_location(), "reason": "Seeking safety", "drive": "safety"}
-	if layer1.energy < 20.0:
-		var L3Cls: GDScript = load("res://scripts/layer3_executive.gd")
-		var home: String = layer3.get_home_location() if layer3 else "town_square"
-		var pos: Vector2 = L3Cls.LOCATIONS.get(home, Vector2(2096, 800))
-		return {"target": pos, "reason": "Exhausted, going home", "drive": "energy"}
-	if layer1.hunger > 80.0:
-		var food_target: Vector2 = _find_best_food_target()
-		return {"target": food_target, "reason": "Need to eat", "drive": "hunger"}
-	if layer1.social_need > 85.0:
-		return {"target": _nearest_location(PUBLIC_LOCATIONS), "reason": "Lonely, seeking company", "drive": "social_need"}
-	return {}
-
-func _drive_has_recovered(drive: String) -> bool:
-	## Check if the drive that caused the override has recovered enough to resume.
-	match drive:
-		"safety":
-			return layer1.safety > 50.0
-		"energy":
-			return layer1.energy > 40.0
-		"hunger":
-			return layer1.hunger < 50.0
-		"social_need":
-			return layer1.social_need < 60.0
-	return true
 
 func get_target_position() -> Vector2:
-	if layer3 == null:
-		return Vector2(2096, 800)
+	## Returns the best movement target, using intentions first, then schedule fallback.
+	## Drive-based behavior is now emergent from the thought loop, not hardcoded thresholds.
 
-	var hour: float = 6.0
-	if _game_manager:
-		hour = _game_manager.current_hour
+	# 1. Server-pushed intentions (primary)
+	var intent_target: Vector2 = get_intention_target()
+	if intent_target != Vector2.ZERO:
+		return intent_target
 
-	# Night behavior overrides everything
-	if layer3.should_go_home(hour):
-		_drive_override = {}
-		var night: Dictionary = layer3.get_night_behavior()
-		var loc: String = night.get("location", "town_square")
-		var L3Cls: GDScript = load("res://scripts/layer3_executive.gd")
-		if L3Cls.LOCATIONS.has(loc):
-			return L3Cls.LOCATIONS[loc]
-		return Vector2(2096, 800)
-
-	# Check if current override has resolved
-	if not _drive_override.is_empty():
-		if _drive_has_recovered(_drive_override.get("drive", "")):
-			memory.add_tagged_event("Recovered from: " + _drive_override.get("reason", ""), 0.3, ["drive_recovery"], "direct", "drive_recovery")
-			# Signal reward to neural network — drive recovery is a positive outcome
-			if layer1 and layer1._network:
-				layer1._network.signal_reward()
-			_drive_override = {}
-			# Try to resume the suspended plan chunk
-			if layer3.resume_suspended():
-				memory.add_tagged_event("Resuming interrupted task", 0.3, ["plan_resume"], "direct", "plan_change")
-		else:
-			return _drive_override["target"]
-
-	# Check for new drive override
-	var override: Dictionary = check_drive_override()
-	if not override.is_empty():
-		# Suspend the current chunk before overriding
-		layer3.suspend_current_chunk()
-		# Log the deviation
-		var chunk: Dictionary = layer3.get_current_chunk()
-		var purpose: String = chunk.get("purpose", "task")
-		memory.add_tagged_event("Skipped task: %s because %s" % [purpose, override["reason"]], 0.6, ["drive_override", override["drive"]], "direct", "drive_override")
-		_drive_override = override
-		return override["target"]
-
-	# Check if the current chunk targets a specific object
-	if _world_object_registry:
+	# 2. Current chunk object target
+	if layer3 and _world_object_registry:
 		var obj_pos: Vector2 = layer3.get_object_target_position(_world_object_registry)
 		if obj_pos != Vector2.ZERO:
 			return obj_pos
-	return layer3.get_target_position()
+
+	# 3. Fallback: layer3 schedule target (for when server is down)
+	if layer3:
+		return layer3.get_target_position()
+
+	return Vector2(2096, 800)
 
 func get_current_action() -> String:
+	## What the NPC is currently doing — from intention if available, else schedule.
+	var intent: Dictionary = get_top_intention()
+	if not intent.is_empty():
+		return intent.get("goal", "idle")
 	if layer3 == null:
 		return "idle"
 	var chunk: Dictionary = layer3.get_current_chunk()
@@ -416,45 +609,21 @@ func select_action(delta: float) -> Dictionary:
 	return result
 
 func _select_action_inner(delta: float) -> Dictionary:
+	## Softmax competition over action neurons — replaces the old priority queue.
+	## The Hebbian network's action neuron activations now directly determine behavior.
 
-	# 1. Reorientation pause after interruption
+	# Server action override takes absolute priority (one-shot)
+	if not _server_action_override.is_empty():
+		var override: Dictionary = _server_action_override
+		_server_action_override = {}
+		return _build_action_from_override(override)
+
+	# Reorientation pause (mechanical, not AI)
 	if layer1.reorientation_timer > 0.0:
 		current_action = {"type": "pause", "reason": "Reorienting", "speed_mul": 0.0}
 		return current_action
 
-	# 2. Flee from threat (high flee tendency + distrusted entity visible)
-	if layer1.flee > 0.5 and perception and perception.visible_entities.size() > 0:
-		var threat: Dictionary = _find_threat()
-		if not threat.is_empty():
-			var away_dir: Vector2 = (_last_world_pos - threat["position"]).normalized()
-			var flee_target: Vector2 = _last_world_pos + away_dir * 128.0
-			current_action = {"type": "flee_from", "target": flee_target, "entity": threat["name"], "reason": "Fleeing from " + threat["name"], "speed_mul": 1.4}
-			memory.add_tagged_event("Fled from " + threat["name"], 0.5, ["flee", "danger"], "direct", "threat_response")
-			return current_action
-
-	# 3. Observe interesting entity
-	# Cooldown prevents constant stopping during normal movement,
-	# but stalled NPCs bypass it — they need to see what's in front of them
-	_observe_cooldown = maxf(_observe_cooldown - delta, 0.0)
-	var can_observe: bool = (_observe_cooldown <= 0.0) or layer1.is_stalled
-	if layer1.observe > 0.6 and can_observe and perception:
-		var interesting: Dictionary = _find_interesting_entity()
-		if not interesting.is_empty():
-			_observe_cooldown = 8.0 if not layer1.is_stalled else 2.0
-			memory.add_observation(npc_name, "", "Stopped to observe " + interesting["name"])
-			# Stalled NPCs remember the frustration, not just the observation
-			if layer1.is_stalled:
-				var purpose: String = get_current_action()
-				memory.add_tagged_event(
-					"%s is in my way while I'm trying to %s" % [interesting["name"], purpose],
-					0.4 + layer1.task_momentum * 0.4,
-					["blocked", "frustration"], "direct", "path_blocked"
-				)
-				memory.update_relationship(interesting["name"], -0.02, "Blocked my path")
-			current_action = {"type": "observe", "target": interesting["position"], "entity": interesting["name"], "duration": randf_range(0.8, 1.5), "reason": "Observing " + interesting["name"], "speed_mul": 0.0}
-			return current_action
-
-	# 4. EXAMINE action: if currently examining an object, continue until done
+	# Continue in-progress examine
 	if _examining_object_id != "" and _examine_timer > 0.0:
 		_examine_timer -= delta
 		if _examine_timer <= 0.0:
@@ -462,74 +631,202 @@ func _select_action_inner(delta: float) -> Dictionary:
 		current_action = {"type": "examine", "reason": "Examining object", "speed_mul": 0.0, "object_id": _examining_object_id}
 		return current_action
 
-	# 4b. Check if we should examine a role-relevant object nearby (>5 min since last examine)
-	var examine_target: Dictionary = _find_examinable_object()
-	if not examine_target.is_empty():
-		_start_examine(examine_target)
-		current_action = {"type": "examine", "target": examine_target["position"], "reason": "Examining " + examine_target.get("name", "object"), "speed_mul": 0.0, "object_id": examine_target.get("id", "")}
-		return current_action
+	# --- Softmax action selection ---
+	# Read raw action neuron activations from Hebbian network
+	var activations: Dictionary = {
+		"flee": layer1.flee,
+		"avoid": layer1.avoid,
+		"observe": layer1.observe,
+		"approach": layer1.approach,
+		"help": layer1.help,
+	}
 
-	# 5. Get plan target (includes drive overrides + object targeting)
-	var plan_target: Vector2 = get_target_position()
-	var dist_to_target: float = _last_world_pos.distance_to(plan_target)
+	# Apply server-pushed biases from thought loop
+	for action_name in _server_action_biases:
+		if activations.has(action_name):
+			activations[action_name] = clampf(
+				activations[action_name] + _server_action_biases[action_name],
+				0.0, 1.0
+			)
 
-	# 6. At destination → check for object-targeted examine, then wander + tick chunk timer
-	if dist_to_target < 48.0:
-		if not _at_destination:
-			# Just arrived
-			_at_destination = true
-			_path_retry_count = 0
-			layer1.start_task()
-			var chunk: Dictionary = layer3.get_current_chunk() if layer3 else {}
-			var duration_hours: float = chunk.get("duration", 2.0)
-			_destination_duration = clampf(duration_hours * 5.0, 8.0, 30.0)
-			_destination_timer = _destination_duration
-			memory.add_observation(npc_name, chunk.get("location", ""), "arrived for " + chunk.get("purpose", "task"))
-			# If chunk has an object_id, start examining it on arrival
-			var chunk_obj_id: String = chunk.get("object_id", "")
-			if chunk_obj_id != "" and _should_examine(chunk_obj_id):
-				var obj_data: Dictionary = {}
-				if _world_object_registry:
-					obj_data = _world_object_registry.get_object(chunk_obj_id)
-				if not obj_data.is_empty():
-					_start_examine({"id": chunk_obj_id, "name": obj_data.get("name", ""), "position": obj_data.get("position", _last_world_pos), "state": obj_data.get("state", ""), "type": obj_data.get("type", "")})
-					current_action = {"type": "examine", "target": obj_data.get("position", _last_world_pos), "reason": "Examining " + obj_data.get("name", "object"), "speed_mul": 0.0, "object_id": chunk_obj_id}
-					return current_action
+	# Apply intention-derived biases
+	_apply_intention_biases(activations)
 
-		# While at destination, check if the chunk's object needs examining
-		if layer3 and _examining_object_id == "" and _examine_timer <= 0.0:
-			var chunk_for_examine: Dictionary = layer3.get_current_chunk()
-			var chunk_obj: String = chunk_for_examine.get("object_id", "")
-			if chunk_obj != "" and _should_examine(chunk_obj) and _world_object_registry != null:
-				var obj_data_at_dest: Dictionary = _world_object_registry.get_object(chunk_obj)
-				if not obj_data_at_dest.is_empty():
-					_start_examine({"id": chunk_obj, "name": obj_data_at_dest.get("name", ""), "position": obj_data_at_dest.get("position", _last_world_pos), "state": obj_data_at_dest.get("state", ""), "type": obj_data_at_dest.get("type", "")})
-					current_action = {"type": "examine", "target": obj_data_at_dest.get("position", _last_world_pos), "reason": "Examining " + obj_data_at_dest.get("name", "object"), "speed_mul": 0.0, "object_id": chunk_obj}
-					return current_action
+	# Temperature-scaled softmax
+	var temperature: float = 0.3
+	var actions: Array = activations.keys()
+	var exps: Array = []
+	var exp_sum: float = 0.0
+	for action_name in actions:
+		var val: float = exp(activations[action_name] / temperature)
+		exps.append(val)
+		exp_sum += val
 
-		# Tick destination timer
-		_destination_timer -= delta
-		if _destination_timer <= 0.0:
-			# Chunk complete, move on
-			_at_destination = false
-			on_chunk_completed()
-			# Recalculate target for next chunk
-			plan_target = get_target_position()
-			current_action = {"type": "move_toward", "target": plan_target, "reason": get_current_action(), "speed_mul": _compute_speed_mul()}
-			return current_action
+	# Stochastic selection
+	var selected: String = "approach"
+	if exp_sum > 0.0:
+		var roll: float = randf() * exp_sum
+		var cumulative: float = 0.0
+		for i in range(actions.size()):
+			cumulative += exps[i]
+			if roll <= cumulative:
+				selected = actions[i]
+				break
 
-		current_action = {"type": "wander", "target": plan_target, "reason": get_current_action(), "speed_mul": 0.4}
-		return current_action
+	# Observe cooldown — prevent constant stop-start
+	_observe_cooldown = maxf(_observe_cooldown - delta, 0.0)
+	if selected == "observe" and _observe_cooldown > 0.0 and not layer1.is_stalled:
+		selected = "approach"  # fall through to movement
 
-	# 6. Moving toward destination
-	_at_destination = false
-	current_action = {"type": "move_toward", "target": plan_target, "reason": get_current_action(), "speed_mul": _compute_speed_mul()}
+	# Map selected action to concrete behavior
+	current_action = _action_to_behavior(selected, delta)
 	return current_action
+
+func _apply_intention_biases(activations: Dictionary) -> void:
+	## Intentions bias action neurons toward relevant behavior.
+	var intent: Dictionary = get_top_intention()
+	if intent.is_empty():
+		return
+	var intent_loc: String = intent.get("location", "")
+	var intent_priority: float = intent.get("priority", 0.5)
+
+	# If intention targets a different location, boost approach
+	if intent_loc != "" and layer3:
+		var current_loc: String = layer3.location_name_from_position(_last_world_pos)
+		if current_loc != intent_loc:
+			activations["approach"] = clampf(activations["approach"] + intent_priority * 0.3, 0.0, 1.0)
+
+	# Goal text analysis for action hints
+	var goal: String = intent.get("goal", "").to_lower()
+	if "watch" in goal or "investigate" in goal or "look" in goal or "check" in goal:
+		activations["observe"] = clampf(activations["observe"] + 0.15, 0.0, 1.0)
+	if "help" in goal or "assist" in goal or "aid" in goal:
+		activations["help"] = clampf(activations["help"] + 0.2, 0.0, 1.0)
+	if "avoid" in goal or "stay away" in goal:
+		activations["avoid"] = clampf(activations["avoid"] + 0.2, 0.0, 1.0)
+	if "flee" in goal or "run" in goal or "escape" in goal:
+		activations["flee"] = clampf(activations["flee"] + 0.3, 0.0, 1.0)
+
+func _action_to_behavior(selected: String, delta: float) -> Dictionary:
+	## Map abstract action selection to concrete movement/observation behavior.
+	match selected:
+		"flee":
+			var threat: Dictionary = _find_threat()
+			if not threat.is_empty():
+				var away: Vector2 = (_last_world_pos - threat["position"]).normalized()
+				memory.add_tagged_event("Fled from " + threat["name"], 0.5, ["flee", "danger"], "direct", "threat_response")
+				return {"type": "flee_from", "target": _last_world_pos + away * 128.0, "entity": threat["name"], "reason": "Fleeing from " + threat["name"], "speed_mul": 1.4}
+			# No visible threat but flee won — seek safety
+			return {"type": "move_toward", "target": _safest_familiar_location(), "speed_mul": 1.2, "reason": "Seeking safety"}
+
+		"avoid":
+			if perception and perception.visible_entities.size() > 0:
+				var nearest: Dictionary = perception.visible_entities[0]
+				for e in perception.visible_entities:
+					if e.get("distance", 999.0) < nearest.get("distance", 999.0):
+						nearest = e
+				var away: Vector2 = (_last_world_pos - nearest["position"]).normalized()
+				return {"type": "move_toward", "target": _last_world_pos + away * 64.0, "speed_mul": 0.8, "reason": "Avoiding " + nearest.get("name", "entity")}
+			return {"type": "wander", "target": _last_world_pos, "speed_mul": 0.4, "reason": "Drifting"}
+
+		"observe":
+			var interesting: Dictionary = _find_interesting_entity()
+			if not interesting.is_empty():
+				_observe_cooldown = 6.0 if not layer1.is_stalled else 2.0
+				memory.add_observation(npc_name, "", "Stopped to observe " + interesting["name"])
+				if layer1.is_stalled:
+					var purpose: String = get_current_action()
+					memory.add_tagged_event(
+						"%s is in my way while I'm trying to %s" % [interesting["name"], purpose],
+						0.4 + layer1.task_momentum * 0.4,
+						["blocked", "frustration"], "direct", "path_blocked"
+					)
+				return {"type": "observe", "target": interesting["position"], "entity": interesting["name"], "duration": randf_range(0.8, 1.5), "reason": "Observing " + interesting["name"], "speed_mul": 0.0}
+			# Nothing to observe — try examining nearby objects
+			var examine_target: Dictionary = _find_examinable_object()
+			if not examine_target.is_empty():
+				_start_examine(examine_target)
+				return {"type": "examine", "target": examine_target["position"], "reason": "Examining " + examine_target.get("name", "object"), "speed_mul": 0.0, "object_id": examine_target.get("id", "")}
+			return {"type": "wander", "target": _last_world_pos, "speed_mul": 0.3, "reason": "Looking around"}
+
+		"help":
+			if perception:
+				for entity in perception.visible_entities:
+					if memory.compute_trust(entity["name"]) > 0.4:
+						return {"type": "move_toward", "target": entity["position"], "speed_mul": 0.8, "reason": "Helping " + entity["name"]}
+			return {"type": "wander", "target": _last_world_pos, "speed_mul": 0.4, "reason": "Looking to help"}
+
+		"approach", _:
+			# Where to go: intention target first, then schedule fallback
+			var intent: Dictionary = get_top_intention()
+			var target: Vector2 = get_intention_target()
+			var reason: String = intent.get("goal", "") if not intent.is_empty() else ""
+			if target == Vector2.ZERO:
+				target = get_target_position()
+			if reason == "":
+				reason = get_current_action()
+			var dist: float = _last_world_pos.distance_to(target)
+
+			if dist < 48.0:
+				# At destination — wander here while the thought loop decides next move
+				if not _at_destination:
+					_at_destination = true
+					_path_retry_count = 0
+					layer1.start_task()
+					var location: String = layer3.location_name_from_position(_last_world_pos) if layer3 else "here"
+					memory.add_observation(npc_name, location, "arrived for " + reason)
+					npc_log("ARRIVED for '%s'" % reason)
+				return {"type": "wander", "target": target, "reason": reason, "speed_mul": 0.4}
+
+			_at_destination = false
+			return {"type": "move_toward", "target": target, "reason": reason, "speed_mul": _compute_speed_mul()}
+
+	return {"type": "idle", "reason": "default", "speed_mul": 0.0}
+
+func _build_action_from_override(override: Dictionary) -> Dictionary:
+	## Convert a server trigger_action or adventure-command to a concrete action dict.
+	## Motor command overrides already have concrete action types — pass them through.
+	var action_type: String = override.get("type", override.get("action", "observe"))
+	if action_type in ["move_toward", "wander", "pause", "idle"]:
+		return override
+	match action_type:
+		"observe":
+			# Motor command path: target is a Vector2 position
+			var direct_target: Variant = override.get("target")
+			if direct_target is Vector2 and direct_target != Vector2.ZERO:
+				return {"type": "observe", "target": direct_target, "reason": override.get("reason", "Server: observe"), "speed_mul": 0.0}
+			# Legacy path: target_entity name lookup
+			var target_name: String = override.get("target_entity", "")
+			if target_name != "" and perception:
+				for entity in perception.visible_entities:
+					if entity["name"] == target_name:
+						return {"type": "observe", "target": entity["position"], "entity": target_name, "reason": "Server: observe " + target_name, "speed_mul": 0.0}
+			return {"type": "pause", "reason": "Server: observe (no target)", "speed_mul": 0.0}
+		"flee":
+			var flee_target: Vector2 = override.get("target", Vector2.ZERO)
+			if flee_target is Vector2 and flee_target != Vector2.ZERO:
+				# Flee away from entity position
+				var away: Vector2 = (_last_world_pos - flee_target).normalized()
+				return {"type": "flee_from", "target": _last_world_pos + away * 128.0, "reason": override.get("reason", "Server: flee"), "speed_mul": 1.4}
+			return {"type": "flee_from", "target": _safest_familiar_location(), "reason": "Server: flee", "speed_mul": 1.4}
+		"speak":
+			# Adventure-command SAY: return speak action for controller to execute
+			return {"type": "speak", "text": override.get("text", ""), "target": override.get("target", ""), "reason": "Server: speak", "speed_mul": 0.0}
+		"examine":
+			# Adventure-command EXAMINE: find object position and examine it
+			var obj_id: String = override.get("object_id", "")
+			if obj_id and perception:
+				for obj in perception.visible_objects:
+					if obj.get("id", "") == obj_id or obj.get("name", "") == obj_id:
+						return {"type": "examine", "target": obj["position"], "object_id": obj_id, "reason": "Server: examine " + obj_id, "speed_mul": 0.0}
+			return {"type": "pause", "reason": "Server: examine (no target)", "speed_mul": 0.0}
+		_:
+			return {"type": "pause", "reason": "Server: " + action_type, "speed_mul": 0.0}
 
 func _find_threat() -> Dictionary:
 	## Find a visible entity we distrust enough to flee from.
 	for entity in perception.visible_entities:
-		var trust_val: float = memory.get_trust(entity["name"])
+		var trust_val: float = memory.compute_trust(entity["name"])
 		if trust_val < 0.2:
 			return entity
 	return {}
@@ -600,22 +897,45 @@ func _check_urgency_replan(delta: float, hour: float) -> void:
 		npc_log("URGENCY REPLAN: " + reason)
 		_force_replan(reason, hour)
 
+func _get_replan_reason() -> String:
+	## Determine explicit replan reason from current state. No substring heuristics.
+	if memory.concerns.size() > 0:
+		return "new_high_priority_concern"
+	var problems: Array = memory.get_problematic_objects()
+	if problems.size() > 0:
+		# Check role relevance
+		for p in problems:
+			if _world_object_registry:
+				var full_obj: Dictionary = _world_object_registry.get_object(p.get("id", ""))
+				var affinities: Array = full_obj.get("role_affinity", [])
+				if affinities.size() == 0 or role in affinities:
+					return "object_problem_detected"
+	var recent_failures: int = 0
+	for co in _chunk_outcomes:
+		if co.get("outcome", "") in ["failed", "completed_with_difficulty"]:
+			recent_failures += 1
+	if recent_failures >= 2:
+		return "repeated_failure"
+	if layer1 and layer1.frustration > 0.7:
+		return "frustration_spike"
+	return "none"
+
 func _force_replan(reason: String, hour: float) -> void:
 	if layer3 == null:
 		return
-	var mem_summary: String = memory.get_memory_summary()
-	mem_summary += "\nURGENT: " + reason
-	if memory.concerns.size() > 0:
-		mem_summary += "\nConcerns: " + ", ".join(memory.concerns)
-	# Add chunk outcomes to context
-	if _chunk_outcomes.size() > 0:
-		mem_summary += "\nRecent task outcomes:"
-		for co in _chunk_outcomes:
-			mem_summary += "\n- %s at %s: %s" % [co.get("purpose", "?"), co.get("location", "?"), co.get("outcome", "?")]
-	var emo_summary: String = layer2.get_emotion_summary() if layer2 else ""
-	var obj_summary: String = memory.get_object_summary()
+	var ctx: Dictionary = {
+		"npc_name": npc_name,
+		"role": role,
+		"hour": hour,
+		"current_location": layer3.location_name_from_position(_last_world_pos),
+		"current_chunk": layer3.get_current_chunk(),
+		"replan_reason": reason,
+		"emotion_vector": layer2.emotion_vector if layer2 else [],
+		"chunk_outcomes": _chunk_outcomes,
+	}
+	var packet: Dictionary = memory.build_plan_packet(ctx)
 	layer3._last_plan_hour = -1.0  # reset timer gate
-	layer3.update_plan(hour, mem_summary, emo_summary, _inference_client, obj_summary)
+	layer3.update_plan_from_packet(packet, _inference_client)
 
 func on_chunk_completed() -> void:
 	if layer3:
@@ -658,31 +978,32 @@ func on_player_interaction(callback: Callable) -> void:
 		var line: String = busy_lines.get(role, "I'm busy right now.")
 		callback.call(true, {"utterance": line, "intent": "dismiss"})
 		memory.add_tagged_event("Refused player — too busy", 0.3, ["interaction", "player"], "direct", "player_interaction")
-		memory.update_relationship("Player", -0.01, "Tried to talk but I was busy")
+		memory.add_belief("Player", "approached while", "I was busy", 0.5, "self")
 		return
 
-	var emo_summary: String = ""
-	if layer2:
-		emo_summary = layer2.get_emotion_summary()
+	var trust_val: float = memory.compute_trust("Player")
+	var ctx: Dictionary = {
+		"npc_name": npc_name,
+		"role": role,
+		"target_name": "Player",
+		"target_type": "player",
+		"trust": trust_val,
+		"emotion_vector": layer2.emotion_vector if layer2 else [],
+		"current_activity": get_current_action(),
+		"current_chunk": layer3.get_current_chunk() if layer3 else {},
+	}
+	var packet: Dictionary = memory.build_dialogue_packet(ctx)
+	layer3.request_dialogue_from_packet(packet, _inference_client, callback)
 
-	var trust_val: float = memory.get_trust("Player")
-	var rel_context: String = "Trust: %.2f" % trust_val
-	var obj_ctx: String = memory.get_object_dialogue_context(role)
-	if obj_ctx != "":
-		rel_context += ". " + obj_ctx
-	var recent: Array = memory.get_recent_events_text(3)
-
-	layer3.request_dialogue(emo_summary, rel_context, recent, _inference_client, callback)
-
-	# Record the interaction
+	# Record the interaction — beliefs instead of fixed trust deltas
 	memory.add_tagged_event("Player spoke to me", 0.6, ["interaction", "player"], "direct", "player_interaction")
-	memory.update_relationship("Player", 0.02, "Player initiated conversation")
+	memory.add_belief("Player", "initiated", "conversation", 0.5, "self")
 
 	# Interruption if doing a task
 	if layer1.task_momentum > 0.3:
 		layer1.apply_interruption()
 		memory.add_tagged_event("Player interrupted my task", 0.5, ["interruption"], "direct", "interruption")
-		memory.update_relationship("Player", -0.03, "Interrupted my work")
+		memory.add_belief("Player", "interrupted", "my work", 0.7, "self")
 
 var _path_retry_count: int = 0
 
@@ -801,7 +1122,18 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 	# --- Hearing via StimulusRegistry + SensorSystem ---
 	if _sensor_system != null and not _sensor_profile.is_empty():
 		var hearing_results: Array = _sensor_system.query_hearing_all(my_pos, _sensor_profile)
+		# Prune expired stimulus IDs every ~60 ticks (avoid unbounded growth)
+		var now_tick: int = Time.get_ticks_msec()
+		if now_tick % 60 == 0:
+			var expired: Array = []
+			for sid in _heard_stimulus_ids:
+				if now_tick - _heard_stimulus_ids[sid] > 10000:  # 10s expiry
+					expired.append(sid)
+			for sid in expired:
+				_heard_stimulus_ids.erase(sid)
+
 		for hr in hearing_results:
+			var stim_id: String = hr.get("stimulus_id", "")
 			var stim_type: String = hr.get("stimulus_type", "")
 			var emitter: String = hr.get("emitter_id", "")
 			var tags: Array = hr.get("tags", [])
@@ -812,6 +1144,12 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 
 			if emitter == npc_name:
 				continue  # don't hear ourselves
+
+			# Dedup: skip stimuli we already processed
+			if stim_id != "" and _heard_stimulus_ids.has(stim_id):
+				continue
+			if stim_id != "":
+				_heard_stimulus_ids[stim_id] = now_tick
 
 			# Record for debug visualization
 			perception.record_hearing_result(hr)

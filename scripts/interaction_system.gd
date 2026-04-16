@@ -5,6 +5,7 @@ const INTERACT_RANGE: float = 48.0
 
 var _player: Node = null
 var _inference_client: Node = null
+var _game_manager: Node = null
 var _active_npc: Node = null
 var _conversation_history: Array = []  # [{speaker: String, text: String}]
 var _waiting_for_reply: bool = false
@@ -28,7 +29,8 @@ func _setup() -> void:
 	for child in get_tree().root.get_children():
 		if child.name == "InferenceClient":
 			_inference_client = child
-			break
+		elif child.name == "GameManager":
+			_game_manager = child
 	_build_chat_ui()
 
 func _build_chat_ui() -> void:
@@ -239,23 +241,23 @@ func _request_npc_greeting() -> void:
 		_on_chat_response(false, {"utterance": "...", "mood_shift": "neutral"})
 		return
 
-	# Use the existing dialogue endpoint for the opening line
+	# Build dialogue packet for greeting
 	var brain = _active_npc.brain
-	var emo_summary: String = ""
-	if brain.layer2:
-		emo_summary = brain.layer2.get_emotion_summary()
-	var trust_val: float = brain.memory.get_trust("Player")
-	var rel_context: String = "Trust: %.2f" % trust_val
-	# Include object knowledge in dialogue context
-	if brain.memory:
-		var obj_ctx: String = brain.memory.get_object_dialogue_context(_active_npc.role if "role" in _active_npc else "")
-		if obj_ctx != "":
-			rel_context += ". " + obj_ctx
-	var recent: Array = brain.memory.get_recent_events_text(3)
+	var trust_val: float = brain.memory.compute_trust("Player")
+	var ctx: Dictionary = {
+		"npc_name": _active_npc.npc_name,
+		"role": _active_npc.role,
+		"target_name": "Player",
+		"target_type": "player",
+		"trust": trust_val,
+		"emotion_vector": brain.layer2.emotion_vector if brain.layer2 else [],
+		"current_activity": brain.get_current_action(),
+		"current_chunk": brain.layer3.get_current_chunk() if brain.layer3 else {},
+	}
+	var packet: Dictionary = brain.memory.build_dialogue_packet(ctx)
 
 	if _inference_client:
-		_inference_client.layer3_dialogue(
-			_active_npc.role, emo_summary, rel_context, recent,
+		_inference_client.layer3_dialogue_packet(packet,
 			func(success: bool, data: Dictionary) -> void:
 				_waiting_for_reply = false
 				_remove_typing_indicator()
@@ -267,6 +269,8 @@ func _request_npc_greeting() -> void:
 				_add_message_bubble(_active_npc.npc_name, utterance, false)
 				if is_instance_valid(_active_npc):
 					_active_npc.speak(utterance)
+				if _game_manager:
+					_game_manager.log_conversation(_active_npc.npc_name, "Player", utterance, "greeting, intent=%s" % data.get("intent", "?"))
 		)
 	else:
 		_waiting_for_reply = false
@@ -280,22 +284,44 @@ func _request_npc_reply(player_text: String) -> void:
 		return
 
 	var brain = _active_npc.brain
-	var emo_summary: String = ""
-	if brain.layer2:
-		emo_summary = brain.layer2.get_emotion_summary()
-	var trust_val: float = brain.memory.get_trust("Player")
-	var rel_context: String = "Trust: %.2f" % trust_val
-	# Include object knowledge in chat context
-	if brain.memory:
-		var obj_ctx: String = brain.memory.get_object_dialogue_context(_active_npc.role if "role" in _active_npc else "")
-		if obj_ctx != "":
-			rel_context += ". " + obj_ctx
-	var recent: Array = brain.memory.get_recent_events_text(3)
+	var trust_val: float = brain.memory.compute_trust("Player")
+	var ctx: Dictionary = {
+		"npc_name": _active_npc.npc_name,
+		"role": _active_npc.role,
+		"target_name": "Player",
+		"target_type": "player",
+		"trust": trust_val,
+		"emotion_vector": brain.layer2.emotion_vector if brain.layer2 else [],
+		"current_activity": brain.get_current_action(),
+		"current_chunk": brain.layer3.get_current_chunk() if brain.layer3 else {},
+	}
+	var packet: Dictionary = brain.memory.build_dialogue_packet(ctx)
+
+	# Perception: only real things — other characters and the player.
+	# World is a pre-rendered bitmap. No labeled scenery, furniture, or objects visible.
+	# Only people and walls/paths exist in the perceived world.
+	var people_nearby: Array = []
+	if brain.perception:
+		for entity in brain.perception.visible_entities:
+			var dist_tiles: float = snapped(entity.get("distance", 0.0) / 32.0, 0.1)
+			people_nearby.append("%s, %.0f tiles away" % [entity.get("name", "someone"), dist_tiles])
+	# Always include the player — we're talking to them
+	var has_player: bool = false
+	for p in people_nearby:
+		if "Player" in p:
+			has_player = true
+	if not has_player:
+		people_nearby.insert(0, "a traveler standing right here")
+	var location: String = brain.layer3.location_name_from_position(_active_npc.global_position) if brain.layer3 else "somewhere"
+	packet["perception"] = "You are near the %s. You can see: %s. The town is quiet, just paths and buildings around you." % [location, "; ".join(people_nearby)]
+
+	# Add current thought from thought loop
+	if brain.current_thought != "":
+		packet["current_thought"] = brain.current_thought
 
 	if _inference_client:
-		_inference_client.layer3_chat(
-			_active_npc.role, _active_npc.npc_name, emo_summary,
-			rel_context, recent, _conversation_history, player_text,
+		_inference_client.layer3_chat_packet(
+			packet, _conversation_history, player_text,
 			_on_chat_response
 		)
 	else:
@@ -320,22 +346,23 @@ func _on_chat_response(success: bool, data: Dictionary) -> void:
 	_conversation_history.append({"speaker": _active_npc.npc_name, "text": utterance})
 	_add_message_bubble(_active_npc.npc_name, utterance, false)
 
+	# Log the exchange
+	if _game_manager and _conversation_history.size() >= 2:
+		var player_msg: String = _conversation_history[_conversation_history.size() - 2].get("text", "")
+		_game_manager.log_conversation("Player", _active_npc.npc_name, player_msg, "player-chat")
+		_game_manager.log_conversation(_active_npc.npc_name, "Player", utterance, "chat-reply, mood=%s" % mood_shift)
+
 	# Speak out loud so nearby NPCs hear
 	_active_npc.speak(utterance)
 
-	# Apply mood shift to trust
-	var trust_delta: float = 0.0
-	match mood_shift:
-		"pleased", "amused":
-			trust_delta = 0.03
-		"curious":
-			trust_delta = 0.01
-		"annoyed", "suspicious":
-			trust_delta = -0.02
-		"nervous":
-			trust_delta = -0.01
-	if trust_delta != 0.0 and _active_npc.brain:
-		_active_npc.brain.memory.update_relationship("Player", trust_delta, "Conversation mood: " + mood_shift)
+	# Notify server for belief extraction — NPC extracts beliefs from what player said
+	if _inference_client and _conversation_history.size() >= 2:
+		var player_msg: String = _conversation_history[_conversation_history.size() - 2].get("text", "")
+		_inference_client.notify_speech(_active_npc.npc_name, _active_npc.role, player_msg, "Player")
+
+	# Mood-based belief rather than hardcoded trust delta
+	if _active_npc.brain and mood_shift not in ["neutral", ""]:
+		_active_npc.brain.memory.add_belief("Player", "made me feel", mood_shift, 0.6, "self")
 
 	# Focus input for next message
 	_input_field.call_deferred("grab_focus")

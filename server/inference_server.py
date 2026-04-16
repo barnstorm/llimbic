@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from layer2_model import Layer2Model
 from layer3_model import Layer3Model
+from command_model import CommandModel
 from emotion_coords import default_vector, NUM_DIMS, DIMENSIONS, top_dimensions, valence_summary
 
 app = FastAPI(title="Burg Inference Server", version="1.0")
@@ -141,9 +142,19 @@ async def load_models():
     model_name = "HuggingFaceTB/SmolLM2-135M-Instruct"
 
     layer2 = Layer2Model(model_name=model_name, device=device)
+
+    # Command model: SmolLM3-3B fine-tuned for adventure-command thought loop
+    cmd_model = None
+    try:
+        cmd_model = CommandModel()
+        print("CommandModel (SmolLM3-3B) loaded for thought loop")
+    except FileNotFoundError as e:
+        print(f"CommandModel not available ({e}), using legacy thought generation")
+
     # Layer 3 uses a larger model for planning/dialogue/chat
     layer3_model_name = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
-    layer3 = Layer3Model(model_name=layer3_model_name, device=device)
+    layer3 = Layer3Model(model_name=layer3_model_name, device=device,
+                         command_model=cmd_model)
 
     # Warm up with a test generation
     print("Warming up models...")

@@ -8,6 +8,7 @@ var _pulse_interval: float = 5.0  # every 5 real seconds
 var _cooldowns: Dictionary = {}   # "npcA:npcB" -> time remaining
 var _active_conversations: Array[Dictionary] = []  # ongoing conversations
 var _inference_client: Node = null
+var _game_manager: Node = null
 var _sensor_system: Node = null
 
 const CONVERSE_RANGE: float = 64.0  # 2 tiles
@@ -34,6 +35,8 @@ func _find_inference_client() -> void:
 			_inference_client = child
 		elif child.name == "SensorSystem":
 			_sensor_system = child
+		elif child.name == "GameManager":
+			_game_manager = child
 
 func _process(delta: float) -> void:
 	# Tick cooldowns
@@ -82,14 +85,19 @@ func _try_start_conversation(npc_a: Node, npc_b: Node) -> void:
 	if npc_b._externally_locked:
 		return
 
-	# Both must have social_need > 30
-	if npc_a.brain.layer1.social_need < 30.0 or npc_b.brain.layer1.social_need < 30.0:
+	# Check willingness: either social need is high enough, or a thought-loop intention
+	# explicitly drives social behavior (e.g., "talk to X", "socialize")
+	var a_social_intent: bool = _has_social_intention(npc_a, npc_b.npc_name)
+	var b_social_intent: bool = _has_social_intention(npc_b, npc_a.npc_name)
+	var a_willing: bool = a_social_intent or npc_a.brain.layer1.social_need > 30.0
+	var b_willing: bool = b_social_intent or npc_b.brain.layer1.social_need > 30.0
+	if not a_willing or not b_willing:
 		return
 
-	# Both must be willing to interrupt their current task
-	if not npc_a.brain.layer1.should_interrupt_for("medium"):
+	# Both must be willing to interrupt — but social intentions bypass the check
+	if not a_social_intent and not npc_a.brain.layer1.should_interrupt_for("medium"):
 		return
-	if not npc_b.brain.layer1.should_interrupt_for("medium"):
+	if not b_social_intent and not npc_b.brain.layer1.should_interrupt_for("medium"):
 		return
 
 	# Cooldown check
@@ -135,13 +143,15 @@ func _try_start_conversation(npc_a: Node, npc_b: Node) -> void:
 	if not a_sees_b and not b_sees_a:
 		return
 
-	# Base 50% chance, 2x in public zones
-	var chance: float = 0.5
-	var location: String = ""
-	if npc_a.brain.layer3:
-		location = npc_a.brain.layer3.location_name_from_position(npc_a.global_position)
-	if location in ["town_square", "market", "inn", "well"]:
+	# Conversation probability — driven by intentions + social need, not fixed rules
+	var chance: float = 0.3  # base chance
+	# Social intentions guarantee conversation
+	if a_social_intent or b_social_intent:
 		chance = 1.0
+	else:
+		# Higher social need increases chance
+		var avg_social: float = (npc_a.brain.layer1.social_need + npc_b.brain.layer1.social_need) / 200.0
+		chance += avg_social * 0.5  # up to +0.5 from social need
 	if randf() > chance:
 		return
 
@@ -186,36 +196,37 @@ func _request_speech(convo: Dictionary, speaker: Node, listener: Node) -> void:
 		})
 		return
 
-	var speaker_emo: String = ""
-	if speaker.brain.layer2:
-		speaker_emo = speaker.brain.layer2.get_emotion_summary()
-	var listener_emo: String = ""
-	if listener.brain.layer2:
-		listener_emo = listener.brain.layer2.get_emotion_summary()
+	# Build dialogue packets for both participants
+	var speaker_trust: float = speaker.brain.memory.compute_trust(listener.npc_name) if speaker.brain.memory else 0.5
+	var speaker_ctx: Dictionary = {
+		"npc_name": speaker.npc_name,
+		"role": speaker.role,
+		"target_name": listener.npc_name,
+		"target_type": "npc",
+		"trust": speaker_trust,
+		"emotion_vector": speaker.brain.layer2.emotion_vector if speaker.brain.layer2 else [],
+		"current_activity": speaker.brain.get_current_action(),
+		"current_chunk": speaker.brain.layer3.get_current_chunk() if speaker.brain.layer3 else {},
+	}
+	var speaker_packet: Dictionary = speaker.brain.memory.build_dialogue_packet(speaker_ctx)
 
-	var location: String = ""
-	if speaker.brain.layer3:
-		location = speaker.brain.layer3.location_name_from_position(speaker.global_position)
-	var context: String = "At %s, doing: %s" % [location, speaker.brain.get_current_action()]
-	# Enrich context with object knowledge
-	if speaker.brain.memory:
-		var obj_ctx: String = speaker.brain.memory.get_object_dialogue_context(speaker.role if "role" in speaker else "")
-		if obj_ctx != "":
-			context += ". " + obj_ctx
-	# Add frustration/concerns for more grounded dialogue
-	if speaker.brain.layer1 and speaker.brain.layer1.frustration > 0.3:
-		context += ". Feeling frustrated (%.0f%%)" % (speaker.brain.layer1.frustration * 100.0)
-	if speaker.brain.memory and speaker.brain.memory.concerns.size() > 0:
-		context += ". Worried about: " + speaker.brain.memory.concerns[0]
-	var recent: Array = speaker.brain.memory.get_recent_events_text(3)
+	var listener_trust: float = listener.brain.memory.compute_trust(speaker.npc_name) if listener.brain.memory else 0.5
+	var listener_ctx: Dictionary = {
+		"npc_name": listener.npc_name,
+		"role": listener.role,
+		"target_name": speaker.npc_name,
+		"target_type": "npc",
+		"trust": listener_trust,
+		"emotion_vector": listener.brain.layer2.emotion_vector if listener.brain.layer2 else [],
+		"current_activity": listener.brain.get_current_action(),
+		"current_chunk": listener.brain.layer3.get_current_chunk() if listener.brain.layer3 else {},
+	}
+	var listener_packet: Dictionary = listener.brain.memory.build_dialogue_packet(listener_ctx)
 
-	_inference_client.layer3_converse(
-		speaker.role, speaker_emo,
-		listener.role, listener_emo,
-		context, recent,
+	_inference_client.layer3_converse_packet(
+		speaker_packet, listener_packet,
 		func(success: bool, data: Dictionary) -> void:
 			_on_speech_received(convo, speaker, success, data),
-		speaker.npc_name, listener.npc_name
 	)
 
 func _on_speech_received(convo: Dictionary, speaker: Node, success: bool, data: Dictionary) -> void:
@@ -238,6 +249,15 @@ func _on_speech_received(convo: Dictionary, speaker: Node, success: bool, data: 
 	speaker.brain.memory.add_tagged_event(
 		"Talked to %s about %s" % [listener.npc_name, topic], 0.5, ["conversation"], "direct", "social"
 	)
+
+	# Notify server for belief extraction — listener extracts beliefs from what speaker said
+	if _inference_client and is_instance_valid(listener):
+		_inference_client.notify_speech(listener.npc_name, listener.role, utterance, speaker.npc_name)
+
+	# Log to shared conversation log
+	if _game_manager:
+		var intent: String = data.get("intent", "?")
+		_game_manager.log_conversation(speaker.npc_name, listener.npc_name, utterance, "npc-npc, intent=%s, topic=%s" % [intent, topic])
 
 	# Satisfy social need
 	speaker.brain.layer1.social_need = clampf(speaker.brain.layer1.social_need - 8.0, 0.0, 100.0)
@@ -305,7 +325,7 @@ func _exchange_events(from_npc: Node, to_npc: Node) -> void:
 		chosen = events[randi() % events.size()]
 
 	# Trust-weighted salience: low trust = much lower salience
-	var trust: float = to_npc.brain.memory.get_trust(from_npc.npc_name)
+	var trust: float = to_npc.brain.memory.compute_trust(from_npc.npc_name)
 	var trust_factor: float = clampf(trust + 0.3, 0.3, 1.0)
 	var new_salience: float = chosen["salience"] * 0.7 * trust_factor
 
@@ -357,7 +377,7 @@ func _exchange_object_knowledge(from_npc: Node, to_npc: Node) -> void:
 	var share_count: int = mini(to_share.size(), randi_range(1, 2))
 	to_share.shuffle()
 
-	var trust: float = to_npc.brain.memory.get_trust(from_npc.npc_name)
+	var trust: float = to_npc.brain.memory.compute_trust(from_npc.npc_name)
 	var is_reliable: bool = trust > 0.6
 
 	for i in range(share_count):
@@ -399,6 +419,18 @@ func _fallback_line(speaker_role: String, listener_role: String) -> String:
 		"Blacksmith": "The forge has been keeping me busy.",
 	}
 	return lines.get(speaker_role, "Good day, %s." % listener_role)
+
+func _has_social_intention(npc: Node, target_name: String) -> bool:
+	## Check if an NPC has a thought-loop intention to socialize or talk to a specific person.
+	if npc.brain == null:
+		return false
+	for intent in npc.brain.active_intentions:
+		var goal: String = intent.get("goal", "").to_lower()
+		if "talk" in goal or "socialize" in goal or "chat" in goal or "gossip" in goal:
+			return true
+		if target_name.to_lower() in goal:
+			return true
+	return false
 
 func _pair_key(name_a: String, name_b: String) -> String:
 	if name_a < name_b:

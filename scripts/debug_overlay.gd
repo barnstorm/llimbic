@@ -16,6 +16,9 @@ var _modulation_label: Label = null
 var _l1_bars: Array = []  # [{label: Label, bar: ColorRect, bg: ColorRect}]
 var _l2_cells: Array = []  # ColorRect[27]
 var _objects_label: Label = null
+var _thought_label: Label = null
+var _intentions_label: Label = null
+var _beliefs_label: Label = null
 var _network_label: Label = null
 var _fov_draw_node: Node2D = null  # Draws FOV cones, vision rays, occluders, hearing in world space
 var _occluder_system: Node = null
@@ -223,6 +226,29 @@ func _build_ui() -> void:
 	_panel.add_child(_objects_label)
 	y_offset += 85.0
 
+	# Section: Thought Loop
+	var thought_header: Label = _make_label("-- Thought Loop --", margin, y_offset, inner_w, 11, Color(1.0, 0.8, 0.4))
+	_panel.add_child(thought_header)
+	y_offset += 16.0
+
+	_thought_label = _make_label("(no thoughts)", margin, y_offset, inner_w, 9, Color(1.0, 0.95, 0.8))
+	_thought_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	_thought_label.size = Vector2(inner_w, 30)
+	_panel.add_child(_thought_label)
+	y_offset += 35.0
+
+	_intentions_label = _make_label("No intentions.", margin, y_offset, inner_w, 9, Color(0.8, 0.9, 1.0))
+	_intentions_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	_intentions_label.size = Vector2(inner_w, 50)
+	_panel.add_child(_intentions_label)
+	y_offset += 55.0
+
+	_beliefs_label = _make_label("No beliefs.", margin, y_offset, inner_w, 9, Color(0.9, 0.8, 1.0))
+	_beliefs_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	_beliefs_label.size = Vector2(inner_w, 50)
+	_panel.add_child(_beliefs_label)
+	y_offset += 55.0
+
 	_panel.size.y = y_offset + 10.0
 
 func _make_label(text: String, x: float, y: float, w: float, font_size: int, color: Color) -> Label:
@@ -282,9 +308,9 @@ func _update_panel() -> void:
 	var action: Dictionary = brain.current_action
 	var atype: String = action.get("type", "idle").to_upper()
 	var reason: String = action.get("reason", "")
-	if not brain._drive_override.is_empty():
-		_action_label.text = "%s — OVERRIDE: %s" % [atype, brain._drive_override.get("reason", "?")]
-		_action_label.add_theme_color_override("font_color", Color(1.0, 0.4, 0.2))
+	if brain.current_thought != "":
+		_action_label.text = "%s — %s" % [atype, reason]
+		_action_label.add_theme_color_override("font_color", Color(0.4, 0.9, 1.0))
 	elif atype == "FLEE_FROM":
 		_action_label.text = "%s — %s" % [atype, reason]
 		_action_label.add_theme_color_override("font_color", Color(1.0, 0.2, 0.2))
@@ -398,6 +424,31 @@ func _update_panel() -> void:
 			_objects_label.text = "\n".join(obj_lines)
 		else:
 			_objects_label.text = "No objects discovered."
+
+	# Thought loop display
+	if _thought_label:
+		if brain.current_thought != "":
+			_thought_label.text = '"' + brain.current_thought + '"'
+		else:
+			_thought_label.text = "(no thoughts)"
+
+	if _intentions_label:
+		if brain.active_intentions.size() > 0:
+			var intent_lines: Array = []
+			var top_goal: String = brain.get_top_intention().get("goal", "")
+			for intent in brain.active_intentions:
+				var priority: float = intent.get("priority", 0.0)
+				var marker: String = ">" if intent.get("goal", "") == top_goal else " "
+				intent_lines.append("%s%s @ %s (%.1f)" % [marker, intent.get("goal", "?"), intent.get("location", "?"), priority])
+				if intent_lines.size() >= 4:
+					break
+			_intentions_label.text = "\n".join(intent_lines)
+		else:
+			_intentions_label.text = "No intentions."
+
+	if _beliefs_label and brain.memory:
+		var summary: String = brain.memory.beliefs_summary(4)
+		_beliefs_label.text = summary if summary != "" else "No beliefs."
 
 func _update_plan_display() -> void:
 	# Clear existing plan labels

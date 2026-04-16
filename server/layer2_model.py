@@ -1,208 +1,377 @@
 """
-Layer 2 — Translation / Modulation Model
+Layer 2 — Limbic System Model (GGUF via llama-cpp-python)
 
-Uses a small local model (~15-33M parameters) for bounded translation tasks:
-- Project Layer 1 state → 27-dim GoEmotions vector
-- Modulate Layer 3 directives → bounded Layer 1 parameters
-
-The model is NOT conversational. It performs structured extraction.
-All persistent state exists outside the model. Calls are stateless.
+Fine-tuned TinyLlama-1.1B quantized to Q4_K_M GGUF, ~636MB.
+Runs on GPU via llama-cpp-python CUDA backend. ~0.3s per inference.
 """
 
-import torch
-import json
-import re
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import os
+import subprocess
+import time
+import requests
 from emotion_coords import (
     DIMENSIONS, NUM_DIMS, DIM_INDEX, clamp_vector, default_vector,
-    top_dimensions, format_state_prompt, format_modulation_prompt
+    top_dimensions,
+)
+
+LIMBIC_DIMS = ["valence", "arousal", "dominance", "social_focus", "temporal", "certainty"]
+
+SYSTEM_PROMPT = (
+    "You are a limbic system — an emotional processing layer that translates "
+    "between neural activations, thoughts, and emotional states. You receive "
+    "sensory data (6D neural activation vectors) and/or inner thoughts, and "
+    "output structured emotional assessments including emotion labels with "
+    "intensities, attention focus priorities, and motivational drives."
 )
 
 
+LLAMA_SERVER_PORT = 8422
+
+
 class Layer2Model:
-    """Small model for emotion vector projection and modulation."""
+    """Limbic system model using GGUF via llama-server subprocess (CPU)."""
 
-    def __init__(self, model_name: str = "HuggingFaceTB/SmolLM2-135M-Instruct",
-                 device: str = "cuda"):
-        """
-        Load a small instruct-tuned model for Layer 2.
-        We use SmolLM2-135M-Instruct as the smallest available instruct model
-        that can follow structured output instructions. For Layer 2, we constrain
-        its generation heavily (low temperature, short max_tokens).
+    def __init__(self, device: str = "cuda"):
+        self.model_name = "limbic-tinyllama-lora"
 
-        Note: True 15M models (TinyStories etc.) lack instruction-following
-        capability needed for structured JSON output. SmolLM2-135M is the
-        practical minimum that can reliably produce bounded structured output.
-        We compensate by keeping generation very short and deterministic.
-        """
-        self.device = device
-        self.model_name = model_name
-        print(f"Layer2: Loading {model_name}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16,
-            device_map=device
+        server_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(server_dir)
+        self.gguf_path = os.path.join(project_root, "training", "limbic-tinyllama-q4.gguf")
+
+        if not os.path.exists(self.gguf_path):
+            raise FileNotFoundError(f"GGUF model not found: {self.gguf_path}")
+
+        # Find llama-server binary
+        self._llama_bin = None
+        for candidate in [
+            "/tmp/llama.cpp/build/bin/llama-server",
+            os.path.join(project_root, "llama-server"),
+        ]:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                self._llama_bin = candidate
+                break
+
+        if self._llama_bin is None:
+            raise FileNotFoundError("llama-server binary not found")
+
+        self._proc = None
+        self._start_server()
+
+    def _start_server(self):
+        print(f"Layer2: Starting llama-server on port {LLAMA_SERVER_PORT}...")
+        self._proc = subprocess.Popen(
+            [
+                self._llama_bin,
+                "-m", self.gguf_path,
+                "--port", str(LLAMA_SERVER_PORT),
+                "--ctx-size", "4096",
+                "-t", "8",
+                "-np", "2",
+                "--log-disable",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        self.model.eval()
-        print(f"Layer2: Model loaded ({sum(p.numel() for p in self.model.parameters()) / 1e6:.1f}M params)")
+        for _ in range(30):
+            try:
+                r = requests.get(f"http://127.0.0.1:{LLAMA_SERVER_PORT}/health", timeout=1)
+                if r.status_code == 200:
+                    print("Layer2: llama-server ready (GGUF Q4_K_M, CPU 8 threads)")
+                    return
+            except requests.ConnectionError:
+                pass
+            time.sleep(1)
+        raise RuntimeError("llama-server failed to start")
 
-        # Precompute dimension token IDs for constrained decoding
-        self._dim_names = DIMENSIONS
+    def __del__(self):
+        if hasattr(self, '_proc') and self._proc and self._proc.poll() is None:
+            self._proc.terminate()
 
-    def _generate(self, prompt: str, max_new_tokens: int = 150,
-                  temperature: float = 0.1) -> str:
-        """Generate text from prompt with tight constraints."""
-        messages = [
-            {"role": "user", "content": prompt}
-        ]
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=max(temperature, 0.01),
-                do_sample=temperature > 0.05,
-                top_p=0.9,
-                repetition_penalty=1.1,
-                pad_token_id=self.tokenizer.eos_token_id,
+    def _generate(self, user_content: str, max_tokens: int = 200,
+                  temperature: float = 0.3) -> str:
+        try:
+            r = requests.post(
+                f"http://127.0.0.1:{LLAMA_SERVER_PORT}/v1/chat/completions",
+                json={
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "frequency_penalty": 0.1,
+                },
+                timeout=30,
             )
-        # Decode only the generated tokens
-        generated = outputs[0][inputs["input_ids"].shape[1]:]
-        return self.tokenizer.decode(generated, skip_special_tokens=True).strip()
+            data = r.json()
+            if "choices" not in data:
+                print(f"Layer2: unexpected response: {str(data)[:200]}")
+                return ""
+            return data["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            print(f"Layer2: inference error: {e}")
+            return ""
+
+    @staticmethod
+    def l1_to_6d(layer1_state: dict) -> list[float]:
+        """Map Layer 1 substrate state to 6D limbic vector."""
+        energy = layer1_state.get("energy", 50.0) / 100.0
+        hunger = layer1_state.get("hunger", 50.0) / 100.0
+        social = layer1_state.get("social_need", 50.0) / 100.0
+        safety = layer1_state.get("safety", 80.0) / 100.0
+        momentum = layer1_state.get("task_momentum", 0.5)
+        frustration = layer1_state.get("frustration", 0.0)
+
+        valence = max(0, min(1,
+            energy * 0.3 + safety * 0.3 + (1.0 - hunger) * 0.2 + (1.0 - frustration) * 0.2
+        ))
+        arousal = max(0, min(1,
+            frustration * 0.4 + momentum * 0.3 + (1.0 - energy) * 0.15 + hunger * 0.15
+        ))
+        dominance = max(0, min(1,
+            safety * 0.4 + momentum * 0.3 + energy * 0.3
+        ))
+        social_focus = max(0, min(1, social))
+        temporal = max(0, min(1,
+            momentum * 0.6 + (1.0 - frustration) * 0.4
+        ))
+        certainty = max(0, min(1,
+            safety * 0.4 + (1.0 - frustration) * 0.4 + momentum * 0.2
+        ))
+
+        return [round(v, 2) for v in [valence, arousal, dominance, social_focus, temporal, certainty]]
+
+    @staticmethod
+    def _build_context(layer1_state: dict, recent_events: list[str]) -> str:
+        """Build a natural-language context string from L1 state."""
+        parts = []
+        energy = layer1_state.get("energy", 50)
+        hunger = layer1_state.get("hunger", 50)
+        safety = layer1_state.get("safety", 80)
+        frustration = layer1_state.get("frustration", 0)
+        social = layer1_state.get("social_need", 50)
+        momentum = layer1_state.get("task_momentum", 0)
+
+        if energy < 25:
+            parts.append("exhausted and low energy")
+        elif energy < 40:
+            parts.append("tired")
+        if hunger > 80:
+            parts.append("very hungry")
+        elif hunger > 60:
+            parts.append("hungry")
+        if safety < 30:
+            parts.append("danger nearby, feeling unsafe")
+        elif safety < 50:
+            parts.append("somewhat uneasy environment")
+        if frustration > 0.7:
+            parts.append("very frustrated by repeated obstacles")
+        elif frustration > 0.4:
+            parts.append("frustrated")
+        if social > 80:
+            parts.append("lonely, strong need for social contact")
+        elif social > 60:
+            parts.append("wanting social interaction")
+        if momentum > 0.7:
+            parts.append("deeply focused on current task")
+        elif momentum > 0.4:
+            parts.append("engaged in work")
+
+        if not parts:
+            parts.append("routine activity, calm environment")
+
+        if recent_events:
+            last_event = str(recent_events[-1])
+            if len(last_event) > 80:
+                last_event = last_event[:77] + "..."
+            parts.append(last_event)
+
+        return ", ".join(parts)
+
+    @staticmethod
+    def _build_thought(recent_events: list[str]) -> str:
+        """Build an inner thought string from recent events."""
+        if not recent_events:
+            return ""
+        thoughts = []
+        for event in recent_events[-3:]:
+            ev = str(event)
+            if len(ev) > 60:
+                ev = ev[:57] + "..."
+            thoughts.append(ev)
+        return "; ".join(thoughts)
+
+    @staticmethod
+    def _parse_limbic_output(text: str) -> dict:
+        """Parse structured limbic model output."""
+        result = {"emotions": {}, "attention": [], "drives": {}}
+        for line in text.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("Emotional State:"):
+                parts = line.replace("Emotional State:", "").strip()
+                for pair in parts.split(","):
+                    pair = pair.strip()
+                    if not pair:
+                        continue
+                    if ":" in pair:
+                        k, v = pair.rsplit(":", 1)
+                        try:
+                            result["emotions"][k.strip()] = float(v.strip())
+                        except ValueError:
+                            result["emotions"][k.strip()] = 1.0
+                    else:
+                        result["emotions"][pair] = 1.0
+            elif line.startswith("Attention Focus:"):
+                parts = line.replace("Attention Focus:", "").strip()
+                result["attention"] = [p.strip() for p in parts.split(",") if p.strip()]
+            elif line.startswith("Motivational Drive:"):
+                parts = line.replace("Motivational Drive:", "").strip()
+                for pair in parts.split(","):
+                    pair = pair.strip()
+                    if not pair:
+                        continue
+                    if ":" in pair:
+                        k, v = pair.rsplit(":", 1)
+                        try:
+                            val = float(v.strip())
+                            key = k.strip().split(" or ")[0].split("/")[0].strip()
+                            result["drives"][key] = val
+                        except ValueError:
+                            pass
+        return result
+
+    @staticmethod
+    def emotions_to_27dim(emotions: dict, current_vector: list[float] = None) -> list[float]:
+        """Convert limbic emotion labels to 27-dim GoEmotions vector.
+        Blends with current vector: limbic 0.6, current 0.4.
+        """
+        limbic_vec = [0.0] * NUM_DIMS
+        for label, intensity in emotions.items():
+            if label in DIM_INDEX:
+                limbic_vec[DIM_INDEX[label]] = max(0.0, min(1.0, float(intensity)))
+
+        if current_vector and len(current_vector) == NUM_DIMS:
+            blended = [
+                limbic_vec[i] * 0.6 + current_vector[i] * 0.4
+                for i in range(NUM_DIMS)
+            ]
+            return clamp_vector(blended)
+        return clamp_vector(limbic_vec)
 
     def project(self, layer1_state: dict, recent_events: list[str],
                 current_vector: list[float]) -> dict:
-        """
-        Northbound projection: Layer 1 state → updated 27-dim emotion vector.
+        """Northbound projection: Layer 1 state → emotions + attention + drives."""
+        vec_6d = self.l1_to_6d(layer1_state)
+        context = self._build_context(layer1_state, recent_events)
+        thought = self._build_thought(recent_events)
 
-        Uses the model to interpret state changes and adjust the emotion vector.
-        Falls back to heuristic adjustment if model output is unparseable.
-        """
-        prompt = (
-            "You are an emotion projection system. Given an NPC's physical state and recent events, "
-            "output a JSON object with 'changes' (dict of emotion dimension names to delta values between -0.3 and +0.3) "
-            "and 'summary' (one short sentence).\n\n"
-            f"Emotion dimensions: {', '.join(self._dim_names[:10])}... (27 total from GoEmotions)\n\n"
-            f"{format_state_prompt(layer1_state, recent_events, current_vector)}\n\n"
-            "Output ONLY valid JSON. Example: {\"changes\": {\"joy\": -0.1, \"frustration\": 0.15}, \"summary\": \"tired and slightly annoyed\"}"
-        )
+        dims = ", ".join(f"{LIMBIC_DIMS[i]}={vec_6d[i]:.2f}" for i in range(6))
+        if thought:
+            user_input = (
+                f"Neural Activation: [{dims}]\n"
+                f"Context: {context}\n"
+                f"Inner Thought: \"{thought}\""
+            )
+        else:
+            user_input = (
+                f"Neural Activation: [{dims}]\n"
+                f"Context: {context}"
+            )
 
-        raw = self._generate(prompt, max_new_tokens=120, temperature=0.1)
+        raw = self._generate(user_input, max_tokens=200, temperature=0.3)
+        parsed = self._parse_limbic_output(raw)
 
-        # Parse model output
-        try:
-            # Try to extract JSON from output
-            json_match = re.search(r'\{[^{}]*\}', raw, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-                changes = data.get("changes", {})
-                summary = data.get("summary", "")
-            else:
-                changes = {}
-                summary = raw[:80]
-        except (json.JSONDecodeError, AttributeError):
-            changes = {}
-            summary = raw[:80] if raw else ""
+        vec = current_vector if current_vector and len(current_vector) == NUM_DIMS else default_vector()
+        if parsed["emotions"]:
+            new_vector = self.emotions_to_27dim(parsed["emotions"], vec)
+        else:
+            new_vector = vec
 
-        # Apply changes to current vector (with heuristic fallback)
-        new_vector = list(current_vector) if current_vector else default_vector()
-
-        # Model-driven changes
-        for dim_name, delta in changes.items():
-            if dim_name in DIM_INDEX:
-                idx = DIM_INDEX[dim_name]
-                delta = max(-0.3, min(0.3, float(delta)))
-                new_vector[idx] += delta
-
-        # Heuristic reinforcement based on Layer 1 state
-        # These ensure the vector stays grounded even if model output is poor
-        energy = layer1_state.get("energy", 50)
-        hunger = layer1_state.get("hunger", 50)
-        frustration = layer1_state.get("frustration", 0)
-        safety = layer1_state.get("safety", 80)
-        social = layer1_state.get("social_need", 50)
-
-        # Low energy → sadness/relief up, excitement down
-        if energy < 30:
-            new_vector[DIM_INDEX["sadness"]] += 0.05
-            new_vector[DIM_INDEX["excitement"]] -= 0.05
-        # High frustration → anger/annoyance up
-        if frustration > 0.5:
-            new_vector[DIM_INDEX["anger"]] += frustration * 0.1
-            new_vector[DIM_INDEX["annoyance"]] += frustration * 0.15
-        # Low safety → fear/nervousness up
-        if safety < 40:
-            new_vector[DIM_INDEX["fear"]] += (40 - safety) / 200
-            new_vector[DIM_INDEX["nervousness"]] += (40 - safety) / 150
-        # High social need → desire up, joy down slightly
-        if social > 70:
-            new_vector[DIM_INDEX["desire"]] += 0.05
-        # High hunger → annoyance up slightly
-        if hunger > 70:
-            new_vector[DIM_INDEX["annoyance"]] += 0.05
-
-        new_vector = clamp_vector(new_vector)
+        if parsed["emotions"]:
+            summary = ", ".join(list(parsed["emotions"].keys())[:3])
+        else:
+            summary = self._heuristic_summary(new_vector)
 
         return {
             "vector": new_vector,
-            "summary": summary or self._heuristic_summary(new_vector),
-            "raw_model_output": raw[:200]
+            "summary": summary,
+            "emotions": parsed["emotions"],
+            "attention": parsed["attention"],
+            "drives": parsed["drives"],
+            "raw_model_output": raw[:300],
         }
 
     def modulate(self, directives: str, current_vector: list[float]) -> dict:
-        """
-        Southbound modulation: Layer 3 directives → Layer 1 modulation parameters.
+        """Southbound modulation: deterministic mapping from emotions to L1 params."""
+        vec = current_vector if current_vector and len(current_vector) == NUM_DIMS else default_vector()
 
-        Converts high-level framing into bounded numeric parameters.
-        """
-        prompt = (
-            "You are a behavior modulation system. Given a directive and current emotional state, "
-            "output a JSON object with these bounded float parameters:\n"
-            "- learning_rate_mod: 0.5-2.0 (how fast to adapt)\n"
-            "- exploration_bias: 0.0-1.0 (explore vs exploit)\n"
-            "- attention_weight: 0.0-1.0 (focus level)\n"
-            "- interruption_sensitivity: 0.0-1.0 (how easily interrupted)\n"
-            "- persistence_scale: 0.5-2.0 (how strongly to persist)\n\n"
-            f"{format_modulation_prompt(directives, current_vector)}\n\n"
-            "Output ONLY valid JSON."
-        )
+        fear = vec[DIM_INDEX["fear"]]
+        curiosity = vec[DIM_INDEX["curiosity"]]
+        anger = vec[DIM_INDEX["anger"]]
+        pride = vec[DIM_INDEX["pride"]]
+        nervousness = vec[DIM_INDEX["nervousness"]]
+        neg_sum = sum(vec[i] for i in range(12, 23))
 
-        raw = self._generate(prompt, max_new_tokens=80, temperature=0.1)
+        chunk_priority = 0.5
+        if "priority=" in directives:
+            try:
+                chunk_priority = float(directives.split("priority=")[1].split()[0])
+            except (ValueError, IndexError):
+                pass
 
-        # Parse with fallback
-        params = {
-            "learning_rate_mod": 1.0,
-            "exploration_bias": 0.5,
-            "attention_weight": 0.5,
-            "interruption_sensitivity": 0.5,
-            "persistence_scale": 1.0,
+        return {
+            "learning_rate_mod": max(0.5, min(2.0, 1.0 + curiosity * 0.5 - fear * 0.3)),
+            "exploration_bias": max(0.0, min(1.0, curiosity * 0.8 - fear * 0.4 - nervousness * 0.2)),
+            "attention_weight": max(0.0, min(1.0, 0.5 + fear * 0.3 + chunk_priority * 0.2)),
+            "interruption_sensitivity": max(0.0, min(1.0, 0.5 - chunk_priority * 0.3 + curiosity * 0.2 - pride * 0.1)),
+            "persistence_scale": max(0.5, min(2.0, 1.0 + chunk_priority * 0.5 + anger * 0.2 + pride * 0.2 - neg_sum * 0.05)),
         }
 
-        try:
-            json_match = re.search(r'\{[^{}]*\}', raw, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-                for key in params:
-                    if key in data:
-                        params[key] = float(data[key])
-        except (json.JSONDecodeError, ValueError):
-            pass
+    def color_thought(self, thought_text: str, current_emotions: dict,
+                      current_vector: list[float]) -> dict:
+        """Pass a thought through the limbic system for emotional coloring.
 
-        # Clamp all parameters to valid ranges
-        params["learning_rate_mod"] = max(0.5, min(2.0, params["learning_rate_mod"]))
-        params["exploration_bias"] = max(0.0, min(1.0, params["exploration_bias"]))
-        params["attention_weight"] = max(0.0, min(1.0, params["attention_weight"]))
-        params["interruption_sensitivity"] = max(0.0, min(1.0, params["interruption_sensitivity"]))
-        params["persistence_scale"] = max(0.5, min(2.0, params["persistence_scale"]))
+        The thought is treated as an inner stimulus — the limbic model interprets
+        it emotionally, exactly as it would interpret a sensory input.
 
-        return params
+        Returns: {
+            "vector": list[float],   # updated 27-dim emotion vector
+            "emotions": dict,        # {emotion_label: intensity}
+            "attention": list[str],
+            "drives": dict,
+            "summary": str,
+        }
+        """
+        emo_str = ", ".join(f"{k}={v:.2f}" for k, v in list(current_emotions.items())[:3])
+        context = f"currently feeling {emo_str}" if emo_str else "neutral state"
+
+        user_input = (
+            f"Neural Activation: [valence=0.50, arousal=0.50, dominance=0.50, "
+            f"social_focus=0.50, temporal=0.50, certainty=0.50]\n"
+            f"Context: {context}\n"
+            f"Inner Thought: \"{thought_text}\""
+        )
+
+        raw = self._generate(user_input, max_tokens=200, temperature=0.3)
+        parsed = self._parse_limbic_output(raw)
+
+        vec = current_vector if current_vector and len(current_vector) == NUM_DIMS else default_vector()
+        if parsed["emotions"]:
+            new_vector = self.emotions_to_27dim(parsed["emotions"], vec)
+        else:
+            new_vector = vec
+
+        summary = ", ".join(list(parsed["emotions"].keys())[:3]) if parsed["emotions"] else "unchanged"
+
+        return {
+            "vector": new_vector,
+            "emotions": parsed["emotions"],
+            "attention": parsed.get("attention", []),
+            "drives": parsed.get("drives", {}),
+            "summary": summary,
+        }
 
     def _heuristic_summary(self, vec: list[float]) -> str:
-        """Generate a short summary from the top emotion dimensions."""
         top = top_dimensions(vec, 3)
         if not top or top[0][1] < 0.05:
             return "neutral"

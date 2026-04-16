@@ -44,6 +44,10 @@ var acquired_beliefs: Array[Dictionary] = []
 # Known world objects: object_id -> {name, type, last_seen_position, last_seen_state, last_seen_time, learned_from, location}
 var known_objects: Dictionary = {}
 
+# Structured beliefs — {subject, predicate, object, confidence, source, timestamp}
+var beliefs: Array[Dictionary] = []
+const MAX_BELIEFS: int = 30
+
 func add_observation_structured(obs: Dictionary) -> void:
 	## Add a structured observation. Shape:
 	## {kind: "vision"|"hearing", subtype: "actor_presence"|"speech"|"object_state"|"impact",
@@ -303,6 +307,72 @@ func get_object_dialogue_context(role: String) -> String:
 	if notable.size() > 3:
 		notable.resize(3)
 	return "Notable objects: " + "; ".join(notable)
+
+# --- Structured Beliefs ---
+
+func add_belief(subject: String, predicate: String, obj: String, confidence: float, source: String) -> void:
+	## Add or update a structured belief. Contradictions resolved by confidence.
+	for i in range(beliefs.size()):
+		var b: Dictionary = beliefs[i]
+		if b["subject"] == subject and b["predicate"] == predicate:
+			if b["object"] != obj:
+				# Contradicting belief — update if higher confidence
+				if confidence > b["confidence"]:
+					beliefs[i] = {"subject": subject, "predicate": predicate, "object": obj,
+						"confidence": confidence, "source": source, "timestamp": Time.get_ticks_msec()}
+				return
+			else:
+				# Reinforcing belief — boost confidence
+				beliefs[i]["confidence"] = minf(b["confidence"] + confidence * 0.2, 1.0)
+				return
+	# New belief
+	beliefs.append({"subject": subject, "predicate": predicate, "object": obj,
+		"confidence": confidence, "source": source, "timestamp": Time.get_ticks_msec()})
+	# Evict lowest confidence if over cap
+	if beliefs.size() > MAX_BELIEFS:
+		var min_conf: float = 2.0
+		var min_idx: int = 0
+		for i in range(beliefs.size()):
+			if beliefs[i]["confidence"] < min_conf:
+				min_conf = beliefs[i]["confidence"]
+				min_idx = i
+		beliefs.remove_at(min_idx)
+
+func query_beliefs(subject: String = "", predicate: String = "") -> Array:
+	## Filter beliefs by subject and/or predicate.
+	var result: Array = []
+	for b in beliefs:
+		if subject != "" and b["subject"] != subject:
+			continue
+		if predicate != "" and b["predicate"] != predicate:
+			continue
+		result.append(b)
+	return result
+
+func beliefs_summary(max_count: int = 5) -> String:
+	## Top beliefs by confidence, for thought prompt context.
+	var sorted_b: Array = beliefs.duplicate()
+	sorted_b.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["confidence"] > b["confidence"])
+	var parts: Array = []
+	for i in range(mini(sorted_b.size(), max_count)):
+		var b: Dictionary = sorted_b[i]
+		parts.append("%s %s %s (%d%%)" % [b["subject"], b["predicate"], b["object"], int(b["confidence"] * 100)])
+	return "; ".join(parts) if parts.size() > 0 else ""
+
+func compute_trust(entity_name: String) -> float:
+	## Compute trust from relationship history + beliefs about the entity.
+	var base: float = get_trust(entity_name)
+	var entity_beliefs: Array = query_beliefs(entity_name)
+	var modifier: float = 0.0
+	for b in entity_beliefs:
+		var pred: String = b.get("predicate", "").to_lower()
+		if "helped" in pred or "saved" in pred or "gave" in pred or "kind" in pred:
+			modifier += b["confidence"] * 0.1
+		elif "stole" in pred or "attacked" in pred or "lied" in pred or "hurt" in pred:
+			modifier -= b["confidence"] * 0.15
+		elif "broke" in pred or "damaged" in pred or "rude" in pred:
+			modifier -= b["confidence"] * 0.1
+	return clampf(base + modifier, 0.0, 1.0)
 
 # --- Role affinity for relevance scoring ---
 
@@ -594,6 +664,13 @@ func build_dialogue_packet(ctx: Dictionary) -> Dictionary:
 	if notable.size() > 2:
 		notable.resize(2)
 	packet["notable_objects"] = notable
+
+	# Known people — compact relationship list (name, trust, role if available)
+	var known_people: Array = []
+	for entity_name in relationships:
+		var rel: Dictionary = relationships[entity_name]
+		known_people.append({"name": entity_name, "trust": rel.get("trust", 0.5)})
+	packet["known_people"] = known_people
 
 	# Recent relevant events (cap 3) — prefer events relevant to the conversation target
 	var ranked: Array = _rank_events(tagged_events.duplicate(), ctx)

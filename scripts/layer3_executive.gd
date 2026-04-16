@@ -100,7 +100,7 @@ func get_target_position() -> Vector2:
 	return Vector2(2096, 800)
 
 func update_plan(hour: float, memory_summary: String, emotion_summary: String, inference_client: Node, object_summary: String = "") -> void:
-	# Check if it's time for a new plan (every 30 game-minutes)
+	## Legacy prose-based planning — kept for backward compatibility.
 	if _last_plan_hour < 0.0:
 		_last_plan_hour = hour
 	var diff: float = hour - _last_plan_hour
@@ -110,18 +110,39 @@ func update_plan(hour: float, memory_summary: String, emotion_summary: String, i
 		return
 	if _pending_plan:
 		return
-
 	_last_plan_hour = hour
+	if inference_client == null or not inference_client.is_server_available():
+		return
+	_pending_plan = true
+	var context: String = "Hour: %.1f, Location: %s" % [hour, get_current_chunk().get("location", "unknown")]
+	if object_summary != "":
+		context += "\n" + object_summary
+	inference_client.layer3_plan(_role, memory_summary, context, emotion_summary, _on_plan_result, _npc_name)
+
+func update_plan_from_packet(packet: Dictionary, inference_client: Node) -> void:
+	## Structured packet-based planning. Replaces prose assembly.
+	var hour: float = packet.get("hour", 0.0)
+	if _last_plan_hour < 0.0:
+		_last_plan_hour = hour
+	var diff: float = hour - _last_plan_hour
+	if diff < 0:
+		diff += 24.0
+	if diff < _plan_interval_minutes / 60.0:
+		return
+	if _pending_plan:
+		return
+	_last_plan_hour = hour
+
+	# If no replan needed, use default schedule (no LLM call)
+	var reason: String = packet.get("replan_reason", "none")
+	if reason == "none":
+		return
 
 	if inference_client == null or not inference_client.is_server_available():
 		return
 
 	_pending_plan = true
-	var context: String = "Hour: %.1f, Location: %s" % [hour, get_current_chunk().get("location", "unknown")]
-	# Enrich context with object knowledge
-	if object_summary != "":
-		context += "\n" + object_summary
-	inference_client.layer3_plan(_role, memory_summary, context, emotion_summary, _on_plan_result, _npc_name)
+	inference_client.layer3_plan_packet(packet, _on_plan_result)
 
 func _on_plan_result(success: bool, data: Dictionary) -> void:
 	_pending_plan = false
@@ -137,6 +158,7 @@ func _on_plan_result(success: bool, data: Dictionary) -> void:
 			current_chunk_index = 0
 
 func request_dialogue(emotion_summary: String, relationship_context: String, recent_events: Array, inference_client: Node, callback: Callable) -> void:
+	## Legacy prose-based dialogue request.
 	if _pending_dialogue:
 		return
 	if inference_client == null or not inference_client.is_server_available():
@@ -145,6 +167,17 @@ func request_dialogue(emotion_summary: String, relationship_context: String, rec
 	_pending_dialogue = true
 	_dialogue_callback = callback
 	inference_client.layer3_dialogue(_role, emotion_summary, relationship_context, recent_events, _on_dialogue_result, _npc_name)
+
+func request_dialogue_from_packet(packet: Dictionary, inference_client: Node, callback: Callable) -> void:
+	## Structured packet-based dialogue request.
+	if _pending_dialogue:
+		return
+	if inference_client == null or not inference_client.is_server_available():
+		callback.call(false, {"utterance": _get_default_greeting()})
+		return
+	_pending_dialogue = true
+	_dialogue_callback = callback
+	inference_client.layer3_dialogue_packet(packet, _on_dialogue_result)
 
 func _on_dialogue_result(success: bool, data: Dictionary) -> void:
 	_pending_dialogue = false

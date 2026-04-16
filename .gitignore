@@ -4,3 +4,13 @@ assets
 screenshots
 .godot
 *.import
+__pycache__/
+*.pyc
+logs/
+*.gguf
+*:Zone.Identifier
+*.zip
+resume.txt
+resume2.txt
+resume_mem.txt
+.codex/

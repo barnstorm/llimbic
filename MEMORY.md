@@ -326,3 +326,29 @@
 - `_emit_speech_stimuli()` emits from all NPCs within 200px of observer — ensures multiple hearing results with varying volume/clarity.
 - NPC nameplate overlap when clustered is a known cosmetic issue (note severity, not blocking).
 - Vision ray z-order renders on top of sprites — cosmetic, doesn't affect demo clarity.
+
+## Memory Packet Architecture (L3 Context Refactor)
+
+### Architecture
+- Memory system now has a retrieval/compression layer: three purpose-specific packet builders replace ad-hoc prose assembly.
+- Observations are structured: `{kind, subtype, text, source_type, confidence, position, direction, tags, time}`.
+- Tagged events carry `kind` (object_problem, speech, drive_override, player_interaction, etc.) and `confidence` fields for downstream filtering.
+- `build_plan_packet()`, `build_reflection_packet()`, `build_dialogue_packet()` — bounded, ranked, deduped output packets.
+- Replan decisions use explicit reason enum (frustration_spike, object_problem_detected, repeated_failure, etc.) — no substring matching.
+- Server-side `_v2` methods (`plan_v2`, `reflect_v2`, `dialogue_v2`, `chat_v2`, `converse_v2`) consume structured packets.
+- `build_preamble_from_packet()` in prompt_builder.py produces compact prompts from packet fields.
+
+### What worked
+- Adding `kind` and `confidence` as defaulted params to `add_tagged_event()` preserves all existing callers while enabling structured retrieval.
+- `_rank_events()` weighted scoring (salience 0.3, recency 0.25, confidence 0.2, role 0.15, chunk 0.1) produces stable, purpose-relevant orderings.
+- `_dedupe_events()` by kind+text prefix collapses repeated path blocks and object sightings effectively.
+- `_top_emotions()` extracts readable emotion names from the 27-dim vector for LLM context.
+- Social propagation now builds dialogue packets for both speaker and listener, eliminating hand-built context strings.
+
+### Technical details
+- Backward-compat: `add_observation(who, where, doing)` wraps structured observation internally. Legacy `description` field kept alongside `text` in tagged events.
+- Vector2 serialization: `layer3_plan_packet()` converts Vector2 fields to `[x, y]` arrays before JSON-RPC send.
+- Old prose methods (`get_memory_summary()`, `get_object_summary()`, `get_object_dialogue_context()`) retained for any remaining callers.
+- Old wire methods (`plan`, `reflect`, `dialogue`, `chat`, `converse`) retained on server for backward compat.
+- Planning now skips LLM entirely when `replan_reason == "none"` — returns default schedule immediately. Previously it always assembled a summary string even when not replanning.
+- Prompt length logging added to all `_v2` model methods: `log.info(f"PLAN_V2 prompt len={len(prompt)} chars")`.

@@ -7,26 +7,30 @@ Uses SmolLM2-1.7B-Instruct for:
 - Dialogue intent generation
 - Social reasoning (bounded)
 
-This model must NOT be used for continuous control, per-frame decisions,
-or low-level behavior. It runs at slow cadence and outputs structured JSON.
+Thought loop (generate_thought) delegates to CommandModel — a fine-tuned
+SmolLM3-3B served via llama-server, outputting <think> + adventure commands.
 """
 
 import torch
 import json
 import re
+import logging
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from persona_loader import load_all_personas, get_persona_by_role, get_persona_by_name, load_locations, get_fallback_dialogue
-from prompt_builder import build_preamble, build_listener_context
+from prompt_builder import build_preamble, build_preamble_from_packet, build_listener_context
+
+log = logging.getLogger("layer3")
 
 
 class Layer3Model:
     """Executive planning model using SmolLM2-1.7B-Instruct."""
 
-    def __init__(self, model_name: str = "HuggingFaceTB/SmolLM2-135M-Instruct",
-                 device: str = "cuda"):
+    def __init__(self, model_name: str = "HuggingFaceTB/SmolLM2-1.7B-Instruct",
+                 device: str = "cuda", command_model=None):
         self.device = device
         self.model_name = model_name
+        self._command_model = command_model
         print(f"Layer3: Loading {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -154,6 +158,76 @@ class Layer3Model:
 
         return {"agenda": list(default), "source": "default"}
 
+    def plan_from_packet(self, packet: dict) -> dict:
+        """
+        Structured packet-based planning. No substring heuristics.
+        Replan decision is explicit via packet['replan_reason'].
+        """
+        npc_name = packet.get("npc_name", "")
+        role = packet.get("role", "")
+        persona = self._get_persona(npc_name, role)
+        default = self._get_default_schedule(persona)
+
+        reason = packet.get("replan_reason", "none")
+        if reason == "none":
+            return {"agenda": list(default), "source": "default"}
+
+        locations_list = ", ".join(self.locations.keys())
+
+        preamble = build_preamble_from_packet(persona, packet)
+
+        # Build compact context from packet fields
+        context_parts = [f"Replan reason: {reason}."]
+
+        failures = packet.get("recent_failures", [])
+        if failures:
+            for f in failures[:2]:
+                context_parts.append(f"Failed: {f.get('purpose', '?')} at {f.get('location', '?')}")
+
+        prompt = (
+            f"{preamble}\n\n"
+            f"Plan your day given your current state.\n"
+            f"{' '.join(context_parts)}\n"
+            f"Available locations: {locations_list}\n\n"
+            f"Create a daily plan as a JSON array of objects. Each object has:\n"
+            f'- "location": one of the available locations\n'
+            f'- "duration": hours (0.5-5.0)\n'
+            f'- "priority": 0.0-1.0\n'
+            f'- "purpose": short description\n\n'
+            f"Output 4-6 plan chunks. Output ONLY the JSON array."
+        )
+
+        # Log prompt length for measurement
+        import logging
+        logging.getLogger("layer3").info(f"PLAN_V2 prompt len={len(prompt)} chars (reason={reason})")
+
+        raw = self._generate(prompt, max_new_tokens=300, temperature=0.3)
+
+        try:
+            json_match = re.search(r'\[[\s\S]*\]', raw)
+            if json_match:
+                agenda = json.loads(json_match.group())
+                valid = True
+                for chunk in agenda:
+                    if not isinstance(chunk, dict):
+                        valid = False
+                        break
+                    loc = chunk.get("location", "")
+                    if loc not in self.locations:
+                        valid = False
+                        break
+                    chunk.setdefault("duration", 1.0)
+                    chunk.setdefault("priority", 0.5)
+                    chunk.setdefault("purpose", "task")
+                    chunk["duration"] = max(0.5, min(5.0, float(chunk["duration"])))
+                    chunk["priority"] = max(0.0, min(1.0, float(chunk["priority"])))
+                if valid and len(agenda) >= 3:
+                    return {"agenda": agenda, "source": "llm"}
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        return {"agenda": list(default), "source": "default"}
+
     def reflect(self, memory_events: list[str], npc_name: str = "",
                 role: str = "") -> dict:
         """Compress memory events into reflections and surface concerns."""
@@ -173,6 +247,66 @@ class Layer3Model:
             f'- "concerns": array of 0-2 unresolved issues that would worry {name}\n\n'
             f"Output ONLY valid JSON."
         )
+
+        raw = self._generate(prompt, max_new_tokens=80, temperature=0.3)
+
+        try:
+            json_match = re.search(r'\{[\s\S]*\}', raw)
+            if json_match:
+                data = json.loads(json_match.group())
+                return {
+                    "reflections": [str(r)[:100] for r in data.get("reflections", [])],
+                    "concerns": [str(c)[:100] for c in data.get("concerns", [])],
+                }
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        return {"reflections": ["Things have been uneventful."], "concerns": []}
+
+    def reflect_from_packet(self, packet: dict) -> dict:
+        """Structured packet-based reflection."""
+        events = packet.get("events", [])
+        if not events:
+            return {"reflections": [], "concerns": []}
+
+        npc_name = packet.get("npc_name", "")
+        role = packet.get("role", "")
+        persona = self._get_persona(npc_name, role)
+        name = persona.get("name", "A townsperson")
+
+        # Build event lines from structured entries (already capped at 6)
+        event_lines = []
+        for e in events:
+            text = e.get("text", "")
+            kind = e.get("kind", "")
+            conf = e.get("confidence", 1.0)
+            suffix = f" [uncertain]" if conf < 0.5 else ""
+            event_lines.append(f"- {text}{suffix}")
+        events_str = "\n".join(event_lines)
+
+        # Include concerns if present
+        concerns_ctx = ""
+        current_concerns = packet.get("current_concerns", [])
+        if current_concerns:
+            concerns_ctx = f"\nCurrent worries: {'; '.join(current_concerns)}\n"
+
+        activity_ctx = ""
+        intention = packet.get("active_intention", "")
+        if intention:
+            activity_ctx = f"\nCurrently: {intention}\n"
+
+        import logging
+        prompt = (
+            f"Summarize these events from {name}'s perspective. "
+            f"{name} is a {persona.get('role', 'villager')}.{activity_ctx}{concerns_ctx}\n"
+            f"Events:\n{events_str}\n\n"
+            f"Output a JSON object with:\n"
+            f'- "reflections": array of 1-3 short summary sentences about what happened\n'
+            f'- "concerns": array of 0-2 unresolved issues that would worry {name}\n\n'
+            f"Output ONLY valid JSON."
+        )
+
+        logging.getLogger("layer3").info(f"REFLECT_V2 prompt len={len(prompt)} chars ({len(events)} events)")
 
         raw = self._generate(prompt, max_new_tokens=80, temperature=0.3)
 
@@ -218,7 +352,7 @@ class Layer3Model:
                 data = json.loads(json_match.group())
                 return {
                     "intent": str(data.get("intent", "greet"))[:20],
-                    "utterance": str(data.get("utterance", "Hello there."))[:100],
+                    "utterance": str(data.get("utterance", "Hello there."))[:300],
                 }
         except (json.JSONDecodeError, ValueError):
             pass
@@ -229,7 +363,7 @@ class Layer3Model:
     def chat(self, role: str, npc_name: str, emotion_summary: str,
              relationship_context: str, recent_events: list[str],
              conversation_history: list[dict], player_message: str) -> dict:
-        """Generate NPC reply to player's typed message."""
+        """Generate NPC reply using proper chat template turns."""
         persona = self._get_persona(npc_name, role)
         name = persona.get("name", npc_name)
 
@@ -238,25 +372,21 @@ class Layer3Model:
             recent_events=recent_events
         )
 
-        # Embed dialogue as narrative text (not user/assistant turns)
-        dialogue_lines = []
-        for msg in conversation_history[-4:]:
-            if msg["speaker"] == "Player":
-                dialogue_lines.append(f'Traveler: "{msg["text"]}"')
-            else:
-                dialogue_lines.append(f'{name}: "{msg["text"]}"')
-        dialogue_lines.append(f'Traveler: "{player_message}"')
-        dialogue_str = "\n".join(dialogue_lines)
-
-        prompt = (
-            f"{preamble}\n\n"
-            f"Relationship with this traveler: {relationship_context}\n\n"
-            f"Conversation so far:\n{dialogue_str}\n\n"
-            f"Write {name}'s next reply. Stay in character. One or two sentences max.\n\n"
-            f'Output ONLY a JSON object: {{"utterance": "what {name} says", "mood_shift": "one word"}}'
+        system_msg = (
+            f"{preamble}\n"
+            f"Relationship with this traveler: {relationship_context}\n"
+            f"Reply as {name} in one or two sentences. Stay in character. "
+            f"Never break character or mention being an AI."
         )
 
-        messages = [{"role": "user", "content": prompt}]
+        messages = [{"role": "system", "content": system_msg}]
+        for msg in conversation_history[-6:]:
+            if msg.get("speaker") == "Player":
+                messages.append({"role": "user", "content": msg.get("text", "")})
+            else:
+                messages.append({"role": "assistant", "content": msg.get("text", "")})
+        messages.append({"role": "user", "content": player_message})
+
         text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
@@ -264,8 +394,8 @@ class Layer3Model:
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=50,
-                temperature=0.5,
+                max_new_tokens=120,
+                temperature=0.25,
                 do_sample=True,
                 top_p=0.9,
                 repetition_penalty=1.2,
@@ -274,21 +404,10 @@ class Layer3Model:
         generated = outputs[0][inputs["input_ids"].shape[1]:]
         raw = self.tokenizer.decode(generated, skip_special_tokens=True).strip()
 
-        try:
-            json_match = re.search(r'\{[^{}]*\}', raw)
-            if json_match:
-                data = json.loads(json_match.group())
-                return {
-                    "utterance": str(data.get("utterance", "Hmm, I see."))[:150],
-                    "mood_shift": str(data.get("mood_shift", "neutral"))[:20],
-                }
-        except (json.JSONDecodeError, ValueError):
-            pass
+        utterance = self._clean_utterance(raw)
 
-        # Persona-driven fallback instead of generic boilerplate
-        fb = get_fallback_dialogue(role)
         return {
-            "utterance": fb.get("busy", f"Things have been busy at the {role.lower()}'s."),
+            "utterance": utterance,
             "mood_shift": "neutral",
         }
 
@@ -320,7 +439,7 @@ class Layer3Model:
             f"Output ONLY valid JSON."
         )
 
-        raw = self._generate(prompt, max_new_tokens=80, temperature=0.5)
+        raw = self._generate(prompt, max_new_tokens=80, temperature=0.25)
 
         try:
             json_match = re.search(r'\{[^{}]*\}', raw)
@@ -328,7 +447,7 @@ class Layer3Model:
                 data = json.loads(json_match.group())
                 return {
                     "intent": str(data.get("intent", "greet"))[:20],
-                    "utterance": str(data.get("utterance", "Good day."))[:100],
+                    "utterance": str(data.get("utterance", "Good day."))[:300],
                     "topic": str(data.get("topic", "small talk"))[:50],
                 }
         except (json.JSONDecodeError, ValueError):
@@ -340,6 +459,589 @@ class Layer3Model:
             "utterance": fb.get("gossip", f"Hello, {listener_persona.get('name', listener_role)}."),
             "topic": "small talk",
         }
+
+    def dialogue_from_packet(self, packet: dict) -> dict:
+        """Structured packet-based dialogue (player greeting)."""
+        import logging
+        npc_name = packet.get("npc_name", "")
+        role = packet.get("role", "")
+        persona = self._get_persona(npc_name, role)
+
+        preamble = build_preamble_from_packet(persona, packet)
+
+        trust = packet.get("trust", 0.5)
+        target_type = packet.get("target_type", "player")
+        trust_desc = "friendly" if trust > 0.6 else "neutral" if trust > 0.3 else "wary"
+
+        prompt = (
+            f"{preamble}\n\n"
+            f"A {'traveler' if target_type == 'player' else packet.get('target_name', 'someone')} just approached you.\n"
+            f"Your feeling toward them: {trust_desc} (trust {trust:.1f}).\n\n"
+            f"Output a JSON object with:\n"
+            f'"intent": one word (greet, warn, complain, thank, refuse, ask, inform, dismiss)\n'
+            f'"utterance": one short sentence (max 15 words) spoken as {persona.get("name", role)}\n\n'
+            f"Output ONLY valid JSON."
+        )
+
+        logging.getLogger("layer3").info(f"DIALOGUE_V2 prompt len={len(prompt)} chars")
+
+        raw = self._generate(prompt, max_new_tokens=60, temperature=0.4)
+
+        try:
+            json_match = re.search(r'\{[^{}]*\}', raw)
+            if json_match:
+                data = json.loads(json_match.group())
+                return {
+                    "intent": str(data.get("intent", "greet"))[:20],
+                    "utterance": str(data.get("utterance", "Hello there."))[:300],
+                }
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        fb = get_fallback_dialogue(role)
+        return {"intent": "greet", "utterance": fb.get("greeting", "Hello there.")}
+
+    def chat_from_packet(self, params: dict) -> dict:
+        """Structured packet-based chat (player conversation reply).
+
+        Uses proper chat template turns instead of embedding dialogue in one
+        message. The model generates the assistant turn directly — no JSON
+        wrapper needed, which eliminates role confusion on small models.
+        """
+        import logging
+        npc_name = params.get("npc_name", "")
+        role = params.get("role", "")
+        persona = self._get_persona(npc_name, role)
+        name = persona.get("name", npc_name)
+
+        preamble = build_preamble_from_packet(persona, params)
+
+        trust = params.get("trust", 0.5)
+        trust_desc = "friendly" if trust > 0.6 else "neutral" if trust > 0.3 else "wary"
+
+        conversation_history = params.get("conversation_history", [])
+        player_message = params.get("player_message", "")
+
+        # Build perception string
+        perception = params.get("perception", "You don't see much around you.")
+        current_thought = params.get("current_thought", "")
+
+        logging.getLogger("layer3").info(
+            f"CHAT_V2 [{npc_name}] perception='{perception[:120]}'"
+        )
+
+        # The chat model is just a mouth. It speaks from the being's current
+        # thoughts and awareness. No backstory — that triggers fantasy hallucination.
+        p = persona.get("personality", {})
+        speech = p.get("speech_style", "plain spoken")
+
+        # What the being currently knows/feels — this IS the grounding
+        state_parts = []
+        if current_thought:
+            state_parts.append(f"You are thinking: \"{current_thought}\"")
+        if perception:
+            state_parts.append(perception)
+        emotions = params.get("top_emotions", [])
+        if emotions:
+            emo_str = ", ".join(f"{e['name']}" for e in emotions[:3])
+            state_parts.append(f"You feel: {emo_str}")
+        state_str = "\n".join(state_parts) if state_parts else "You feel calm. You see a traveler nearby."
+
+        system_msg = (
+            f"You are {name}, {persona.get('role', 'villager')}. Speech: {speech}.\n"
+            f"{state_str}\n"
+            f"This is an outdoor town with paths and buildings. No indoor scenes.\n"
+            f"Reply in 1-3 sentences. Only mention what is listed above."
+        )
+
+        messages = [{"role": "system", "content": system_msg}]
+        for msg in conversation_history[-6:]:
+            if msg.get("speaker") == "Player":
+                messages.append({"role": "user", "content": msg.get("text", "")})
+            else:
+                messages.append({"role": "assistant", "content": msg.get("text", "")})
+        messages.append({"role": "user", "content": player_message})
+
+        text = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+        logging.getLogger("layer3").info(
+            f"CHAT_V2 prompt len={len(text)} chars, {len(messages)-1} turns"
+        )
+
+        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=120,
+                temperature=0.25,
+                do_sample=True,
+                top_p=0.9,
+                repetition_penalty=1.2,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+        generated = outputs[0][inputs["input_ids"].shape[1]:]
+        raw = self.tokenizer.decode(generated, skip_special_tokens=True).strip()
+
+        utterance = self._clean_utterance(raw)
+
+        return {
+            "utterance": utterance,
+            "mood_shift": "neutral",
+        }
+
+        fb = get_fallback_dialogue(role)
+        return {
+            "utterance": fb.get("busy", f"Things have been busy at the {role.lower()}'s."),
+            "mood_shift": "neutral",
+        }
+
+    def converse_from_packet(self, params: dict) -> dict:
+        """Structured packet-based NPC-to-NPC conversation."""
+        import logging
+        speaker = params.get("speaker", {})
+        listener = params.get("listener", {})
+
+        speaker_name = speaker.get("npc_name", "")
+        speaker_role = speaker.get("role", "")
+        listener_name = listener.get("npc_name", "")
+        listener_role = listener.get("role", "")
+
+        speaker_persona = self._get_persona(speaker_name, speaker_role)
+        listener_persona = self._get_persona(listener_name, listener_role)
+
+        preamble = build_preamble_from_packet(speaker_persona, speaker)
+        listener_desc = build_listener_context(listener_persona)
+
+        # Listener emotions for context
+        listener_emotions = listener.get("top_emotions", [])
+        listener_emo_str = ""
+        if listener_emotions:
+            listener_emo_str = ", ".join(f"{e['name']}" for e in listener_emotions[:2])
+
+        prompt = (
+            f"{preamble}\n\n"
+            f"You are talking to {listener_desc}"
+            f"{f', who seems: {listener_emo_str}' if listener_emo_str else ''}.\n\n"
+            f"Say ONE line referencing something specific from your situation or memories.\n"
+            f'BAD: "How are you?", "Good to see you", "Interesting..."\n'
+            f'GOOD: "That oven\'s been cold all morning", "The pantry\'s empty again"\n\n'
+            f"Output a JSON object with:\n"
+            f'"intent": one word (gossip, warn, greet, ask, complain, share, joke, inform)\n'
+            f'"utterance": one short sentence (max 15 words)\n'
+            f'"topic": what you are talking about in 5 words or less\n\n'
+            f"Output ONLY valid JSON."
+        )
+
+        logging.getLogger("layer3").info(f"CONVERSE_V2 prompt len={len(prompt)} chars")
+
+        raw = self._generate(prompt, max_new_tokens=80, temperature=0.25)
+
+        try:
+            json_match = re.search(r'\{[^{}]*\}', raw)
+            if json_match:
+                data = json.loads(json_match.group())
+                return {
+                    "intent": str(data.get("intent", "greet"))[:20],
+                    "utterance": str(data.get("utterance", "Good day."))[:300],
+                    "topic": str(data.get("topic", "small talk"))[:50],
+                }
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        fb = get_fallback_dialogue(speaker_role)
+        return {
+            "intent": "greet",
+            "utterance": fb.get("gossip", f"Hello, {listener_persona.get('name', listener_role)}."),
+            "topic": "small talk",
+        }
+
+    # ------------------------------------------------------------------
+    # Utterance cleanup
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _clean_utterance(raw: str, max_len: int = 300) -> str:
+        """Clean model output into a presentable utterance.
+        Takes first 1-2 sentences, strips JSON artifacts, caps length."""
+        # Take first non-empty line
+        utterance = ""
+        for line in raw.split("\n"):
+            line = line.strip()
+            if line:
+                utterance = line
+                break
+        if not utterance:
+            return "Hmm."
+        # Remove JSON wrapper if model accidentally produced one
+        if utterance.startswith("{"):
+            try:
+                data = json.loads(utterance)
+                utterance = str(data.get("utterance", utterance))
+            except (json.JSONDecodeError, ValueError):
+                pass
+        # Remove wrapping quotes
+        if len(utterance) > 2 and utterance[0] in ('"', "'") and utterance[-1] == utterance[0]:
+            utterance = utterance[1:-1]
+        # Try to end at a sentence boundary if over max_len
+        if len(utterance) > max_len:
+            # Find last sentence-ending punctuation before max_len
+            for i in range(max_len - 1, max(max_len - 80, 0), -1):
+                if utterance[i] in ".!?":
+                    utterance = utterance[:i + 1]
+                    break
+            else:
+                utterance = utterance[:max_len]
+        return utterance or "Hmm."
+
+    # ------------------------------------------------------------------
+    # Thought Loop: generate_thought + extract_beliefs
+    # ------------------------------------------------------------------
+
+    _THOUGHT_TOOLS = (
+        "Tools available (use one or more per response):\n"
+        "- think(\"text\") — express an internal thought or interpretation\n"
+        "- intend(\"goal\", \"location\", priority, \"reason\") — set a persistent goal (priority 0.0-1.0)\n"
+        "- believe(\"subject\", \"predicate\", \"object\", confidence) — record a belief (confidence 0.0-1.0)\n"
+        "- bias_action(\"action\", strength) — bias an action tendency (strength -1.0 to 1.0)\n"
+        "  Actions: approach, avoid, observe, help, flee\n"
+    )
+
+    _THOUGHT_TOOL_RE = re.compile(
+        r'(think|intend|believe|bias_action)\s*\(\s*'
+        r'(.*?)'
+        r'\)\s*',
+        re.DOTALL
+    )
+
+    def generate_thought(self, context: dict) -> dict:
+        """Generate thought + command via the adventure-command model.
+
+        Delegates to CommandModel (SmolLM3-3B GGUF via llama-server).
+        Falls back to the old THOUGHT/WANT/FEEL format if command model
+        is not available.
+
+        Returns: {
+            "thoughts": [str],
+            "intentions": [{goal, location, priority, reason}],
+            "beliefs": [{subject, predicate, object, confidence}],
+            "action_biases": {action_name: float},
+            "trigger_actions": [dict],
+            "command": str,
+            "target": dict | None,
+            "raw": str,
+        }
+        """
+        # --- New path: adventure-command model ---
+        if self._command_model is not None:
+            return self._command_model.generate_command(context)
+
+        # --- Legacy fallback: THOUGHT/WANT/FEEL with SmolLM2 ---
+        return self._legacy_generate_thought(context)
+
+    def _legacy_generate_thought(self, context: dict) -> dict:
+        """Legacy thought generation using THOUGHT/WANT/FEEL format."""
+        npc_name = context.get("npc_name", "")
+        role = context.get("role", "")
+        persona = self._get_persona(npc_name, role)
+
+        name = persona.get("name", npc_name)
+        p = persona.get("personality", {})
+        traits = ", ".join(p.get("traits", ["quiet"]))
+        backstory = p.get("backstory", "A resident of the town.")
+
+        drives = context.get("drives", {})
+        emo_vec = context.get("emotion_vector", [])
+
+        top_emo = []
+        if emo_vec and len(emo_vec) >= 27:
+            from emotion_coords import DIMENSIONS
+            indexed = sorted(
+                [(DIMENSIONS[i], emo_vec[i]) for i in range(min(len(emo_vec), len(DIMENSIONS)))],
+                key=lambda x: -x[1]
+            )
+            top_emo = [f"{n} ({v:.2f})" for n, v in indexed[:3] if v > 0.05]
+
+        emo_str = ", ".join(top_emo) if top_emo else "calm"
+
+        visible = context.get("visible", [])
+        perception_lines = []
+        for v in visible[:6]:
+            exposure = v.get("exposure", 1.0)
+            clarity = "clearly" if exposure > 0.7 else "partially" if exposure > 0.3 else "barely"
+            perception_lines.append(
+                f"  {v.get('name', 'someone')} — {clarity} visible, "
+                f"{v.get('distance', 0):.0f} tiles to the {v.get('direction', 'east')}"
+            )
+        if not perception_lines:
+            perception_lines.append("  No one nearby. Just the town around you.")
+
+        heard = context.get("heard", [])
+        if heard:
+            for h in heard[:3]:
+                src = h.get("source", "unknown")
+                text = h.get("text", "")
+                dist = h.get("distance", 0)
+                if text:
+                    perception_lines.append(f"  You hear {src} say: \"{text}\" ({dist:.0f} tiles away)")
+                else:
+                    perception_lines.append(f"  You hear sounds from {src} ({dist:.0f} tiles away)")
+
+        perception_str = "\n".join(perception_lines)
+
+        events = context.get("recent_events", [])
+        events_str = "; ".join(str(e) for e in events[-3:]) if events else "nothing notable"
+
+        recent_thoughts = context.get("recent_thoughts", [])
+        thoughts_str = ""
+        if recent_thoughts:
+            thoughts_str = "\nYour recent thoughts: " + "; ".join(recent_thoughts[-2:])
+
+        intentions_str = context.get("intentions_summary", "nothing in particular")
+        beliefs_str = context.get("beliefs_summary", "none")
+
+        hour = context.get("hour", 6.0)
+        hour_str = f"{int(hour)}:{int((hour % 1) * 60):02d}"
+        location = context.get("location", "unknown")
+
+        prompt = (
+            f"You are {name}, the {role}. Personality: {traits}.\n"
+            f"Background: {backstory}\n"
+            f"You feel: {emo_str}.\n"
+            f"Current goals: {intentions_str}.\n"
+            f"What you know: {beliefs_str}.\n"
+            f"{thoughts_str}\n\n"
+            f"It is {hour_str}. You are at the {location}.\n"
+            f"Energy {drives.get('energy', 80):.0f}/100, Hunger {drives.get('hunger', 20):.0f}/100, "
+            f"Social {drives.get('social_need', 30):.0f}/100.\n"
+            f"Doing: {context.get('current_action', 'idle')}.\n"
+            f"People you see:\n{perception_str}\n"
+            f"Recent: {events_str}\n\n"
+            f"This is an outdoor medieval town with paths and buildings. "
+            f"There is no indoor furniture, fire, food, or drinks visible.\n\n"
+            f"Write what {name} is thinking in 1-3 sentences. "
+            f"Only mention people listed above. "
+            f"Then say what {name} wants to do. Name a specific location from: "
+            f"{', '.join(self.locations.keys()) if self.locations else 'town'}\n\n"
+            f"THOUGHT: (first person, about people you see or how you feel)\n"
+            f"WANT: (go to LOCATION_NAME to do something, or nothing)\n"
+            f"FEEL: (one word)"
+        )
+
+        log.info(f"THOUGHT_LEGACY [{npc_name}] prompt len={len(prompt)} chars")
+
+        raw = self._generate(prompt, max_new_tokens=150, temperature=0.4)
+
+        return self._parse_simple_thought(raw, context)
+
+    def _parse_simple_thought(self, raw: str, context: dict) -> dict:
+        """Parse THOUGHT/WANT/FEEL format from the model output."""
+        result = {
+            "thoughts": [],
+            "intentions": [],
+            "beliefs": [],
+            "action_biases": {},
+            "raw": raw,
+        }
+
+        thought = ""
+        want = ""
+        feel = ""
+
+        for line in raw.strip().split("\n"):
+            line = line.strip()
+            upper = line.upper()
+            if upper.startswith("THOUGHT:"):
+                thought = line[len("THOUGHT:"):].strip().strip('"')
+            elif upper.startswith("WANT:"):
+                want = line[len("WANT:"):].strip().strip('"')
+            elif upper.startswith("FEEL:"):
+                feel = line[len("FEEL:"):].strip().strip('"').lower()
+
+        # If no structured output, use the whole thing as thought
+        if not thought:
+            cleaned = raw.strip().split("\n")[0].strip()
+            if cleaned:
+                thought = cleaned[:200]
+
+        if thought:
+            result["thoughts"].append(thought)
+
+        # Parse WANT into an intention if it names a location
+        if want and want.lower() != "nothing":
+            want_lower = want.lower()
+            # Try to extract a location from the want text
+            best_loc = ""
+            if self.locations:
+                for loc_name in self.locations:
+                    if loc_name.replace("_", " ") in want_lower or loc_name in want_lower:
+                        best_loc = loc_name
+                        break
+            if best_loc:
+                result["intentions"].append({
+                    "goal": want[:80],
+                    "location": best_loc,
+                    "priority": 0.6,
+                    "reason": thought[:60] if thought else "want",
+                })
+            # Derive action biases from want text
+            if any(w in want_lower for w in ["go", "walk", "head", "visit", "check"]):
+                result["action_biases"]["approach"] = 0.3
+            if any(w in want_lower for w in ["talk", "chat", "socialize", "greet"]):
+                result["action_biases"]["approach"] = 0.3
+                result["action_biases"]["help"] = 0.2
+            if any(w in want_lower for w in ["watch", "look", "observe", "investigate"]):
+                result["action_biases"]["observe"] = 0.3
+            if any(w in want_lower for w in ["avoid", "leave", "get away"]):
+                result["action_biases"]["avoid"] = 0.3
+
+        # Derive action biases from feel
+        if feel:
+            if feel in ("curious", "interested", "intrigued"):
+                result["action_biases"]["observe"] = result["action_biases"].get("observe", 0) + 0.2
+            elif feel in ("anxious", "nervous", "scared", "afraid"):
+                result["action_biases"]["flee"] = 0.2
+                result["action_biases"]["avoid"] = 0.2
+            elif feel in ("happy", "content", "warm", "friendly"):
+                result["action_biases"]["approach"] = result["action_biases"].get("approach", 0) + 0.1
+
+        return result
+
+    def _parse_thought_output(self, raw: str) -> dict:
+        """Parse tool calls from thought generation output."""
+        result = {
+            "thoughts": [],
+            "intentions": [],
+            "beliefs": [],
+            "action_biases": {},
+            "raw": raw,
+        }
+
+        # Try structured tool-call parsing
+        for match in self._THOUGHT_TOOL_RE.finditer(raw):
+            func_name = match.group(1)
+            args_str = match.group(2).strip()
+
+            try:
+                if func_name == "think":
+                    text = self._extract_string_arg(args_str)
+                    if text:
+                        result["thoughts"].append(text)
+
+                elif func_name == "intend":
+                    parts = self._split_args(args_str)
+                    if len(parts) >= 4:
+                        result["intentions"].append({
+                            "goal": self._unquote(parts[0]),
+                            "location": self._unquote(parts[1]),
+                            "priority": self._parse_float(parts[2], 0.5),
+                            "reason": self._unquote(parts[3]),
+                        })
+
+                elif func_name == "believe":
+                    parts = self._split_args(args_str)
+                    if len(parts) >= 4:
+                        result["beliefs"].append({
+                            "subject": self._unquote(parts[0]),
+                            "predicate": self._unquote(parts[1]),
+                            "object": self._unquote(parts[2]),
+                            "confidence": self._parse_float(parts[3], 0.5),
+                        })
+
+                elif func_name == "bias_action":
+                    parts = self._split_args(args_str)
+                    if len(parts) >= 2:
+                        action = self._unquote(parts[0])
+                        strength = self._parse_float(parts[1], 0.0)
+                        if action in ("approach", "avoid", "observe", "help", "flee"):
+                            result["action_biases"][action] = max(-1.0, min(1.0, strength))
+            except Exception:
+                continue
+
+        # Fallback: if no tool calls parsed, treat entire output as a thought
+        if not result["thoughts"] and not result["intentions"] and not result["beliefs"]:
+            cleaned = raw.strip()
+            if cleaned:
+                # Strip any accidental JSON or formatting
+                if cleaned.startswith('"') and cleaned.endswith('"'):
+                    cleaned = cleaned[1:-1]
+                result["thoughts"].append(cleaned[:200])
+
+        return result
+
+    @staticmethod
+    def _extract_string_arg(args_str: str) -> str:
+        """Extract a single string argument from args like '"hello world"'."""
+        args_str = args_str.strip()
+        if args_str.startswith('"') and args_str.endswith('"'):
+            return args_str[1:-1]
+        if args_str.startswith("'") and args_str.endswith("'"):
+            return args_str[1:-1]
+        return args_str
+
+    @staticmethod
+    def _split_args(args_str: str) -> list[str]:
+        """Split comma-separated args, respecting quoted strings."""
+        parts = []
+        current = ""
+        in_quote = False
+        quote_char = ""
+        for ch in args_str:
+            if ch in ('"', "'") and not in_quote:
+                in_quote = True
+                quote_char = ch
+                current += ch
+            elif ch == quote_char and in_quote:
+                in_quote = False
+                current += ch
+            elif ch == "," and not in_quote:
+                parts.append(current.strip())
+                current = ""
+            else:
+                current += ch
+        if current.strip():
+            parts.append(current.strip())
+        return parts
+
+    @staticmethod
+    def _unquote(s: str) -> str:
+        s = s.strip()
+        if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+            return s[1:-1]
+        return s
+
+    @staticmethod
+    def _parse_float(s: str, default: float) -> float:
+        try:
+            return float(s.strip().strip('"').strip("'"))
+        except (ValueError, AttributeError):
+            return default
+
+    def extract_beliefs_from_conversation(self, npc_name: str, role: str,
+                                           utterance: str, speaker_name: str) -> dict:
+        """Extract beliefs from something an NPC heard during conversation.
+
+        Returns: {
+            "beliefs": [{subject, predicate, object, confidence}],
+        }
+        """
+        persona = self._get_persona(npc_name, role)
+        name = persona.get("name", npc_name)
+
+        prompt = (
+            f"You are {name}, the {persona.get('role', 'villager')}.\n"
+            f"{speaker_name} just said: \"{utterance}\"\n\n"
+            f"Extract any factual claims as beliefs. Use:\n"
+            f"- believe(\"subject\", \"predicate\", \"object\", confidence)\n"
+            f"  confidence is 0.0-1.0 based on how much you trust {speaker_name}.\n\n"
+            f"If there are no factual claims, output nothing.\n"
+            f"Output ONLY tool calls, one per line."
+        )
+
+        raw = self._generate(prompt, max_new_tokens=100, temperature=0.2)
+        parsed = self._parse_thought_output(raw)
+        return {"beliefs": parsed["beliefs"]}
 
     def get_location_tile(self, location_name: str) -> list[int] | None:
         """Get tile coordinates for a named location."""

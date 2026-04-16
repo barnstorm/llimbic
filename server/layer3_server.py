@@ -20,14 +20,20 @@ import uvicorn
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [L3] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("layer3")
+_fh = logging.FileHandler("/tmp/burg_l3.log", mode="w")
+_fh.setFormatter(logging.Formatter("%(asctime)s [L3] %(message)s", datefmt="%H:%M:%S"))
+log.addHandler(_fh)
 
 _executor = ThreadPoolExecutor(max_workers=4)
 sys.path.insert(0, os.path.dirname(__file__))
 
 from layer3_model import Layer3Model
+from command_model import CommandModel
+from thought_loop import ThoughtLoop
 
 app = FastAPI(title="Burg Layer 3 Server", version="1.0")
 model: Layer3Model | None = None
+thought_loop: ThoughtLoop | None = None
 startup_time: float = 0
 
 
@@ -77,6 +83,19 @@ class ChatResponse(BaseModel):
     utterance: str
     mood_shift: str
 
+class PlanPacketRequest(BaseModel):
+    npc_name: str
+    role: str
+    hour: float = 0.0
+    current_location: str = ""
+    current_chunk: dict = {}
+    replan_reason: str = "none"
+    top_emotions: list[dict] = []
+    concerns: list[str] = []
+    problem_objects: list[dict] = []
+    recent_failures: list[dict] = []
+    salient_events: list[dict] = []
+
 class ConverseRequest(BaseModel):
     speaker_role: str
     speaker_name: str = ""
@@ -103,11 +122,32 @@ class HealthResponse(BaseModel):
 
 @app.on_event("startup")
 async def load_model():
-    global model, startup_time
+    global model, thought_loop, startup_time
     startup_time = time.time()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = Layer3Model(model_name="HuggingFaceTB/SmolLM2-1.7B-Instruct", device=device)
-    print("Layer 3 server ready.")
+    # Command model: SmolLM3-3B fine-tuned for adventure-command thought loop
+    cmd_model = None
+    try:
+        cmd_model = CommandModel()
+        print("Layer 3 server: CommandModel (SmolLM3-3B) loaded for thought loop")
+    except FileNotFoundError as e:
+        print(f"Layer 3 server: CommandModel not available ({e}), using legacy thought generation")
+
+    model = Layer3Model(model_name="HuggingFaceTB/SmolLM2-1.7B-Instruct", device=device,
+                        command_model=cmd_model)
+
+    # Try to load L2 model for thought loop (limbic coloring of thoughts)
+    l2_model = None
+    try:
+        from layer2_model import Layer2Model
+        l2_model = Layer2Model(device=device)
+        print("Layer 3 server: L2 limbic model loaded for thought loop")
+    except Exception as e:
+        print(f"Layer 3 server: L2 model not available for thought loop ({e}), "
+              f"thought coloring will be skipped")
+
+    thought_loop = ThoughtLoop(l2_model=l2_model, l3_model=model)
+    print("Layer 3 server ready (thought loop initialized).")
 
 
 async def _run(fn, *args):
@@ -186,6 +226,12 @@ async def converse(req: ConverseRequest):
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     print("WebSocket client connected")
+
+    # Don't set thought loop WS here — wait until client identifies itself
+    # by sending a register_npc or state_update message (prevents debug
+    # queries from stealing the push channel).
+    is_game_client = False
+
     state = {"open": True}
     pending_tasks: set = set()
 
@@ -208,6 +254,8 @@ async def websocket_endpoint(ws: WebSocket):
                 log.info(f"WS CHAT [{params.get('npc_name','')}] player: \"{params.get('player_message','')}\" -> \"{result.get('utterance','')}\" [{elapsed:.1f}s]")
             elif method == "plan":
                 log.info(f"WS PLAN [{params.get('role','')}] -> {len(result.get('agenda',[]))} chunks ({result.get('source','?')}) [{elapsed:.1f}s]")
+            elif method == "plan_v2":
+                log.info(f"WS PLAN_V2 [{params.get('npc_name','')}] reason={params.get('replan_reason','')} -> {len(result.get('agenda',[]))} chunks ({result.get('source','?')}) [{elapsed:.1f}s]")
             elif method == "dialogue":
                 log.info(f"WS DIALOGUE [{params.get('role','')}] -> \"{result.get('utterance','')}\" [{elapsed:.1f}s]")
             elif method == "converse":
@@ -229,6 +277,13 @@ async def websocket_endpoint(ws: WebSocket):
             method = msg.get("method", "")
             params = msg.get("params", {})
             log.info(f"WS <- {method} ({req_id})")
+
+            # Identify game client by its first game-specific message
+            if not is_game_client and method in ("register_npc", "state_update"):
+                is_game_client = True
+                if thought_loop is not None:
+                    thought_loop.set_websocket(ws)
+                    print("WebSocket identified as game client — push channel set")
 
             task = asyncio.create_task(handle(req_id, method, params))
             pending_tasks.add(task)
@@ -252,15 +307,29 @@ async def _dispatch(method: str, params: dict) -> dict:
                            params.get("current_context", ""),
                            params.get("emotion_summary", ""),
                            params.get("npc_name", ""))
+    elif method == "plan_v2":
+        return await _run(model.plan_from_packet, params)
     elif method == "reflect":
         return await _run(model.reflect, params.get("memory_events", []),
                            params.get("npc_name", ""), params.get("role", ""))
+    elif method == "reflect_v2":
+        return await _run(model.reflect_from_packet, params)
     elif method == "dialogue":
         return await _run(model.dialogue, params.get("role", ""),
                            params.get("emotion_summary", ""),
                            params.get("relationship_context", ""),
                            params.get("recent_events", []),
                            params.get("npc_name", ""))
+    elif method == "dialogue_v2":
+        return await _run(model.dialogue_from_packet, params)
+    elif method == "chat_v2":
+        def _do_chat_v2():
+            return model.chat_from_packet(params)
+        return await _run(_do_chat_v2)
+    elif method == "converse_v2":
+        def _do_converse_v2():
+            return model.converse_from_packet(params)
+        return await _run(_do_converse_v2)
     elif method == "chat":
         def _do():
             return model.chat(params.get("role", ""), params.get("npc_name", ""),
@@ -281,6 +350,83 @@ async def _dispatch(method: str, params: dict) -> dict:
                                    params.get("speaker_name", ""),
                                    params.get("listener_name", ""))
         return await _run(_do)
+
+    # --- Thought loop methods ---
+    elif method == "register_npc":
+        if thought_loop is not None:
+            npc_name = params.get("npc_name", "")
+            persona = params.get("persona", {})
+            log.info(f"[THOUGHT LOOP] Registering NPC: {npc_name}")
+            await thought_loop.register_npc(npc_name, persona)
+            return {"ok": True, "npc": npc_name}
+        print("[THOUGHT LOOP] register_npc called but thought_loop is None!")
+        return {"error": "thought loop not initialized"}
+
+    elif method == "state_update":
+        if thought_loop is not None:
+            npc_name = params.get("npc_name", "")
+            await thought_loop.receive_snapshot(npc_name, params)
+            return {"ok": True}
+        return {"ok": True}
+
+    elif method == "extract_beliefs":
+        if thought_loop is not None:
+            await thought_loop.extract_conversation_beliefs(
+                params.get("listener_name", ""),
+                params.get("listener_role", ""),
+                params.get("utterance", ""),
+                params.get("speaker_name", ""),
+            )
+            return {"ok": True}
+        return {"ok": True}
+
+    # --- Human control methods ---
+
+    elif method == "inject_commands":
+        # Inject adventure commands into an NPC (from human controller)
+        if thought_loop is not None:
+            npc_name = params.get("npc_name", "")
+            commands = params.get("commands", [])
+            if npc_name and commands:
+                await thought_loop._push_commands(npc_name, commands)
+                log.info(f"HUMAN_CMD [{npc_name}] {len(commands)} commands injected")
+                return {"ok": True, "npc": npc_name}
+        return {"error": "no thought loop or missing params"}
+
+    elif method == "get_npc_state":
+        # Return current NPC state for human control display
+        if thought_loop is not None:
+            npc_name = params.get("npc_name", "")
+            state = thought_loop.npc_states.get(npc_name)
+            if state:
+                snap = state.last_snapshot
+                return {
+                    "npc_name": npc_name,
+                    "role": state.role,
+                    "location": snap.get("location", "unknown"),
+                    "current_action": snap.get("current_action", "idle"),
+                    "drives": snap.get("drives", {}),
+                    "emotion_vector": state.emotion_vector,
+                    "visible": snap.get("visible", []),
+                    "visible_objects": snap.get("visible_objects", []),
+                    "heard": snap.get("heard", []),
+                    "recent_events": snap.get("recent_events", []),
+                    "active_intentions": [
+                        {"goal": i.get("goal", ""), "location": i.get("location", ""),
+                         "priority": i.get("priority", 0)}
+                        for i in state.active_intentions
+                    ],
+                    "recent_thoughts": state.get_recent_thoughts(3),
+                }
+            return {"error": f"NPC not found: {npc_name}"}
+        return {"error": "no thought loop"}
+
+    elif method == "list_npcs":
+        # List all registered NPCs
+        if thought_loop is not None:
+            return {"npcs": list(thought_loop.npc_states.keys())}
+        return {"npcs": []}
+
     else:
         return {"error": f"unknown method: {method}"}
 

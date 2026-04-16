@@ -1,9 +1,9 @@
 """
-Layer 2 Inference Server — Fast projection/modulation
+Layer 2 Inference Server — Limbic System
 
-Runs SmolLM2-135M-Instruct on localhost:8420.
-High-frequency, low-latency calls for emotion vector projection
-and behavioral modulation. Designed for ~4 calls/sec from 8 NPCs.
+Runs TinyLlama-1.1B + LoRA on localhost:8420.
+Medium-cadence calls (~every 2s per NPC) for emotion projection,
+attention focus, and motivational drive computation.
 """
 
 import sys
@@ -14,6 +14,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
@@ -21,6 +22,9 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [L2] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("layer2")
+_fh = logging.FileHandler("/tmp/burg_l2.log", mode="w")
+_fh.setFormatter(logging.Formatter("%(asctime)s [L2] %(message)s", datefmt="%H:%M:%S"))
+log.addHandler(_fh)
 
 _executor = ThreadPoolExecutor(max_workers=2)
 sys.path.insert(0, os.path.dirname(__file__))
@@ -43,6 +47,9 @@ class ProjectResponse(BaseModel):
     summary: str
     top_dimensions: list[dict]
     valence: dict
+    emotions: dict = {}
+    attention: list[str] = []
+    drives: dict = {}
 
 class ModulateRequest(BaseModel):
     directives: str
@@ -67,13 +74,13 @@ async def load_model():
     global model, startup_time
     startup_time = time.time()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = Layer2Model(model_name="HuggingFaceTB/SmolLM2-135M-Instruct", device=device)
+    model = Layer2Model(device=device)
     # Warm up
     _ = model.project(
         {"energy": 50, "hunger": 30, "frustration": 0.1, "social_need": 40, "safety": 80, "task_momentum": 0.3},
         [], default_vector()
     )
-    print("Layer 2 server ready.")
+    print("Layer 2 limbic server ready.")
 
 
 async def _run(fn, *args):
@@ -98,11 +105,16 @@ async def project(req: ProjectRequest):
     top = top_dimensions(result["vector"], 5)
     val = valence_summary(result["vector"])
     top_str = ", ".join(f"{d['name']}={d['value']:.2f}" for d in [{"name": n, "value": round(v, 3)} for n, v in top][:3])
-    log.info(f"PROJECT e={req.layer1_state.get('energy',0):.0f} h={req.layer1_state.get('hunger',0):.0f} f={req.layer1_state.get('frustration',0):.2f} -> {top_str} [{time.time()-t0:.2f}s]")
+    emo_str = ", ".join(f"{k}={v:.2f}" for k, v in list(result.get("emotions", {}).items())[:3])
+    att_str = ", ".join(result.get("attention", [])[:3])
+    log.info(f"PROJECT e={req.layer1_state.get('energy',0):.0f} f={req.layer1_state.get('frustration',0):.2f} -> {emo_str} attn=[{att_str}] [{time.time()-t0:.2f}s]")
     return ProjectResponse(
         vector=result["vector"], summary=result["summary"],
         top_dimensions=[{"name": n, "value": round(v, 3)} for n, v in top],
         valence=val,
+        emotions=result.get("emotions", {}),
+        attention=result.get("attention", []),
+        drives=result.get("drives", {}),
     )
 
 @app.post("/layer2/modulate", response_model=ModulateResponse)
@@ -189,6 +201,9 @@ async def _ws_dispatch(method: str, params: dict) -> dict:
             "summary": result["summary"],
             "top_dimensions": [{"name": n, "value": round(v, 3)} for n, v in top],
             "valence": val,
+            "emotions": result.get("emotions", {}),
+            "attention": result.get("attention", []),
+            "drives": result.get("drives", {}),
         }
     elif method == "modulate":
         directives = params.get("directives", "")
