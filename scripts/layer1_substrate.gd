@@ -310,6 +310,11 @@ func start_task() -> void:
 	if _network:
 		_network.set_activation("task_momentum", 10.0)  # 0.1 in 0-1 scale = 10 in 0-100
 
+func get_vagal_state() -> Dictionary:
+	if _network:
+		return _network.get_vagal_state()
+	return {"ventral": 50.0, "sympathetic": 20.0, "dorsal": 5.0}
+
 func get_state_dict() -> Dictionary:
 	return {
 		"energy": energy,
@@ -324,7 +329,8 @@ func get_state_dict() -> Dictionary:
 		"avoid": avoid,
 		"observe": observe,
 		"help": help,
-		"flee": flee
+		"flee": flee,
+		"vagal_state": get_vagal_state(),
 	}
 
 func get_somatic_tags() -> Array:

@@ -130,6 +130,56 @@ func get_location_comfort(location_name: String) -> float:
 		return place_familiarity[location_name]["comfort"]
 	return 0.3  # unfamiliar default
 
+func get_place_threat_level() -> float:
+	## Returns threat level (0-1) for the most recently visited location.
+	## Based on negative tagged events at this location.
+	# Count recent threat-tagged events (flee, danger, blocked, threat)
+	var threat_count: int = 0
+	for event in tagged_events:
+		if event is not Dictionary:
+			continue
+		var tags: Array = event.get("tags", [])
+		for tag in tags:
+			if tag in ["flee", "danger", "threat", "blocked"]:
+				threat_count += 1
+				break
+	return clampf(float(threat_count) * 0.15, 0.0, 1.0)
+
+func get_place_comfort_level() -> float:
+	## Returns comfort level for the current location from familiarity.
+	## Used by somatic stream for positive place conditioning.
+	var best_comfort: float = 0.3
+	for loc in place_familiarity:
+		var comfort: float = place_familiarity[loc]["comfort"]
+		if comfort > best_comfort:
+			best_comfort = comfort
+	return best_comfort
+
+func get_entity_threat_levels() -> Dictionary:
+	## Returns {entity_name: threat_level} for entities with low trust or threat history.
+	## Used by somatic stream for entity-specific fear conditioning (short circuit).
+	var threats: Dictionary = {}
+	for entity_name in relationships:
+		var trust: float = relationships[entity_name].get("trust", 0.5)
+		if trust < 0.4:
+			# Low trust = potential threat. Invert: trust 0.0 → threat 0.6, trust 0.3 → threat 0.15
+			threats[entity_name] = clampf((0.4 - trust) * 1.5, 0.0, 1.0)
+	# Also check tagged events for entity-specific threat
+	for event in tagged_events:
+		if event is not Dictionary:
+			continue
+		var source: String = event.get("source", "")
+		if source == "" or source == "self" or source == "direct":
+			continue
+		var tags: Array = event.get("tags", [])
+		for tag in tags:
+			if tag in ["flee", "danger", "threat"]:
+				if not threats.has(source):
+					threats[source] = 0.0
+				threats[source] = clampf(threats[source] + 0.2, 0.0, 1.0)
+				break
+	return threats
+
 func add_concern(concern: String) -> void:
 	concerns.append(concern)
 	if concerns.size() > MAX_CONCERNS:

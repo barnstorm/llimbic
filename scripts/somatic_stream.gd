@@ -194,6 +194,19 @@ func _apply_conditioning() -> void:
 		_nudge("q_settled", comfort_memory * 2.0)
 		_nudge("q_warm", comfort_memory * 1.5)
 
+	# Entity-specific threat conditioning (the short circuit)
+	# When a threatening entity is nearby, the body reacts before the mind decides.
+	# These phantom activations feed into vagal_sympathetic via quality→vagal connections.
+	if _memory.has_method("get_entity_threat_levels"):
+		var entity_threats: Dictionary = _memory.get_entity_threat_levels()
+		for entity_name in entity_threats:
+			var threat_val: float = entity_threats[entity_name]
+			if threat_val > 0.15:
+				_nudge("q_prickling", threat_val * 4.0)
+				_nudge("q_tight", threat_val * 3.0)
+				_nudge("q_coiled", threat_val * 2.0)
+				_nudge("q_churning", threat_val * 1.5)
+
 # =========================================================================
 # DEBUG
 # =========================================================================

@@ -54,12 +54,25 @@ const ACTION_BASELINES: Dictionary = {
 	"action_flee": 0.0,
 }
 
+# Vagal neuron baselines (floors — a being can always potentially feel safe)
+const VAGAL_BASELINES: Dictionary = {
+	"vagal_ventral": 10.0,
+	"vagal_sympathetic": 5.0,
+	"vagal_dorsal": 2.0,
+}
+
 # Quality neuron emission threshold
 const QUALITY_EMIT_THRESHOLD: float = 40.0
 
 # Quality neurogenesis: co-activation tracking
 var _quality_coactivation: Dictionary = {}  # "q1:q2" -> {count: int, last_tick: int}
 const QUALITY_COACT_THRESHOLD: int = 8  # co-activations before spawning compound
+
+# Vagal neurogenesis state
+var vagal_count: int = 0
+const MAX_VAGAL: int = 8
+var _vagal_coactivation: Dictionary = {}  # "vagal_id:action_id" -> sustained_seconds
+const VAGAL_COACT_SPAWN_THRESHOLD: float = 4.0  # seconds of sustained co-activation
 const QUALITY_COACT_WINDOW: int = 30000  # 30s window for co-activation counting
 var _compound_quality_count: int = 0
 const MAX_COMPOUND_QUALITIES: int = 16
@@ -115,6 +128,11 @@ func setup_default_network(persona: Dictionary) -> void:
 
 	# --- Arousal drive (master gain) ---
 	_add_neuron("drive_arousal", "drive", 30.0, false, "", "Arousal")
+
+	# --- Vagal neurons (autonomic envelope — three competing states) ---
+	_add_neuron("vagal_ventral", "vagal", 60.0, false, "", "VentroVagal")       # safe/social (default dominant)
+	_add_neuron("vagal_sympathetic", "vagal", 20.0, false, "", "Sympathetic")   # fight/flight
+	_add_neuron("vagal_dorsal", "vagal", 5.0, false, "", "DorsalVagal")         # freeze/shutdown
 
 	# --- Quality neurons (somatic tag emitters) ---
 	_seed_quality_neurons()
@@ -305,9 +323,85 @@ func _seed_quality_connections() -> void:
 	_add_connection("sense_loc_familiarity", "drive_arousal", -0.02)
 	_add_connection("task_frustration", "drive_arousal", 0.03)
 
+func _seed_vagal_connections() -> void:
+	## Wire the three vagal neurons into the network.
+	## These are learnable connections — Hebbian co-activation will reshape them.
+	## Two beings with different experiences will develop different vagal responses.
+
+	# --- Inputs: what activates each vagal state ---
+	# Ventral (safe/social): social presence, familiarity, home
+	# Note: safety drives ventral WEAKLY — safe doesn't mean calm, calm means calm.
+	# Ventral requires active social/environmental signals, not just absence of threat.
+	_add_connection("sense_nearby_npcs", "vagal_ventral", 0.06)
+	_add_connection("sense_loc_familiarity", "vagal_ventral", 0.04)
+	_add_connection("sense_at_home", "vagal_ventral", 0.05)
+	_add_connection("drive_safety", "vagal_ventral", 0.03)  # weak — safety helps but doesn't drive
+
+	# Sympathetic (fight/flight): arousal, frustration, active fleeing
+	# These need to be strong enough to overcome ventral's inhibition
+	_add_connection("drive_arousal", "vagal_sympathetic", 0.07)
+	_add_connection("task_frustration", "vagal_sympathetic", 0.06)
+	_add_connection("action_flee", "vagal_sympathetic", 0.08)
+	# Low safety feeds sympathetic (the actual threat signal)
+	# Using frustration and flee as proxies since drive_safety is high=safe
+
+	# Dorsal (freeze/shutdown): sustained sympathetic, extreme stress
+	# Dorsal is activated by sympathetic overflow — it's the collapse after fight/flight fails.
+	# When sympathetic is low (threat resolved), dorsal has no positive inputs and decays.
+	_add_connection("task_frustration", "vagal_dorsal", 0.04)
+	_add_connection("vagal_sympathetic", "vagal_dorsal", 0.05)  # prolonged mobilization → collapse
+
+	# --- Mutual inhibition (asymmetric = hierarchy + hysteresis) ---
+	# Ventral is polite — easy to dislodge (newest system fails first)
+	_add_connection("vagal_ventral", "vagal_sympathetic", -0.04)
+	_add_connection("vagal_ventral", "vagal_dorsal", -0.05)
+	# Sympathetic is sticky — harder to calm down than to alarm
+	_add_connection("vagal_sympathetic", "vagal_ventral", -0.12)
+	_add_connection("vagal_sympathetic", "vagal_dorsal", -0.02)  # weak — sympathetic CAN exhaust into dorsal
+	# Dorsal is heavy — can't skip straight to safe, but DOES suppress sympathetic
+	# (you can't fight when you've collapsed — that's the shutdown)
+	_add_connection("vagal_dorsal", "vagal_ventral", -0.15)
+	_add_connection("vagal_dorsal", "vagal_sympathetic", -0.08)
+
+	# --- Output to action neurons (direct, learnable) ---
+	# Ventral enables social behavior
+	_add_connection("vagal_ventral", "action_approach", 0.05)
+	_add_connection("vagal_ventral", "action_help", 0.06)
+	_add_connection("vagal_ventral", "action_observe", 0.03)
+	_add_connection("vagal_ventral", "action_flee", -0.04)
+	# Sympathetic enables mobilization
+	_add_connection("vagal_sympathetic", "action_flee", 0.06)
+	_add_connection("vagal_sympathetic", "action_approach", 0.03)  # fight option
+	_add_connection("vagal_sympathetic", "action_help", -0.05)
+	_add_connection("vagal_sympathetic", "action_observe", -0.03)  # tunnel vision
+	# Dorsal suppresses everything except passive avoidance
+	_add_connection("vagal_dorsal", "action_approach", -0.06)
+	_add_connection("vagal_dorsal", "action_help", -0.06)
+	_add_connection("vagal_dorsal", "action_observe", -0.04)
+	_add_connection("vagal_dorsal", "action_flee", -0.04)  # can't even flee
+	_add_connection("vagal_dorsal", "action_avoid", 0.04)  # passive only
+
+	# --- Output to quality neurons (vagal colors body sensation) ---
+	# Ventral → comfort sensations
+	_add_connection("vagal_ventral", "q_settled", 0.04)
+	_add_connection("vagal_ventral", "q_warm", 0.03)
+	_add_connection("vagal_ventral", "q_open", 0.04)
+	# Sympathetic → threat sensations
+	_add_connection("vagal_sympathetic", "q_pounding", 0.05)
+	_add_connection("vagal_sympathetic", "q_coiled", 0.04)
+	_add_connection("vagal_sympathetic", "q_tight", 0.04)
+	# Dorsal → shutdown sensations
+	_add_connection("vagal_dorsal", "q_numb", 0.06)
+	_add_connection("vagal_dorsal", "q_heavy", 0.05)
+	_add_connection("vagal_dorsal", "q_foggy", 0.04)
+	_add_connection("vagal_dorsal", "q_cold", 0.04)
+
 func _seed_connections(role: String) -> void:
 	# --- Quality neuron connections ---
 	_seed_quality_connections()
+
+	# --- Vagal neuron connections ---
+	_seed_vagal_connections()
 
 	# --- Sensory -> Drive (homeostatic) ---
 	_add_connection("sense_at_home", "drive_energy", 0.3)    # energy recovers at home
@@ -369,6 +463,23 @@ func get_activation(id: String) -> float:
 		return 0.0
 	return n["activation"]
 
+func get_vagal_state() -> Dictionary:
+	return {
+		"ventral": get_activation("vagal_ventral"),
+		"sympathetic": get_activation("vagal_sympathetic"),
+		"dorsal": get_activation("vagal_dorsal"),
+	}
+
+func get_dominant_vagal() -> String:
+	var v: float = get_activation("vagal_ventral")
+	var s: float = get_activation("vagal_sympathetic")
+	var d: float = get_activation("vagal_dorsal")
+	if d > s and d > v:
+		return "dorsal"
+	if s > v:
+		return "sympathetic"
+	return "ventral"
+
 func set_activation(id: String, value: float) -> void:
 	var n: Dictionary = _neuron_map.get(id, {})
 	if n.is_empty():
@@ -413,6 +524,12 @@ func propagate(delta: float) -> void:
 		var n: Dictionary = _neuron_map.get(id, {})
 		if not n.is_empty() and n["activation"] < ACTION_BASELINES[id]:
 			n["activation"] = ACTION_BASELINES[id]
+
+	# Enforce vagal neuron baselines
+	for id in VAGAL_BASELINES:
+		var n: Dictionary = _neuron_map.get(id, {})
+		if not n.is_empty() and n["activation"] < VAGAL_BASELINES[id]:
+			n["activation"] = VAGAL_BASELINES[id]
 
 # =========================================================================
 # HEBBIAN LEARNING — called every ~0.5s
@@ -521,12 +638,14 @@ func check_neurogenesis() -> void:
 	if _dynamic_count >= MAX_DYNAMIC:
 		return
 
-	# Priority: stress > novelty > reward
+	# Priority: stress > novelty > reward > vagal
 	if _check_stress_neurogenesis():
 		return
 	if _check_novelty_neurogenesis():
 		return
-	_check_reward_neurogenesis()
+	if _check_reward_neurogenesis():
+		return
+	_check_vagal_neurogenesis()
 
 func _check_stress_neurogenesis() -> bool:
 	if stress_count >= MAX_STRESS:
@@ -677,6 +796,131 @@ func _strengthen_existing(category: String) -> void:
 	for neuron in neurons:
 		if neuron["category"] == category:
 			neuron["activation"] = clampf(neuron["activation"] + 10.0, 0.0, 100.0)
+
+func _check_vagal_neurogenesis() -> bool:
+	## Spawn vagal-action bridge neurons from sustained co-activation.
+	## A being that fights when scared grows a "fight" neuron.
+	## A being that freezes grows a "shutdown" neuron.
+	## This is how beings individuate their threat responses.
+	if vagal_count >= MAX_VAGAL:
+		return false
+
+	var dominant: String = get_dominant_vagal()
+	var dom_act: float = get_activation("vagal_" + dominant if not dominant.begins_with("vagal_") else dominant)
+	# Need to look up properly
+	match dominant:
+		"ventral":
+			dom_act = get_activation("vagal_ventral")
+		"sympathetic":
+			dom_act = get_activation("vagal_sympathetic")
+		"dorsal":
+			dom_act = get_activation("vagal_dorsal")
+
+	if dom_act < 60.0:
+		return false  # vagal state not strong enough
+
+	# Find co-active action neurons
+	var action_ids: Array = ["action_approach", "action_avoid", "action_observe", "action_help", "action_flee"]
+	for action_id in action_ids:
+		var action_act: float = get_activation(action_id)
+		if action_act < 60.0:
+			continue
+
+		var key: String = dominant + ":" + action_id
+		if not _vagal_coactivation.has(key):
+			_vagal_coactivation[key] = 0.0
+		_vagal_coactivation[key] += 0.033  # ~2s neurogenesis interval, accumulate
+
+		if _vagal_coactivation[key] >= VAGAL_COACT_SPAWN_THRESHOLD:
+			_spawn_vagal_neuron(dominant, action_id)
+			_vagal_coactivation.erase(key)
+			return true
+
+	# Decay tracking for pairs that stopped co-activating
+	var to_erase: Array = []
+	for key in _vagal_coactivation:
+		var parts: Array = key.split(":")
+		if parts.size() < 2:
+			to_erase.append(key)
+			continue
+		var vag_id: String = "vagal_" + parts[0]
+		var act_id: String = parts[1]
+		var vag_act: float = get_activation(vag_id)
+		var act_act: float = get_activation(act_id)
+		if vag_act < 50.0 or act_act < 50.0:
+			_vagal_coactivation[key] = maxf(_vagal_coactivation[key] - 0.05, 0.0)
+			if _vagal_coactivation[key] <= 0.0:
+				to_erase.append(key)
+	for key in to_erase:
+		_vagal_coactivation.erase(key)
+
+	# Ventral sustained without co-active action = secure base
+	if dominant == "ventral" and dom_act > 70.0:
+		var key: String = "ventral:secure"
+		if not _vagal_coactivation.has(key):
+			_vagal_coactivation[key] = 0.0
+		_vagal_coactivation[key] += 0.033
+		if _vagal_coactivation[key] >= VAGAL_COACT_SPAWN_THRESHOLD * 2.0:  # takes longer — resilience is earned
+			_spawn_secure_base_neuron()
+			_vagal_coactivation.erase(key)
+			return true
+
+	return false
+
+func _spawn_vagal_neuron(vagal_state: String, action_id: String) -> void:
+	## Create a bridge neuron between a vagal state and an action.
+	## This neuron IS the being's learned threat response pattern.
+	var action_short: String = action_id.replace("action_", "")
+	var context: String = vagal_state + "_" + action_short
+
+	var neuron_id: String = "dyn_vagal_%s_%d" % [context, _next_id]
+	_next_id += 1
+
+	_add_neuron(neuron_id, "dynamic", 50.0, false, "vagal", "vagal(%s)" % context)
+	neurons[-1]["age"] = 0  # new neuron — learns at 2x rate
+
+	# Wire: vagal state activates this neuron, this neuron boosts the action
+	var vagal_id: String = "vagal_" + vagal_state
+	_add_connection(vagal_id, neuron_id, 0.2)
+	_add_connection(neuron_id, action_id, 0.08)
+
+	# Also connect the action back to the neuron (reinforcement loop)
+	_add_connection(action_id, neuron_id, 0.1)
+
+	vagal_count += 1
+	_dynamic_count += 1
+	last_neurogenesis_event = {
+		"type": "vagal",
+		"context": context,
+		"vagal_state": vagal_state,
+		"action": action_short,
+		"tick": Time.get_ticks_msec(),
+	}
+
+func _spawn_secure_base_neuron() -> void:
+	## Create a self-reinforcing ventral neuron — resilience from sustained safety.
+	## Makes this being harder to destabilize in the future.
+	var neuron_id: String = "dyn_vagal_secure_%d" % _next_id
+	_next_id += 1
+
+	_add_neuron(neuron_id, "dynamic", 50.0, false, "vagal", "vagal(secure)")
+	neurons[-1]["age"] = 0
+
+	# Self-reinforcing: ventral activates it, it reinforces ventral
+	_add_connection("vagal_ventral", neuron_id, 0.15)
+	_add_connection(neuron_id, "vagal_ventral", 0.08)
+	# Also suppresses sympathetic onset — harder to alarm
+	_add_connection(neuron_id, "vagal_sympathetic", -0.05)
+
+	vagal_count += 1
+	_dynamic_count += 1
+	last_neurogenesis_event = {
+		"type": "vagal",
+		"context": "secure_base",
+		"vagal_state": "ventral",
+		"action": "resilience",
+		"tick": Time.get_ticks_msec(),
+	}
 
 # =========================================================================
 # NEUROGENESIS TRACKING — called by substrate each tick

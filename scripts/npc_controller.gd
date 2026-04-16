@@ -529,6 +529,7 @@ func _send_state_snapshot() -> void:
 		"hour": hour,
 		"drives": brain.layer1.get_state_dict() if brain.layer1 else {},
 		"somatic_tags": brain.layer1.get_somatic_tags() if brain.layer1 else [],
+		"vagal_state": brain.layer1.get_vagal_state() if brain.layer1 else {},
 		"emotion_vector": brain.layer2.emotion_vector if brain.layer2 else [],
 		"location": brain.layer3.location_name_from_position(global_position) if brain.layer3 else "",
 		"current_action": brain.get_current_action(),

@@ -138,6 +138,19 @@ class NPCState:
         if events:
             urgency += min(len(events) * 0.05, 0.2)
 
+        # Vagal state modulates urgency
+        vagal = self.last_snapshot.get("vagal_state", {})
+        if vagal:
+            dorsal = vagal.get("dorsal", 5.0)
+            sympathetic = vagal.get("sympathetic", 20.0)
+            ventral = vagal.get("ventral", 60.0)
+            # Dorsal dominant: cortex going offline — think slowly
+            if dorsal > sympathetic and dorsal > ventral and dorsal > 40.0:
+                urgency *= 0.3
+            # Sympathetic dominant: mobilized — think fast
+            elif sympathetic > ventral and sympathetic > 40.0:
+                urgency = min(urgency * 1.5, 1.0)
+
         return min(urgency, 1.0)
 
     def _current_interval(self) -> float:
@@ -297,4 +310,5 @@ class NPCState:
             "beliefs_summary": self.get_beliefs_summary(),
             "recent_thoughts": self.get_recent_thoughts(3),
             "somatic_tags": snap.get("somatic_tags", []),
+            "vagal_state": snap.get("vagal_state", {}),
         }
