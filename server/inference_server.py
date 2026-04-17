@@ -69,7 +69,7 @@ class PlanRequest(BaseModel):
     role: str
     memory_summary: str = ""
     current_context: str = ""
-    emotion_summary: str = ""
+    somatic_tags: list[str] = []
 
 class PlanResponse(BaseModel):
     agenda: list[dict]
@@ -84,7 +84,7 @@ class ReflectResponse(BaseModel):
 
 class DialogueRequest(BaseModel):
     role: str
-    emotion_summary: str = ""
+    somatic_tags: list[str] = []
     relationship_context: str = ""
     recent_events: list[str] = []
 
@@ -95,7 +95,7 @@ class DialogueResponse(BaseModel):
 class ChatRequest(BaseModel):
     role: str
     npc_name: str
-    emotion_summary: str = ""
+    somatic_tags: list[str] = []
     relationship_context: str = ""
     recent_events: list[str] = []
     conversation_history: list[dict] = []
@@ -107,9 +107,9 @@ class ChatResponse(BaseModel):
 
 class ConverseRequest(BaseModel):
     speaker_role: str
-    speaker_emotion: str = ""
+    speaker_somatic: list[str] = []
     listener_role: str
-    listener_emotion: str = ""
+    listener_somatic: list[str] = []
     shared_context: str = ""
     speaker_recent: list[str] = []
 
@@ -215,7 +215,7 @@ async def layer2_modulate(req: ModulateRequest):
 
 @app.post("/layer3/plan", response_model=PlanResponse)
 async def layer3_plan(req: PlanRequest):
-    result = await _run_in_thread(layer3.plan, req.role, req.memory_summary, req.current_context, req.emotion_summary)
+    result = await _run_in_thread(layer3.plan, req.role, req.memory_summary, req.current_context, req.somatic_tags)
     return PlanResponse(**result)
 
 
@@ -227,7 +227,7 @@ async def layer3_reflect(req: ReflectRequest):
 
 @app.post("/layer3/dialogue", response_model=DialogueResponse)
 async def layer3_dialogue(req: DialogueRequest):
-    result = await _run_in_thread(layer3.dialogue, req.role, req.emotion_summary,
+    result = await _run_in_thread(layer3.dialogue, req.role, req.somatic_tags,
                                    req.relationship_context, req.recent_events)
     return DialogueResponse(**result)
 
@@ -235,7 +235,7 @@ async def layer3_dialogue(req: DialogueRequest):
 @app.post("/layer3/chat", response_model=ChatResponse)
 async def layer3_chat(req: ChatRequest):
     def _do_chat():
-        return layer3.chat(req.role, req.npc_name, req.emotion_summary,
+        return layer3.chat(req.role, req.npc_name, req.somatic_tags,
                             req.relationship_context, req.recent_events,
                             req.conversation_history, req.player_message)
     result = await _run_in_thread(_do_chat)
@@ -245,8 +245,8 @@ async def layer3_chat(req: ChatRequest):
 @app.post("/layer3/converse", response_model=ConverseResponse)
 async def layer3_converse(req: ConverseRequest):
     def _do_converse():
-        return layer3.converse(req.speaker_role, req.speaker_emotion,
-                                req.listener_role, req.listener_emotion,
+        return layer3.converse(req.speaker_role, req.speaker_somatic,
+                                req.listener_role, req.listener_somatic,
                                 req.shared_context, req.speaker_recent)
     result = await _run_in_thread(_do_converse)
     return ConverseResponse(**result)

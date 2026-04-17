@@ -250,7 +250,7 @@ func _request_npc_greeting() -> void:
 		"target_name": "Player",
 		"target_type": "player",
 		"trust": trust_val,
-		"emotion_vector": brain.layer2.emotion_vector if brain.layer2 else [],
+		"somatic_tags": brain.layer1.get_somatic_tags() if brain.layer1 else [],
 		"current_activity": brain.get_current_action(),
 		"current_chunk": brain.layer3.get_current_chunk() if brain.layer3 else {},
 	}
@@ -291,7 +291,7 @@ func _request_npc_reply(player_text: String) -> void:
 		"target_name": "Player",
 		"target_type": "player",
 		"trust": trust_val,
-		"emotion_vector": brain.layer2.emotion_vector if brain.layer2 else [],
+		"somatic_tags": brain.layer1.get_somatic_tags() if brain.layer1 else [],
 		"current_activity": brain.get_current_action(),
 		"current_chunk": brain.layer3.get_current_chunk() if brain.layer3 else {},
 	}

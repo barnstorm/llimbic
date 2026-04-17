@@ -1,6 +1,8 @@
 extends RefCounted
 ## res://scripts/npc_brain.gd — Orchestrates all three AI layers for one NPC
 
+const BUILDING_SIGHT_RANGE: float = 400.0  # pixels — how far buildings are visible
+
 var npc_name: String = ""
 var role: String = ""
 
@@ -10,6 +12,7 @@ var layer2: RefCounted = null  # Layer2Projection
 var layer3: RefCounted = null  # Layer3Executive
 var memory: RefCounted = null  # MemorySystem
 var perception: RefCounted = null  # Perception (FOV + hearing)
+var inventory: RefCounted = null  # Inventory (on-person items)
 
 # References
 var _inference_client: Node = null
@@ -46,7 +49,8 @@ var _heard_stimulus_ids: Dictionary = {}  # stimulus_id -> tick when heard
 var active_intentions: Array[Dictionary] = []  # [{goal, location, priority, reason, timestamp}]
 var current_thought: String = ""
 var _server_action_biases: Dictionary = {}  # {action_name: bias_value} from server
-var _server_action_override: Dictionary = {}  # one-shot forced action from server
+var _server_action_override: Dictionary = {}  # timed action from server command
+var _override_timer: float = 0.0  # seconds remaining on current override
 var _last_server_push_tick: int = 0  # ticks_msec of last server push — used to detect thought loop active
 
 # Logging
@@ -89,6 +93,22 @@ func setup(p_name: String, p_role: String) -> void:
 	memory.on_tagged_event = func(desc: String, salience: float) -> void:
 		npc_log("MEM [%.1f]: %s" % [salience, desc])
 
+	# Seed location discovery: NPC knows home, work, and schedule locations from birth
+	var known_locs: Array = []
+	var home_loc: String = str(_persona.get("home_location", ""))
+	var work_loc: String = str(_persona.get("work_location", ""))
+	if home_loc != "":
+		known_locs.append(home_loc)
+	if work_loc != "" and work_loc != home_loc:
+		known_locs.append(work_loc)
+	var schedule: Array = _persona.get("schedule", [])
+	for chunk in schedule:
+		if chunk is Dictionary:
+			var loc: String = str(chunk.get("location", ""))
+			if loc != "" and loc not in known_locs:
+				known_locs.append(loc)
+	memory.seed_known_locations(known_locs)
+
 	layer1.setup(_persona, memory)
 
 	var L2Script: GDScript = load("res://scripts/layer2_projection.gd")
@@ -100,6 +120,16 @@ func setup(p_name: String, p_role: String) -> void:
 	var L3Script: GDScript = load("res://scripts/layer3_executive.gd")
 	layer3 = L3Script.new()
 	layer3.setup(npc_name, role, _persona)
+
+	# Inventory — on-person items (5 slots)
+	var InvScript: GDScript = load("res://scripts/inventory.gd")
+	inventory = InvScript.new(5)
+	var starting_items: Array = _persona.get("starting_inventory", [])
+	for item in starting_items:
+		if item is Dictionary:
+			inventory.add(item.get("id", ""), item.get("name", ""), item.get("category", ""), item.get("quantity", 1))
+		elif item is String:
+			inventory.add(item, item.capitalize(), "", 1)
 
 	# Set initial trust from persona relationships
 	var relationships: Dictionary = _persona.get("relationships", {})
@@ -171,27 +201,81 @@ func process_server_commands(commands: Array) -> void:
 				current_thought = cmd.get("text", "")
 				npc_log("THOUGHT: " + current_thought)
 			"trigger_action":
-				_server_action_override = cmd
+				_set_override(cmd, cmd.get("duration", 3.0))
 			"speak":
 				# Adventure-command SAY: trigger speech via controller
 				var speech_text: String = cmd.get("text", "")
 				if speech_text:
 					npc_log("SAY: " + speech_text)
-					_server_action_override = {
+					_set_override({
 						"type": "speak",
 						"text": speech_text,
 						"target": cmd.get("target", ""),
-					}
+					}, 3.0)  # 3s to deliver the line
 			"examine":
 				# Adventure-command EXAMINE: trigger object examination
 				var obj_id: String = cmd.get("object_id", "")
 				if obj_id:
 					npc_log("EXAMINE: " + obj_id)
-					_server_action_override = {
+					_set_override({
 						"type": "examine",
 						"object_id": obj_id,
 						"target": cmd.get("target"),
-					}
+					}, 4.0)  # 4s to inspect
+			"take_item":
+				var item_name: String = cmd.get("item", "")
+				if item_name and inventory and _world_object_registry:
+					var loc: String = layer3.location_name_from_position(_last_world_pos) if layer3 else ""
+					var world_item: Dictionary = _world_object_registry.find_item_by_name(item_name, loc)
+					if not world_item.is_empty():
+						var obj_id: String = world_item.get("id", "")
+						var iid: String = world_item.get("item_id", item_name.to_lower())
+						var cat: String = world_item.get("properties", {}).get("category", "")
+						var added: int = inventory.add(iid, world_item.get("name", item_name), cat, 1)
+						if added > 0:
+							_world_object_registry.remove_object(obj_id)
+							npc_log("TAKE: %s (world obj %s removed)" % [item_name, obj_id])
+							memory.add_tagged_event("Picked up %s" % item_name, 0.3, ["inventory", "take"], "direct", "inventory")
+						else:
+							npc_log("TAKE FAILED (full): %s" % item_name)
+					else:
+						npc_log("TAKE FAILED (not here): %s at %s" % [item_name, loc])
+			"consume_item":
+				var item_name: String = cmd.get("item", "")
+				var item_id: String = item_name.to_lower()
+				if item_name and inventory and inventory.has(item_id):
+					var cat: String = _get_item_category(item_id)
+					inventory.remove(item_id, 1)
+					npc_log("CONSUME: %s (%s)" % [item_name, cat])
+					if layer1:
+						_apply_consume_effects_by_category(cat)
+					memory.add_tagged_event("Consumed %s" % item_name, 0.4, ["inventory", "consume"], "direct", "consumption")
+			"drop_item":
+				var item_name: String = cmd.get("item", "")
+				var item_id: String = item_name.to_lower()
+				if item_name and inventory and inventory.has(item_id):
+					var cat: String = _get_item_category(item_id)
+					inventory.remove(item_id, 1)
+					# Spawn as world object at NPC's position
+					if _world_object_registry:
+						var loc: String = layer3.location_name_from_position(_last_world_pos) if layer3 else ""
+						_world_object_registry.spawn_item(item_id, item_name.capitalize(), cat, _last_world_pos, loc)
+					npc_log("DROP: %s" % item_name)
+					memory.add_tagged_event("Dropped %s" % item_name, 0.2, ["inventory", "drop"], "direct", "inventory")
+			"give_item":
+				var item_id: String = cmd.get("item", "")
+				var target_name: String = cmd.get("target", "")
+				if item_id and target_name and inventory and inventory.has(item_id):
+					# Drop item — controller handles finding the target NPC
+					inventory.remove(item_id, 1)
+					npc_log("GIVE: %s to %s" % [item_id, target_name])
+					memory.add_tagged_event("Gave %s to %s" % [item_id, target_name], 0.5, ["inventory", "give", "social"], "direct", "social")
+					_set_override({
+						"type": "give",
+						"item_id": item_id,
+						"item_name": item_id.capitalize(),
+						"target": target_name,
+					}, 3.0)  # 3s to hand over
 			"motor_command":
 				# Adventure-command: convert to action override for entity-targeted commands
 				var motor_cmd: String = cmd.get("command", "")
@@ -199,6 +283,33 @@ func process_server_commands(commands: Array) -> void:
 				if motor_cmd:
 					npc_log("CMD: " + motor_cmd)
 					_handle_motor_command(motor_cmd, motor_target)
+
+func _get_item_category(item_id: String) -> String:
+	## Look up item category from inventory, fall back to common names.
+	if inventory:
+		for item in inventory.get_items():
+			if item["id"] == item_id:
+				return item.get("category", "")
+	if item_id in ["bread", "apple", "stew", "pie"]:
+		return "food"
+	if item_id in ["ale", "water", "wine", "tea"]:
+		return "drink"
+	if item_id in ["remedy", "potion", "salve"]:
+		return "medicine"
+	return ""
+
+func _apply_consume_effects_by_category(cat: String) -> void:
+	## Apply drive changes from consuming an item by category.
+	match cat:
+		"food":
+			layer1.hunger = maxf(layer1.hunger - 30.0, 0.0)
+			layer1.energy = minf(layer1.energy + 5.0, 100.0)
+		"drink":
+			layer1.hunger = maxf(layer1.hunger - 10.0, 0.0)
+			layer1.energy = minf(layer1.energy + 15.0, 100.0)
+		"medicine":
+			layer1.energy = minf(layer1.energy + 25.0, 100.0)
+			layer1.safety = minf(layer1.safety + 10.0, 100.0)
 
 func _add_intention(cmd: Dictionary) -> void:
 	var goal: String = cmd.get("goal", "")
@@ -234,55 +345,69 @@ func _remove_intention(goal: String) -> void:
 			new_list.append(intent)
 	active_intentions = new_list
 
+func _set_override(action: Dictionary, duration: float) -> void:
+	## Set a timed action override. Momentary actions get short TTLs so the being
+	## resumes its active intention afterward instead of being stuck.
+	_server_action_override = action
+	_override_timer = duration
+
 func _handle_motor_command(cmd_str: String, target: Variant) -> void:
-	## Convert a motor_command string into a concrete action override or intention.
-	## Entity-targeted commands (APPROACH, FLEE FROM, LOOK AT) become one-shot overrides.
-	## Location-targeted commands (GO TO, WANDER AT) become intentions (already pushed separately).
-	## SAY and EXAMINE are handled by their own push commands before this.
+	## Convert a motor_command string into a timed action override or intention.
+	## Momentary commands (LOOK AT, WAIT) get short TTLs — the being resumes
+	## its active intention after the override expires.
+	## Sustained commands (GO TO) use the intention system, not overrides.
 	var target_dict: Dictionary = target if target is Dictionary else {}
 	var target_type: String = target_dict.get("type", "")
 	var target_name: String = target_dict.get("name", "")
 
 	if cmd_str.begins_with("APPROACH ") and target_type == "entity":
-		# Find entity position from perception
 		var pos: Vector2 = _resolve_entity_position(target_name)
 		if pos != Vector2.ZERO:
-			_server_action_override = {
+			_set_override({
 				"type": "move_toward",
 				"target": pos,
 				"reason": "CMD: APPROACH " + target_name,
 				"speed_mul": 0.8,
-			}
+			}, 5.0)  # 5s — enough to close distance, then resume intention
 	elif cmd_str.begins_with("FLEE FROM ") and target_type == "entity":
 		var pos: Vector2 = _resolve_entity_position(target_name)
 		if pos != Vector2.ZERO:
-			_server_action_override = {
+			_set_override({
 				"type": "flee",
 				"target": pos,
 				"reason": "CMD: FLEE FROM " + target_name,
-			}
+			}, 8.0)  # 8s — reactive, needs more time
 	elif cmd_str.begins_with("LOOK AT "):
 		var pos: Vector2 = _resolve_target_position(target_dict)
 		if pos != Vector2.ZERO:
-			_server_action_override = {
+			_set_override({
 				"type": "observe",
 				"target": pos,
 				"reason": "CMD: LOOK AT " + target_name,
 				"speed_mul": 0.0,
-			}
+			}, 2.0)  # 2s glance — then resume walking
 	elif cmd_str == "WAIT":
-		_server_action_override = {
+		_set_override({
 			"type": "pause",
 			"reason": "CMD: WAIT",
 			"speed_mul": 0.0,
-		}
+		}, 6.0)  # 6s deliberate pause
 	elif cmd_str == "WANDER" or cmd_str.begins_with("WANDER AT "):
-		_server_action_override = {
+		_set_override({
 			"type": "wander",
 			"target": _last_world_pos,
 			"reason": "CMD: " + cmd_str,
 			"speed_mul": 0.4,
-		}
+		}, 8.0)  # 8s wander bout
+	elif cmd_str.begins_with("EXPLORE ") and target_type == "direction":
+		var explore_pos: Vector2 = _resolve_explore_direction(target_name)
+		if explore_pos != Vector2.ZERO:
+			_set_override({
+				"type": "move_toward",
+				"target": explore_pos,
+				"reason": "CMD: EXPLORE " + target_name,
+				"speed_mul": 0.8,
+			}, 10.0)  # 10s — exploration needs commitment
 	# GO TO <location> is handled via set_intention push — no override needed
 
 func _resolve_entity_position(entity_name: String) -> Vector2:
@@ -309,6 +434,51 @@ func _resolve_target_position(target_dict: Dictionary) -> Vector2:
 		if L3Cls.LOCATIONS.has(target_name):
 			return L3Cls.LOCATIONS[target_name]
 	return Vector2.ZERO
+
+func _resolve_explore_direction(direction_name: String) -> Vector2:
+	## Find nearest glimpsed-but-unvisited location matching the compass direction.
+	if memory == null:
+		return Vector2.ZERO
+	var glimpsed_names: Array = memory.get_glimpsed_location_names()
+	if glimpsed_names.is_empty():
+		return Vector2.ZERO
+	var L3Script: GDScript = load("res://scripts/layer3_executive.gd")
+	L3Script._ensure_locations_loaded()
+	var best_pos: Vector2 = Vector2.ZERO
+	var best_dist: float = 999999.0
+	for loc_name in glimpsed_names:
+		if not L3Script.LOCATIONS.has(loc_name):
+			continue
+		var loc_pos: Vector2 = L3Script.LOCATIONS[loc_name]
+		var dir: Vector2 = loc_pos - _last_world_pos
+		var cardinal: String = _direction_to_cardinal(dir)
+		if cardinal == direction_name:
+			var dist: float = dir.length()
+			if dist < best_dist:
+				best_dist = dist
+				best_pos = loc_pos
+	return best_pos
+
+static func _direction_to_cardinal(dir: Vector2) -> String:
+	if dir.length() < 1.0:
+		return "here"
+	var angle: float = rad_to_deg(atan2(dir.y, dir.x))
+	if angle < -157.5 or angle >= 157.5:
+		return "west"
+	elif angle < -112.5:
+		return "northwest"
+	elif angle < -67.5:
+		return "north"
+	elif angle < -22.5:
+		return "northeast"
+	elif angle < 22.5:
+		return "east"
+	elif angle < 67.5:
+		return "southeast"
+	elif angle < 112.5:
+		return "south"
+	else:
+		return "southwest"
 
 func get_top_intention() -> Dictionary:
 	## Return the highest priority active intention, or empty dict.
@@ -390,6 +560,19 @@ const URGENCY_REPLAN_MIN_INTERVAL: float = 30.0
 # Chunk outcome tracking
 var _chunk_outcomes: Array[Dictionary] = []
 
+func _update_location_discovery(world_pos: Vector2, current_location: String) -> void:
+	## Scan for buildings within sight range and update discovery state.
+	## Beings discover locations by seeing them (glimpsed) or visiting them (visited).
+	if memory == null or layer3 == null:
+		return
+	var L3Script: GDScript = load("res://scripts/layer3_executive.gd")
+	L3Script._ensure_locations_loaded()
+	for loc_name in L3Script.LOCATIONS:
+		var loc_pos: Vector2 = L3Script.LOCATIONS[loc_name]
+		var dist: float = world_pos.distance_to(loc_pos)
+		if dist < BUILDING_SIGHT_RANGE:
+			memory.discover_location(str(loc_name), "glimpsed")
+
 func update_layer1(delta: float, world_pos: Vector2, nearby_npcs: int) -> void:
 	if layer1 == null:
 		return
@@ -443,6 +626,9 @@ func update_layer1(delta: float, world_pos: Vector2, nearby_npcs: int) -> void:
 		memory.visit_location(current_location)
 		layer1.place_familiarity[current_location] = memory.get_location_comfort(current_location)
 
+	# Update location discovery — scan for visible buildings
+	_update_location_discovery(world_pos, current_location)
+
 	# Maintain intentions — expire old ones, inject night fallback
 	_maintain_intentions(hour)
 
@@ -493,7 +679,7 @@ func update_layer3(hour: float) -> void:
 		"current_location": layer3.location_name_from_position(_last_world_pos),
 		"current_chunk": layer3.get_current_chunk(),
 		"replan_reason": replan_reason,
-		"emotion_vector": layer2.emotion_vector if layer2 else [],
+		"somatic_tags": layer1.get_somatic_tags() if layer1 else [],
 		"chunk_outcomes": _chunk_outcomes,
 	}
 	var packet: Dictionary = memory.build_plan_packet(ctx)
@@ -612,11 +798,13 @@ func _select_action_inner(delta: float) -> Dictionary:
 	## Softmax competition over action neurons — replaces the old priority queue.
 	## The Hebbian network's action neuron activations now directly determine behavior.
 
-	# Server action override takes absolute priority (one-shot)
-	if not _server_action_override.is_empty():
-		var override: Dictionary = _server_action_override
-		_server_action_override = {}
-		return _build_action_from_override(override)
+	# Server action override takes priority while timer is active
+	if not _server_action_override.is_empty() and _override_timer > 0.0:
+		_override_timer -= delta
+		if _override_timer <= 0.0:
+			_server_action_override = {}
+		else:
+			return _build_action_from_override(_server_action_override)
 
 	# Reorientation pause (mechanical, not AI)
 	if layer1.reorientation_timer > 0.0:
@@ -930,7 +1118,7 @@ func _force_replan(reason: String, hour: float) -> void:
 		"current_location": layer3.location_name_from_position(_last_world_pos),
 		"current_chunk": layer3.get_current_chunk(),
 		"replan_reason": reason,
-		"emotion_vector": layer2.emotion_vector if layer2 else [],
+		"somatic_tags": layer1.get_somatic_tags() if layer1 else [],
 		"chunk_outcomes": _chunk_outcomes,
 	}
 	var packet: Dictionary = memory.build_plan_packet(ctx)
@@ -988,7 +1176,7 @@ func on_player_interaction(callback: Callable) -> void:
 		"target_name": "Player",
 		"target_type": "player",
 		"trust": trust_val,
-		"emotion_vector": layer2.emotion_vector if layer2 else [],
+		"somatic_tags": layer1.get_somatic_tags() if layer1 else [],
 		"current_activity": get_current_action(),
 		"current_chunk": layer3.get_current_chunk() if layer3 else {},
 	}

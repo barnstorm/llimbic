@@ -26,6 +26,10 @@ var relationships: Dictionary = {}  # entity_name -> {trust: float, reasons: Arr
 # Place familiarity: per-location visit count and comfort
 var place_familiarity: Dictionary = {}  # location_name -> {visits: int, comfort: float}
 
+# Location discovery: per-location discovery state
+# States: "glimpsed" (seen from afar), "visited" (been there), "familiar" (comfort > 0.6)
+var discovered_locations: Dictionary = {}  # location_name -> {state: String, first_seen: float}
+
 # Unresolved concerns from Layer 3 reflection
 var concerns: Array[String] = []
 
@@ -124,11 +128,69 @@ func visit_location(location_name: String) -> void:
 	var loc: Dictionary = place_familiarity[location_name]
 	loc["visits"] += 1
 	loc["comfort"] = clampf(loc["comfort"] + 0.05, 0.0, 1.0)
+	# Upgrade discovery state on visit
+	discover_location(location_name, "visited")
+	if loc["comfort"] > 0.6:
+		discover_location(location_name, "familiar")
 
 func get_location_comfort(location_name: String) -> float:
 	if place_familiarity.has(location_name):
 		return place_familiarity[location_name]["comfort"]
 	return 0.3  # unfamiliar default
+
+# =========================================================================
+# LOCATION DISCOVERY
+# =========================================================================
+
+const _DISCOVERY_ORDER: Array = ["glimpsed", "visited", "familiar"]
+
+func discover_location(location_name: String, state: String) -> void:
+	## Upgrade discovery state for a location. Only upgrades, never downgrades.
+	## Fires a tagged event when upgrading from glimpsed to visited (discovery moment).
+	if location_name == "" or location_name == "unknown":
+		return
+	var current: Dictionary = discovered_locations.get(location_name, {})
+	var current_state: String = current.get("state", "")
+	var new_idx: int = _DISCOVERY_ORDER.find(state)
+	var old_idx: int = _DISCOVERY_ORDER.find(current_state)
+	if new_idx <= old_idx:
+		return  # no downgrade
+	var was_glimpsed: bool = current_state == "glimpsed"
+	discovered_locations[location_name] = {
+		"state": state,
+		"first_seen": current.get("first_seen", Time.get_ticks_msec() / 1000.0),
+	}
+	# Fire discovery event when a glimpsed building becomes visited
+	if was_glimpsed and state == "visited":
+		add_tagged_event("Discovered %s" % location_name, 0.6, ["discovery", "exploration"])
+
+func get_discovery_state(location_name: String) -> String:
+	var entry: Dictionary = discovered_locations.get(location_name, {})
+	return entry.get("state", "undiscovered")
+
+func get_known_location_names() -> Array:
+	## Returns names of visited + familiar locations (for grammar/navigation).
+	var result: Array = []
+	for loc_name in discovered_locations:
+		var state: String = discovered_locations[loc_name].get("state", "")
+		if state == "visited" or state == "familiar":
+			result.append(loc_name)
+	return result
+
+func get_glimpsed_location_names() -> Array:
+	## Returns names of glimpsed-only locations (visible but unvisited).
+	var result: Array = []
+	for loc_name in discovered_locations:
+		if discovered_locations[loc_name].get("state", "") == "glimpsed":
+			result.append(loc_name)
+	return result
+
+func seed_known_locations(names: Array) -> void:
+	## Bulk-set locations to "visited" state. Called at NPC setup for
+	## home, work, and schedule locations.
+	for loc_name in names:
+		if loc_name is String and loc_name != "":
+			discover_location(str(loc_name), "visited")
 
 func get_place_threat_level() -> float:
 	## Returns threat level (0-1) for the most recently visited location.
@@ -619,7 +681,7 @@ func _event_to_packet_entry(evt: Dictionary) -> Dictionary:
 func build_plan_packet(ctx: Dictionary) -> Dictionary:
 	## Build a bounded, purpose-specific packet for Layer 3 planning.
 	## ctx = {npc_name, role, hour, current_location, current_chunk,
-	##        replan_reason, emotion_vector, chunk_outcomes}
+	##        replan_reason, somatic_tags, chunk_outcomes}
 	var packet: Dictionary = {
 		"npc_name": ctx.get("npc_name", npc_name),
 		"role": ctx.get("role", npc_role),
@@ -629,8 +691,8 @@ func build_plan_packet(ctx: Dictionary) -> Dictionary:
 		"replan_reason": ctx.get("replan_reason", "none"),
 	}
 
-	# Top 3 emotions
-	packet["top_emotions"] = _top_emotions(ctx.get("emotion_vector", []), 3)
+	# Somatic tags — what the being feels in its body
+	packet["somatic_tags"] = ctx.get("somatic_tags", [])
 
 	# Concerns (cap 2)
 	var capped_concerns: Array = []
@@ -692,7 +754,7 @@ func build_reflection_packet(ctx: Dictionary) -> Dictionary:
 
 func build_dialogue_packet(ctx: Dictionary) -> Dictionary:
 	## Build a bounded packet for Layer 3 dialogue/conversation.
-	## ctx = {npc_name, role, target_name, target_type, trust, emotion_vector,
+	## ctx = {npc_name, role, target_name, target_type, trust, somatic_tags,
 	##        current_activity, current_chunk}
 	var packet: Dictionary = {
 		"npc_name": ctx.get("npc_name", npc_name),
@@ -703,8 +765,8 @@ func build_dialogue_packet(ctx: Dictionary) -> Dictionary:
 		"current_activity": ctx.get("current_activity", ""),
 	}
 
-	# Top 3 emotions
-	packet["top_emotions"] = _top_emotions(ctx.get("emotion_vector", []), 3)
+	# Somatic tags — what the being feels in its body
+	packet["somatic_tags"] = ctx.get("somatic_tags", [])
 
 	# Top concern (just 1)
 	packet["top_concern"] = concerns[0] if concerns.size() > 0 else ""

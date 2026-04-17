@@ -4,7 +4,7 @@ Every L3 prompt gets a consistent character grounding.
 """
 
 
-def build_preamble(persona: dict, emotion_state: str = "",
+def build_preamble(persona: dict, somatic_tags: list[str] | str | None = None,
                    current_activity: str = "", location: str = "",
                    recent_events: list[str] | None = None,
                    object_context: str = "") -> str:
@@ -23,8 +23,12 @@ def build_preamble(persona: dict, emotion_state: str = "",
         f"Background: {backstory}",
     ]
 
-    if emotion_state:
-        lines.append(f"\nRight now you feel: {emotion_state}.")
+    if somatic_tags:
+        if isinstance(somatic_tags, list):
+            feel_str = ", ".join(str(t) for t in somatic_tags)
+        else:
+            feel_str = somatic_tags
+        lines.append(f"\nYou feel: {feel_str}.")
     if current_activity:
         lines.append(f"You are currently: {current_activity}.")
     if location:
@@ -101,11 +105,11 @@ def build_preamble_from_packet(persona: dict, packet: dict) -> str:
     if townsfolk:
         lines.append(townsfolk)
 
-    # Emotions — compact format from top_emotions list
-    emotions = packet.get("top_emotions", [])
-    if emotions:
-        emo_str = ", ".join(f"{e['name']} ({e['value']:.1f})" for e in emotions[:3])
-        lines.append(f"Feeling: {emo_str}.")
+    # Somatic tags — what the being feels in its body
+    somatic_tags = packet.get("somatic_tags", [])
+    if somatic_tags:
+        feel_str = ", ".join(str(t) for t in somatic_tags)
+        lines.append(f"You feel: {feel_str}.")
 
     # Location
     loc = packet.get("current_location", "")

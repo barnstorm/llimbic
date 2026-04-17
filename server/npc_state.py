@@ -311,4 +311,8 @@ class NPCState:
             "recent_thoughts": self.get_recent_thoughts(3),
             "somatic_tags": snap.get("somatic_tags", []),
             "vagal_state": snap.get("vagal_state", {}),
+            "carried_items": snap.get("carried_items", []),
+            "available_items": snap.get("available_items", []),
+            "known_locations": snap.get("known_locations", []),
+            "glimpsed_buildings": snap.get("glimpsed_buildings", []),
         }

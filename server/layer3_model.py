@@ -1,74 +1,192 @@
 """
 Layer 3 — Executive / Planning Model
 
-Uses SmolLM2-1.7B-Instruct for:
+Uses SmolLM3-3B (base, via llama-server on port 8424) for:
 - Daily agenda generation
 - Reflection over memory summaries
 - Dialogue intent generation
+- Player chat (multi-turn)
+- NPC-to-NPC conversation
 - Social reasoning (bounded)
 
 Thought loop (generate_thought) delegates to CommandModel — a fine-tuned
-SmolLM3-3B served via llama-server, outputting <think> + adventure commands.
+SmolLM3-3B served via llama-server on port 8423.
+
+Both instances use the same GGUF weights. The command model is fine-tuned
+for <think> + adventure commands. This model uses the base SmolLM3 for
+general chat/planning via raw chatml /completion.
 """
 
-import torch
+import os
+import subprocess
+import time
 import json
 import re
 import logging
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import requests
 
 from persona_loader import load_all_personas, get_persona_by_role, get_persona_by_name, load_locations, get_fallback_dialogue
 from prompt_builder import build_preamble, build_preamble_from_packet, build_listener_context
 
 log = logging.getLogger("layer3")
 
+CHAT_SERVER_PORT = 8424
+
 
 class Layer3Model:
-    """Executive planning model using SmolLM2-1.7B-Instruct."""
+    """Executive planning model using SmolLM3-3B via llama-server."""
 
-    def __init__(self, model_name: str = "HuggingFaceTB/SmolLM2-1.7B-Instruct",
-                 device: str = "cuda", command_model=None):
-        self.device = device
-        self.model_name = model_name
+    def __init__(self, gguf_path: str | None = None, command_model=None):
+        self.model_name = "SmolLM3-3B-chat"
         self._command_model = command_model
-        print(f"Layer3: Loading {model_name}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16,
-            device_map=device
-        )
-        self.model.eval()
-        param_count = sum(p.numel() for p in self.model.parameters())
-        print(f"Layer3: Model loaded ({param_count / 1e6:.1f}M params)")
+
+        server_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(server_dir)
+
+        if gguf_path is None:
+            gguf_path = os.path.join(
+                project_root, "training", "cognitive",
+                "SmolLM3-3B.Q4_K_M.gguf"
+            )
+        self.gguf_path = gguf_path
+
+        if not os.path.exists(self.gguf_path):
+            raise FileNotFoundError(f"Chat GGUF not found: {self.gguf_path}")
+
+        # Find llama-server binary
+        self._llama_bin = None
+        for candidate in [
+            "/tmp/llama.cpp/build/bin/llama-server",
+            os.path.join(project_root, "llama-server"),
+        ]:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                self._llama_bin = candidate
+                break
+
+        if self._llama_bin is None:
+            raise FileNotFoundError("llama-server binary not found")
+
+        self._proc = None
+        self._start_server()
 
         # Load persona and location data
         self.personas = load_all_personas()
         self.locations = load_locations()
         print(f"Layer3: Loaded {len(self.personas)} personas, {len(self.locations)} locations")
 
-    def _generate(self, prompt: str, max_new_tokens: int = 300,
-                  temperature: float = 0.3) -> str:
-        """Generate structured text from prompt."""
-        messages = [
-            {"role": "user", "content": prompt}
-        ]
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+    def _start_server(self):
+        log.info(f"Layer3: Starting llama-server (chat) on port {CHAT_SERVER_PORT}...")
+        self._proc = subprocess.Popen(
+            [
+                self._llama_bin,
+                "-m", self.gguf_path,
+                "--port", str(CHAT_SERVER_PORT),
+                "--ctx-size", "2048",
+                "-t", "8",
+                "-np", "2",
+                "--log-disable",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=max(temperature, 0.01),
-                do_sample=temperature > 0.05,
-                top_p=0.9,
-                repetition_penalty=1.1,
-                pad_token_id=self.tokenizer.eos_token_id,
+        for _ in range(30):
+            try:
+                r = requests.get(
+                    f"http://127.0.0.1:{CHAT_SERVER_PORT}/health",
+                    timeout=1,
+                )
+                if r.status_code == 200:
+                    log.info(
+                        f"Layer3: llama-server (chat) ready "
+                        f"(SmolLM3-3B Q4_K_M, port {CHAT_SERVER_PORT})"
+                    )
+                    return
+            except requests.ConnectionError:
+                pass
+            time.sleep(1)
+        raise RuntimeError(
+            f"Layer3 chat llama-server failed to start on port {CHAT_SERVER_PORT}"
+        )
+
+    def __del__(self):
+        if hasattr(self, '_proc') and self._proc and self._proc.poll() is None:
+            self._proc.terminate()
+
+    def _generate(self, prompt: str, max_new_tokens: int = 300,
+                  temperature: float = 0.3, system: str = "") -> str:
+        """Generate text via llama-server raw /completion endpoint.
+
+        Uses chatml format matching SmolLM3's training template.
+        """
+        try:
+            sys_block = f"<|im_start|>system\n{system}<|im_end|>\n" if system else ""
+            chatml = (
+                f"{sys_block}"
+                f"<|im_start|>user\n{prompt}<|im_end|>\n"
+                f"<|im_start|>assistant\n"
             )
-        generated = outputs[0][inputs["input_ids"].shape[1]:]
-        return self.tokenizer.decode(generated, skip_special_tokens=True).strip()
+
+            r = requests.post(
+                f"http://127.0.0.1:{CHAT_SERVER_PORT}/completion",
+                json={
+                    "prompt": chatml,
+                    "n_predict": max_new_tokens,
+                    "temperature": max(temperature, 0.01),
+                    "top_p": 0.9,
+                    "repeat_penalty": 1.1,
+                    "stop": ["<|im_end|>", "<|im_start|>"],
+                },
+                timeout=30,
+            )
+            data = r.json()
+            content = data.get("content", "")
+            if not content:
+                log.warning(f"Layer3: empty response: {str(data)[:200]}")
+                return ""
+            return content.strip()
+        except Exception as e:
+            log.warning(f"Layer3: inference error: {e}")
+            return ""
+
+    def _generate_chat(self, system_msg: str, messages: list[dict],
+                       max_new_tokens: int = 120,
+                       temperature: float = 0.25) -> str:
+        """Generate a chat response from multi-turn conversation.
+
+        Uses raw chatml format for proper multi-turn handling.
+        """
+        try:
+            chatml = f"<|im_start|>system\n{system_msg}<|im_end|>\n"
+            for msg in messages:
+                role = msg["role"]
+                content = msg["content"]
+                chatml += f"<|im_start|>{role}\n{content}<|im_end|>\n"
+            # Don't start with bare assistant — the fine-tuned model will
+            # produce <think>...</think>COMMAND with nothing speakable.
+            # Instead, use a two-shot prompt that shows the expected format.
+            chatml += "<|im_start|>assistant\n"
+
+            r = requests.post(
+                f"http://127.0.0.1:{CHAT_SERVER_PORT}/completion",
+                json={
+                    "prompt": chatml,
+                    "n_predict": max_new_tokens,
+                    "temperature": max(temperature, 0.01),
+                    "top_p": 0.9,
+                    "repeat_penalty": 1.2,
+                    "stop": ["<|im_end|>", "<|im_start|>"],
+                },
+                timeout=30,
+            )
+            data = r.json()
+            content = data.get("content", "")
+            if not content:
+                log.warning(f"Layer3: empty chat response: {str(data)[:200]}")
+                return ""
+            return content.strip()
+        except Exception as e:
+            log.warning(f"Layer3: chat inference error: {e}")
+            return ""
 
     def _get_persona(self, npc_name: str = "", role: str = "") -> dict:
         """Look up persona by name first, then role, then empty fallback."""
@@ -89,7 +207,7 @@ class Layer3Model:
         ])
 
     def plan(self, role: str, memory_summary: str, current_context: str,
-             emotion_summary: str, npc_name: str = "") -> dict:
+             somatic_tags: list[str] | str = "", npc_name: str = "") -> dict:
         """
         Generate a daily agenda: list of plan chunks.
         Uses persona defaults normally; triggers LLM replanning when state warrants it.
@@ -100,10 +218,7 @@ class Layer3Model:
         # Determine if state warrants LLM replanning
         should_replan = False
         mem_lower = memory_summary.lower()
-        emo_lower = emotion_summary.lower()
         if "concern" in mem_lower or "worried" in mem_lower:
-            should_replan = True
-        if "frustrat" in emo_lower or "distress" in emo_lower:
             should_replan = True
         if "frustration is high" in mem_lower:
             should_replan = True
@@ -111,13 +226,18 @@ class Layer3Model:
             should_replan = True
         if "urgent:" in mem_lower:
             should_replan = True
+        # Somatic distress signals replan
+        tags_str = ", ".join(somatic_tags) if isinstance(somatic_tags, list) else str(somatic_tags)
+        tags_lower = tags_str.lower()
+        if any(t in tags_lower for t in ("churning", "pounding", "tight", "prickling", "gnawing")):
+            should_replan = True
 
         if not should_replan:
             return {"agenda": list(default), "source": "default"}
 
         locations_list = ", ".join(self.locations.keys())
 
-        preamble = build_preamble(persona, emotion_summary, current_context)
+        preamble = build_preamble(persona, somatic_tags, current_context)
         prompt = (
             f"{preamble}\n\n"
             f"Plan your day given your current state.\n"
@@ -323,52 +443,49 @@ class Layer3Model:
 
         return {"reflections": ["Things have been uneventful."], "concerns": []}
 
-    def dialogue(self, role: str, emotion_summary: str,
+    def dialogue(self, role: str, somatic_tags: list[str] | str,
                  relationship_context: str, recent_events: list[str],
                  npc_name: str = "") -> dict:
-        """Generate dialogue intent and utterance for player interaction."""
+        """Generate dialogue greeting for player interaction."""
         persona = self._get_persona(npc_name, role)
+        name = persona.get("name", npc_name or role)
 
         preamble = build_preamble(
-            persona, emotion_summary,
+            persona, somatic_tags,
             current_activity="", location="",
             recent_events=recent_events
         )
-        prompt = (
-            f"{preamble}\n\n"
-            f"A traveler just approached you.\n"
-            f"Relationship with traveler: {relationship_context}\n\n"
-            f"Output a JSON object with:\n"
-            f'- "intent": one word (greet, warn, complain, thank, refuse, ask, inform, dismiss)\n'
-            f'- "utterance": one short sentence (max 15 words) spoken as {persona.get("name", role)}\n\n'
-            f"Output ONLY valid JSON."
+
+        system_msg = (
+            f"{preamble}\n"
+            f"Relationship with this traveler: {relationship_context}\n"
+            f"A traveler just approached you. Greet them with one short sentence "
+            f"as {name}. Stay in character."
         )
 
-        raw = self._generate(prompt, max_new_tokens=60, temperature=0.4)
+        messages = [{"role": "user", "content": "A traveler approaches."}]
+        raw = self._generate_chat(system_msg, messages, max_new_tokens=60,
+                                  temperature=0.4)
+        thought, _ = self._split_think_and_speech(raw) if raw else ("", "")
+        utterance = self._clean_utterance(raw) if raw else ""
+        if not utterance or utterance == "Hmm.":
+            fb = get_fallback_dialogue(role)
+            utterance = fb.get("greeting", "Hello there.")
 
-        try:
-            json_match = re.search(r'\{[^{}]*\}', raw)
-            if json_match:
-                data = json.loads(json_match.group())
-                return {
-                    "intent": str(data.get("intent", "greet"))[:20],
-                    "utterance": str(data.get("utterance", "Hello there."))[:300],
-                }
-        except (json.JSONDecodeError, ValueError):
-            pass
+        result = {"intent": "greet", "utterance": utterance}
+        if thought:
+            result["inner_thought"] = thought[:200]
+        return result
 
-        fb = get_fallback_dialogue(role)
-        return {"intent": "greet", "utterance": fb.get("greeting", "Hello there.")}
-
-    def chat(self, role: str, npc_name: str, emotion_summary: str,
+    def chat(self, role: str, npc_name: str, somatic_tags: list[str] | str,
              relationship_context: str, recent_events: list[str],
              conversation_history: list[dict], player_message: str) -> dict:
-        """Generate NPC reply using proper chat template turns."""
+        """Generate NPC reply using multi-turn chatml via llama-server."""
         persona = self._get_persona(npc_name, role)
         name = persona.get("name", npc_name)
 
         preamble = build_preamble(
-            persona, emotion_summary,
+            persona, somatic_tags,
             recent_events=recent_events
         )
 
@@ -379,7 +496,7 @@ class Layer3Model:
             f"Never break character or mention being an AI."
         )
 
-        messages = [{"role": "system", "content": system_msg}]
+        messages = []
         for msg in conversation_history[-6:]:
             if msg.get("speaker") == "Player":
                 messages.append({"role": "user", "content": msg.get("text", "")})
@@ -387,119 +504,93 @@ class Layer3Model:
                 messages.append({"role": "assistant", "content": msg.get("text", "")})
         messages.append({"role": "user", "content": player_message})
 
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=120,
-                temperature=0.25,
-                do_sample=True,
-                top_p=0.9,
-                repetition_penalty=1.2,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
-        generated = outputs[0][inputs["input_ids"].shape[1]:]
-        raw = self.tokenizer.decode(generated, skip_special_tokens=True).strip()
-
+        raw = self._generate_chat(system_msg, messages, max_new_tokens=120,
+                                  temperature=0.25)
+        thought, _ = self._split_think_and_speech(raw)
         utterance = self._clean_utterance(raw)
 
-        return {
+        result = {
             "utterance": utterance,
             "mood_shift": "neutral",
         }
+        if thought:
+            result["inner_thought"] = thought[:200]
+        return result
 
-    def converse(self, speaker_role: str, speaker_emotion: str,
-                 listener_role: str, listener_emotion: str,
+    def converse(self, speaker_role: str, speaker_somatic: list[str] | str,
+                 listener_role: str, listener_somatic: list[str] | str,
                  shared_context: str, speaker_recent: list[str],
                  speaker_name: str = "", listener_name: str = "") -> dict:
-        """Generate NPC-to-NPC conversation."""
+        """Generate NPC-to-NPC conversation line."""
         speaker_persona = self._get_persona(speaker_name, speaker_role)
         listener_persona = self._get_persona(listener_name, listener_role)
 
         preamble = build_preamble(
-            speaker_persona, speaker_emotion,
+            speaker_persona, speaker_somatic,
             current_activity=shared_context,
             recent_events=speaker_recent
         )
         listener_desc = build_listener_context(listener_persona)
 
-        prompt = (
-            f"{preamble}\n\n"
-            f"You are talking to {listener_desc}, who seems: {listener_emotion}.\n\n"
-            f"Say ONE line referencing something specific from your situation or memories.\n"
-            f"BAD: \"How are you?\", \"Good to see you\", \"Interesting...\"\n"
-            f"GOOD: \"That oven's been cold all morning\", \"The pantry's empty again\"\n\n"
-            f"Output a JSON object with:\n"
-            f'"intent": one word (gossip, warn, greet, ask, complain, share, joke, inform)\n'
-            f'"utterance": one short sentence (max 15 words)\n'
-            f'"topic": what you are talking about in 5 words or less\n\n'
-            f"Output ONLY valid JSON."
+        if isinstance(listener_somatic, list):
+            listener_feel = ", ".join(str(t) for t in listener_somatic[:3]) if listener_somatic else "calm"
+        else:
+            listener_feel = listener_somatic or "calm"
+
+        system_msg = (
+            f"{preamble}\n"
+            f"You are talking to {listener_desc}, who seems: {listener_feel}.\n"
+            f"Say ONE short sentence referencing something specific from your "
+            f"situation or memories. No generic pleasantries."
         )
 
-        raw = self._generate(prompt, max_new_tokens=80, temperature=0.25)
+        messages = [{"role": "user", "content": f"{listener_persona.get('name', listener_role)} is standing nearby."}]
+        raw = self._generate_chat(system_msg, messages, max_new_tokens=40,
+                                  temperature=0.25)
+        utterance = self._clean_utterance(raw) if raw else ""
+        if not utterance:
+            fb = get_fallback_dialogue(speaker_role)
+            utterance = fb.get("gossip", f"Hello, {listener_persona.get('name', listener_role)}.")
 
-        try:
-            json_match = re.search(r'\{[^{}]*\}', raw)
-            if json_match:
-                data = json.loads(json_match.group())
-                return {
-                    "intent": str(data.get("intent", "greet"))[:20],
-                    "utterance": str(data.get("utterance", "Good day."))[:300],
-                    "topic": str(data.get("topic", "small talk"))[:50],
-                }
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        fb = get_fallback_dialogue(speaker_role)
-        return {
-            "intent": "greet",
-            "utterance": fb.get("gossip", f"Hello, {listener_persona.get('name', listener_role)}."),
-            "topic": "small talk",
-        }
+        return {"intent": "greet", "utterance": utterance, "topic": "conversation"}
 
     def dialogue_from_packet(self, packet: dict) -> dict:
         """Structured packet-based dialogue (player greeting)."""
-        import logging
         npc_name = packet.get("npc_name", "")
         role = packet.get("role", "")
         persona = self._get_persona(npc_name, role)
+        name = persona.get("name", npc_name or role)
 
         preamble = build_preamble_from_packet(persona, packet)
 
         trust = packet.get("trust", 0.5)
         target_type = packet.get("target_type", "player")
         trust_desc = "friendly" if trust > 0.6 else "neutral" if trust > 0.3 else "wary"
+        approacher = "A traveler" if target_type == "player" else packet.get("target_name", "someone")
 
-        prompt = (
-            f"{preamble}\n\n"
-            f"A {'traveler' if target_type == 'player' else packet.get('target_name', 'someone')} just approached you.\n"
-            f"Your feeling toward them: {trust_desc} (trust {trust:.1f}).\n\n"
-            f"Output a JSON object with:\n"
-            f'"intent": one word (greet, warn, complain, thank, refuse, ask, inform, dismiss)\n'
-            f'"utterance": one short sentence (max 15 words) spoken as {persona.get("name", role)}\n\n'
-            f"Output ONLY valid JSON."
+        system_msg = (
+            f"{preamble}\n"
+            f"{approacher} just approached you. You feel {trust_desc} toward them.\n"
+            f"Greet them with one short sentence as {name}. Stay in character."
         )
 
-        logging.getLogger("layer3").info(f"DIALOGUE_V2 prompt len={len(prompt)} chars")
+        messages = [{"role": "user", "content": f"{approacher} approaches."}]
+        raw = self._generate_chat(system_msg, messages, max_new_tokens=40,
+                                  temperature=0.4)
 
-        raw = self._generate(prompt, max_new_tokens=60, temperature=0.4)
+        thought, _ = self._split_think_and_speech(raw) if raw else ("", "")
+        utterance = self._clean_utterance(raw) if raw else ""
 
-        try:
-            json_match = re.search(r'\{[^{}]*\}', raw)
-            if json_match:
-                data = json.loads(json_match.group())
-                return {
-                    "intent": str(data.get("intent", "greet"))[:20],
-                    "utterance": str(data.get("utterance", "Hello there."))[:300],
-                }
-        except (json.JSONDecodeError, ValueError):
-            pass
+        log.info(f"DIALOGUE_V2 [{npc_name}] thought='{thought[:80]}' speech='{utterance}'")
 
-        fb = get_fallback_dialogue(role)
-        return {"intent": "greet", "utterance": fb.get("greeting", "Hello there.")}
+        if not utterance or utterance == "Hmm.":
+            fb = get_fallback_dialogue(role)
+            utterance = fb.get("greeting", "Hello there.")
+
+        result = {"intent": "greet", "utterance": utterance}
+        if thought:
+            result["inner_thought"] = thought[:200]
+        return result
 
     def chat_from_packet(self, params: dict) -> dict:
         """Structured packet-based chat (player conversation reply).
@@ -541,10 +632,10 @@ class Layer3Model:
             state_parts.append(f"You are thinking: \"{current_thought}\"")
         if perception:
             state_parts.append(perception)
-        emotions = params.get("top_emotions", [])
-        if emotions:
-            emo_str = ", ".join(f"{e['name']}" for e in emotions[:3])
-            state_parts.append(f"You feel: {emo_str}")
+        somatic_tags = params.get("somatic_tags", [])
+        if somatic_tags:
+            feel_str = ", ".join(str(t) for t in somatic_tags)
+            state_parts.append(f"You feel: {feel_str}")
         state_str = "\n".join(state_parts) if state_parts else "You feel calm. You see a traveler nearby."
 
         system_msg = (
@@ -554,7 +645,7 @@ class Layer3Model:
             f"Reply in 1-3 sentences. Only mention what is listed above."
         )
 
-        messages = [{"role": "system", "content": system_msg}]
+        messages = []
         for msg in conversation_history[-6:]:
             if msg.get("speaker") == "Player":
                 messages.append({"role": "user", "content": msg.get("text", "")})
@@ -562,44 +653,25 @@ class Layer3Model:
                 messages.append({"role": "assistant", "content": msg.get("text", "")})
         messages.append({"role": "user", "content": player_message})
 
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-
         logging.getLogger("layer3").info(
-            f"CHAT_V2 prompt len={len(text)} chars, {len(messages)-1} turns"
+            f"CHAT_V2 prompt {len(messages)} turns"
         )
 
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=120,
-                temperature=0.25,
-                do_sample=True,
-                top_p=0.9,
-                repetition_penalty=1.2,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
-        generated = outputs[0][inputs["input_ids"].shape[1]:]
-        raw = self.tokenizer.decode(generated, skip_special_tokens=True).strip()
-
+        raw = self._generate_chat(system_msg, messages, max_new_tokens=120,
+                                  temperature=0.25)
+        thought, _ = self._split_think_and_speech(raw)
         utterance = self._clean_utterance(raw)
 
-        return {
+        result = {
             "utterance": utterance,
             "mood_shift": "neutral",
         }
-
-        fb = get_fallback_dialogue(role)
-        return {
-            "utterance": fb.get("busy", f"Things have been busy at the {role.lower()}'s."),
-            "mood_shift": "neutral",
-        }
+        if thought:
+            result["inner_thought"] = thought[:200]
+        return result
 
     def converse_from_packet(self, params: dict) -> dict:
         """Structured packet-based NPC-to-NPC conversation."""
-        import logging
         speaker = params.get("speaker", {})
         listener = params.get("listener", {})
 
@@ -614,60 +686,75 @@ class Layer3Model:
         preamble = build_preamble_from_packet(speaker_persona, speaker)
         listener_desc = build_listener_context(listener_persona)
 
-        # Listener emotions for context
-        listener_emotions = listener.get("top_emotions", [])
-        listener_emo_str = ""
-        if listener_emotions:
-            listener_emo_str = ", ".join(f"{e['name']}" for e in listener_emotions[:2])
+        listener_somatic = listener.get("somatic_tags", [])
+        listener_feel = ", ".join(str(t) for t in listener_somatic[:3]) if listener_somatic else "calm"
 
-        prompt = (
-            f"{preamble}\n\n"
-            f"You are talking to {listener_desc}"
-            f"{f', who seems: {listener_emo_str}' if listener_emo_str else ''}.\n\n"
-            f"Say ONE line referencing something specific from your situation or memories.\n"
-            f'BAD: "How are you?", "Good to see you", "Interesting..."\n'
-            f'GOOD: "That oven\'s been cold all morning", "The pantry\'s empty again"\n\n'
-            f"Output a JSON object with:\n"
-            f'"intent": one word (gossip, warn, greet, ask, complain, share, joke, inform)\n'
-            f'"utterance": one short sentence (max 15 words)\n'
-            f'"topic": what you are talking about in 5 words or less\n\n'
-            f"Output ONLY valid JSON."
+        system_msg = (
+            f"{preamble}\n"
+            f"You are talking to {listener_desc}, who seems: {listener_feel}.\n"
+            f"Say ONE short sentence referencing something specific from your "
+            f"situation or memories. No generic pleasantries."
         )
 
-        logging.getLogger("layer3").info(f"CONVERSE_V2 prompt len={len(prompt)} chars")
+        messages = [{"role": "user", "content": f"{listener_persona.get('name', listener_role)} is standing nearby."}]
+        raw = self._generate_chat(system_msg, messages, max_new_tokens=40,
+                                  temperature=0.25)
 
-        raw = self._generate(prompt, max_new_tokens=80, temperature=0.25)
+        log.info(f"CONVERSE_V2 [{speaker_name}->{listener_name}] raw='{raw[:120] if raw else '(empty)'}'")
 
-        try:
-            json_match = re.search(r'\{[^{}]*\}', raw)
-            if json_match:
-                data = json.loads(json_match.group())
-                return {
-                    "intent": str(data.get("intent", "greet"))[:20],
-                    "utterance": str(data.get("utterance", "Good day."))[:300],
-                    "topic": str(data.get("topic", "small talk"))[:50],
-                }
-        except (json.JSONDecodeError, ValueError):
-            pass
+        utterance = self._clean_utterance(raw) if raw else ""
+        if not utterance:
+            fb = get_fallback_dialogue(speaker_role)
+            utterance = fb.get("gossip", f"Hello, {listener_persona.get('name', listener_role)}.")
 
-        fb = get_fallback_dialogue(speaker_role)
-        return {
-            "intent": "greet",
-            "utterance": fb.get("gossip", f"Hello, {listener_persona.get('name', listener_role)}."),
-            "topic": "small talk",
-        }
+        return {"intent": "greet", "utterance": utterance, "topic": "conversation"}
 
     # ------------------------------------------------------------------
     # Utterance cleanup
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _split_think_and_speech(raw: str) -> tuple[str, str]:
+        """Separate <think>...</think> inner monologue from spoken output.
+
+        Returns (thought, speech). The thought is the being's inner monologue.
+        The speech is what gets said aloud. Either may be empty.
+        """
+        thought = ""
+        speech = raw
+
+        # Extract thought from <think> block
+        think_match = re.search(r'<think>(.*?)</think>', raw, re.DOTALL)
+        if think_match:
+            thought = think_match.group(1).strip()
+            speech = raw[think_match.end():].strip()
+        elif raw.startswith('<think>'):
+            # Unclosed think block — everything is thought, no speech
+            thought = raw.replace('<think>', '').replace('</think>', '').strip()
+            speech = ""
+
+        # Clean orphaned tags and chatml tokens from speech
+        speech = speech.replace('</think>', '').replace('<think>', '')
+        speech = re.sub(r'<\|im_start\|>.*', '', speech, flags=re.DOTALL)
+        speech = speech.replace('<|im_end|>', '').strip()
+
+        return thought, speech
+
+    @staticmethod
     def _clean_utterance(raw: str, max_len: int = 300) -> str:
         """Clean model output into a presentable utterance.
-        Takes first 1-2 sentences, strips JSON artifacts, caps length."""
+        Extracts speech after <think> blocks, strips artifacts, caps length.
+        If the model only thought with no speech, uses the thought as speech —
+        the fine-tuned model often puts good dialogue inside think tags."""
+        thought, speech = Layer3Model._split_think_and_speech(raw)
+
+        # If no speech but there's a thought, use the thought
+        if not speech.strip() and thought.strip():
+            speech = thought
+
         # Take first non-empty line
         utterance = ""
-        for line in raw.split("\n"):
+        for line in speech.split("\n"):
             line = line.strip()
             if line:
                 utterance = line
@@ -686,7 +773,6 @@ class Layer3Model:
             utterance = utterance[1:-1]
         # Try to end at a sentence boundary if over max_len
         if len(utterance) > max_len:
-            # Find last sentence-ending punctuation before max_len
             for i in range(max_len - 1, max(max_len - 80, 0), -1):
                 if utterance[i] in ".!?":
                     utterance = utterance[:i + 1]
@@ -752,18 +838,13 @@ class Layer3Model:
         backstory = p.get("backstory", "A resident of the town.")
 
         drives = context.get("drives", {})
-        emo_vec = context.get("emotion_vector", [])
 
-        top_emo = []
-        if emo_vec and len(emo_vec) >= 27:
-            from emotion_coords import DIMENSIONS
-            indexed = sorted(
-                [(DIMENSIONS[i], emo_vec[i]) for i in range(min(len(emo_vec), len(DIMENSIONS)))],
-                key=lambda x: -x[1]
-            )
-            top_emo = [f"{n} ({v:.2f})" for n, v in indexed[:3] if v > 0.05]
-
-        emo_str = ", ".join(top_emo) if top_emo else "calm"
+        # Somatic tags — what the being feels in its body
+        somatic_tags = context.get("somatic_tags", [])
+        if somatic_tags:
+            feel_str = ", ".join(str(t) for t in somatic_tags)
+        else:
+            feel_str = "body:settled"
 
         visible = context.get("visible", [])
         perception_lines = []
@@ -808,13 +889,12 @@ class Layer3Model:
         prompt = (
             f"You are {name}, the {role}. Personality: {traits}.\n"
             f"Background: {backstory}\n"
-            f"You feel: {emo_str}.\n"
+            f"You feel: {feel_str}.\n"
             f"Current goals: {intentions_str}.\n"
             f"What you know: {beliefs_str}.\n"
             f"{thoughts_str}\n\n"
             f"It is {hour_str}. You are at the {location}.\n"
-            f"Energy {drives.get('energy', 80):.0f}/100, Hunger {drives.get('hunger', 20):.0f}/100, "
-            f"Social {drives.get('social_need', 30):.0f}/100.\n"
+            f"\n"
             f"Doing: {context.get('current_action', 'idle')}.\n"
             f"People you see:\n{perception_str}\n"
             f"Recent: {events_str}\n\n"

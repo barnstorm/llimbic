@@ -99,7 +99,7 @@ func get_target_position() -> Vector2:
 		return LOCATIONS[loc_name]
 	return Vector2(2096, 800)
 
-func update_plan(hour: float, memory_summary: String, emotion_summary: String, inference_client: Node, object_summary: String = "") -> void:
+func update_plan(hour: float, memory_summary: String, somatic_tags: Array, inference_client: Node, object_summary: String = "") -> void:
 	## Legacy prose-based planning — kept for backward compatibility.
 	if _last_plan_hour < 0.0:
 		_last_plan_hour = hour
@@ -117,7 +117,7 @@ func update_plan(hour: float, memory_summary: String, emotion_summary: String, i
 	var context: String = "Hour: %.1f, Location: %s" % [hour, get_current_chunk().get("location", "unknown")]
 	if object_summary != "":
 		context += "\n" + object_summary
-	inference_client.layer3_plan(_role, memory_summary, context, emotion_summary, _on_plan_result, _npc_name)
+	inference_client.layer3_plan(_role, memory_summary, context, somatic_tags, _on_plan_result, _npc_name)
 
 func update_plan_from_packet(packet: Dictionary, inference_client: Node) -> void:
 	## Structured packet-based planning. Replaces prose assembly.
@@ -157,7 +157,7 @@ func _on_plan_result(success: bool, data: Dictionary) -> void:
 					agenda.append(chunk)
 			current_chunk_index = 0
 
-func request_dialogue(emotion_summary: String, relationship_context: String, recent_events: Array, inference_client: Node, callback: Callable) -> void:
+func request_dialogue(somatic_tags: Array, relationship_context: String, recent_events: Array, inference_client: Node, callback: Callable) -> void:
 	## Legacy prose-based dialogue request.
 	if _pending_dialogue:
 		return
@@ -166,7 +166,7 @@ func request_dialogue(emotion_summary: String, relationship_context: String, rec
 		return
 	_pending_dialogue = true
 	_dialogue_callback = callback
-	inference_client.layer3_dialogue(_role, emotion_summary, relationship_context, recent_events, _on_dialogue_result, _npc_name)
+	inference_client.layer3_dialogue(_role, somatic_tags, relationship_context, recent_events, _on_dialogue_result, _npc_name)
 
 func request_dialogue_from_packet(packet: Dictionary, inference_client: Node, callback: Callable) -> void:
 	## Structured packet-based dialogue request.

@@ -75,7 +75,7 @@ def check_layer3_plan():
         "role": "Baker",
         "memory_summary": "Sold bread, heard about wolves",
         "current_context": "10:30 AM, at bakery",
-        "emotion_summary": "content",
+        "somatic_tags": ["body:settled", "head:clear"],
     }, timeout=15)
     assert r.status_code == 200
     d = r.json()
@@ -89,7 +89,7 @@ def check_layer3_plan():
 def check_layer3_dialogue():
     r = requests.post(f"{L3_BASE}/layer3/dialogue", json={
         "role": "Guard",
-        "emotion_summary": "alert",
+        "somatic_tags": ["chest:tight", "head:sharp"],
         "relationship_context": "Trust: 0.5",
         "recent_events": ["patrolled east road"],
     }, timeout=10)
@@ -104,7 +104,7 @@ def check_layer3_chat():
     r = requests.post(f"{L3_BASE}/layer3/chat", json={
         "role": "Guard",
         "npc_name": "Roland",
-        "emotion_summary": "alert",
+        "somatic_tags": ["chest:tight", "head:sharp"],
         "relationship_context": "Trust: 0.5",
         "recent_events": ["saw a stranger"],
         "conversation_history": [
@@ -126,7 +126,7 @@ def check_layer3_chat_multi_turn():
     r = requests.post(f"{L3_BASE}/layer3/chat", json={
         "role": "Baker",
         "npc_name": "Edith",
-        "emotion_summary": "cheerful",
+        "somatic_tags": ["chest:warm:open", "body:light"],
         "relationship_context": "Trust: 0.6",
         "recent_events": ["baked bread", "heard rumor about wolves"],
         "conversation_history": [
@@ -144,9 +144,9 @@ def check_layer3_chat_multi_turn():
 def check_layer3_converse():
     r = requests.post(f"{L3_BASE}/layer3/converse", json={
         "speaker_role": "Gossip",
-        "speaker_emotion": "curious",
+        "speaker_somatic": ["head:buzzing", "chest:open"],
         "listener_role": "Baker",
-        "listener_emotion": "content",
+        "listener_somatic": ["body:settled"],
         "shared_context": "At town square, morning",
         "speaker_recent": ["saw stranger near well"],
     }, timeout=10)
@@ -184,7 +184,7 @@ def check_response_time():
 
     t0 = time.time()
     requests.post(f"{L3_BASE}/layer3/chat", json={
-        "role": "Guard", "npc_name": "Roland", "emotion_summary": "alert",
+        "role": "Guard", "npc_name": "Roland", "somatic_tags": ["chest:tight", "head:sharp"],
         "relationship_context": "Trust: 0.5", "recent_events": [],
         "conversation_history": [], "player_message": "Hello",
     }, timeout=15)

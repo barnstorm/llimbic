@@ -227,7 +227,7 @@ try:
         "player_message": "What do you see around you?",
         "perception": "You are near the inn. You can see: a traveler, 2 tiles away.",
         "current_thought": "A stranger just arrived.",
-        "top_emotions": [{"name": "curiosity", "value": 0.6}],
+        "somatic_tags": ["head:buzzing", "chest:open"],
     }
 
     t0 = time.time()

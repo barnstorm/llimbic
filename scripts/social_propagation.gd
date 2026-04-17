@@ -204,7 +204,7 @@ func _request_speech(convo: Dictionary, speaker: Node, listener: Node) -> void:
 		"target_name": listener.npc_name,
 		"target_type": "npc",
 		"trust": speaker_trust,
-		"emotion_vector": speaker.brain.layer2.emotion_vector if speaker.brain.layer2 else [],
+		"somatic_tags": speaker.brain.layer1.get_somatic_tags() if speaker.brain.layer1 else [],
 		"current_activity": speaker.brain.get_current_action(),
 		"current_chunk": speaker.brain.layer3.get_current_chunk() if speaker.brain.layer3 else {},
 	}
@@ -217,7 +217,7 @@ func _request_speech(convo: Dictionary, speaker: Node, listener: Node) -> void:
 		"target_name": speaker.npc_name,
 		"target_type": "npc",
 		"trust": listener_trust,
-		"emotion_vector": listener.brain.layer2.emotion_vector if listener.brain.layer2 else [],
+		"somatic_tags": listener.brain.layer1.get_somatic_tags() if listener.brain.layer1 else [],
 		"current_activity": listener.brain.get_current_action(),
 		"current_chunk": listener.brain.layer3.get_current_chunk() if listener.brain.layer3 else {},
 	}

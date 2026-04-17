@@ -99,9 +99,27 @@ def _format_perception(context: dict) -> str:
     recent_thoughts = context.get("recent_thoughts", [])
     last_thought = recent_thoughts[-1] if recent_thoughts else "none"
 
-    # Available locations
-    from command_grammar import LOCATIONS
-    places_str = ", ".join(LOCATIONS)
+    # Inventory — what the being is carrying
+    carried = context.get("carried_items", [])
+    carry_str = ", ".join(carried) if carried else "(nothing)"
+
+    # Items available at this location
+    available = context.get("available_items", [])
+    avail_str = ", ".join(available) if available else ""
+
+    # Known locations (discovered through visitation)
+    known = context.get("known_locations", [])
+    places_str = ", ".join(known) if known else "(nowhere yet)"
+
+    # Glimpsed buildings (visible but unvisited — unknown)
+    glimpsed = context.get("glimpsed_buildings", [])
+    glimpse_parts = []
+    for g in glimpsed:
+        direction = g.get("direction", "nearby")
+        dist = g.get("distance_tiles", 0)
+        dist_label = "close" if dist < 8 else "far"
+        glimpse_parts.append(f"building ({direction}, {dist_label})")
+    glimpse_str = ", ".join(glimpse_parts) if glimpse_parts else ""
 
     return (
         f"BEING: {role}\n"
@@ -109,6 +127,8 @@ def _format_perception(context: dict) -> str:
         f"DOING: {current_action}\n"
         f"\n"
         f"You feel: {feel_str}\n"
+        f"Carrying: {carry_str}\n"
+        f"{f'Available here: {avail_str}' + chr(10) if avail_str else ''}"
         f"\n"
         f"You see:\n{see_str}\n"
         f"You hear:\n{hear_str}\n"
@@ -119,7 +139,13 @@ def _format_perception(context: dict) -> str:
         f"Beliefs: {beliefs}\n"
         f"Last thought: {last_thought}\n"
         f"\n"
-        f"Available places: {places_str}\n"
+        f"Known places: {places_str}\n"
+        f"{f'You can see: {glimpse_str}' + chr(10) if glimpse_str else ''}"
+        f"\n"
+        f"Commands: GO TO place, LOOK AT target, SAY \"words\" TO target, "
+        f"APPROACH target, FLEE FROM target, EXAMINE object, WANDER, WAIT"
+        f"{', TAKE item, CONSUME item, DROP item' if carried or available else ''}"
+        f"{', GIVE item TO person' if carried and see_lines else ''}\n"
         f"\n"
         f"Think about your situation, then choose ONE action."
     )

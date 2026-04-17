@@ -99,10 +99,10 @@ func setup_default_network(persona: Dictionary) -> void:
 	var init_safety: float = float(drives.get("safety", 80.0))
 
 	# --- Fixed neurons ---
-	_add_neuron("drive_energy", "drive", init_energy, false, "", "Energy")
-	_add_neuron("drive_hunger", "drive", init_hunger, false, "", "Hunger")
-	_add_neuron("drive_social", "drive", init_social, false, "", "Social")
-	_add_neuron("drive_safety", "drive", init_safety, false, "", "Safety")
+	_add_neuron("drive_energy", "drive", init_energy, true, "", "Energy")
+	_add_neuron("drive_hunger", "drive", init_hunger, true, "", "Hunger")
+	_add_neuron("drive_social", "drive", init_social, true, "", "Social")
+	_add_neuron("drive_safety", "drive", init_safety, true, "", "Safety")
 
 	# Task state (stored 0-100, exposed as 0-1 by substrate)
 	_add_neuron("task_momentum", "task", 0.0, false, "", "Momentum")
@@ -134,6 +134,20 @@ func setup_default_network(persona: Dictionary) -> void:
 	_add_neuron("vagal_sympathetic", "vagal", 20.0, false, "", "Sympathetic")   # fight/flight
 	_add_neuron("vagal_dorsal", "vagal", 5.0, false, "", "DorsalVagal")         # freeze/shutdown
 
+	# --- Emotion sensory neurons (protected, learnable outgoing) ---
+	# Activation SET from emotion vector each tick; outgoing connections learn via Hebbian
+	_add_emotion_neuron("emo_fear", "Fear")
+	_add_emotion_neuron("emo_anger", "Anger")
+	_add_emotion_neuron("emo_disgust", "Disgust")
+	_add_emotion_neuron("emo_nervousness", "Nervousness")
+	_add_emotion_neuron("emo_grief", "Grief")
+	_add_emotion_neuron("emo_joy", "Joy")
+	_add_emotion_neuron("emo_excitement", "Excitement")
+	_add_emotion_neuron("emo_sadness", "Sadness")
+	_add_emotion_neuron("emo_embarrassment", "Embarrassment")
+	_add_emotion_neuron("emo_relief", "Relief")
+	_add_emotion_neuron("emo_curiosity", "Curiosity")
+
 	# --- Quality neurons (somatic tag emitters) ---
 	_seed_quality_neurons()
 
@@ -153,8 +167,24 @@ func _add_neuron(id: String, type: String, activation: float, protected: bool, c
 		"type": type,
 		"activation": activation,
 		"protected": protected,
+		"learnable_outgoing": false,
 		"category": category,
 		"age": 1000,  # fixed neurons treated as mature
+		"label": label,
+	}
+	neurons.append(neuron)
+	_neuron_map[id] = neuron
+
+func _add_emotion_neuron(id: String, label: String) -> void:
+	## Emotion sensory neuron — activation SET from emotion vector, outgoing connections learn.
+	var neuron: Dictionary = {
+		"id": id,
+		"type": "emotion_sensory",
+		"activation": 0.0,
+		"protected": true,
+		"learnable_outgoing": true,
+		"category": "",
+		"age": 1000,
 		"label": label,
 	}
 	neurons.append(neuron)
@@ -396,12 +426,84 @@ func _seed_vagal_connections() -> void:
 	_add_connection("vagal_dorsal", "q_foggy", 0.04)
 	_add_connection("vagal_dorsal", "q_cold", 0.04)
 
+func _seed_emotion_quality_connections() -> void:
+	## Seed emotion→quality connections. These are the LEARNABLE replacements for the
+	## hardcoded _apply_emotion_to_qualities() in somatic_stream.gd.
+	## Two beings start identical but diverge through Hebbian co-activation.
+
+	# Fear → threat body sensations
+	_add_connection("emo_fear", "q_tight", 0.08)
+	_add_connection("emo_fear", "q_pounding", 0.06)
+	_add_connection("emo_fear", "q_prickling", 0.08)
+	_add_connection("emo_fear", "q_churning", 0.05)
+	_add_connection("emo_fear", "q_constricted", 0.05)
+
+	# Anger → tension body sensations
+	_add_connection("emo_anger", "q_tight", 0.06)
+	_add_connection("emo_anger", "q_coiled", 0.08)
+	_add_connection("emo_anger", "q_pressure", 0.05)
+	_add_connection("emo_anger", "q_raw", 0.04)
+
+	# Disgust → gut sensations
+	_add_connection("emo_disgust", "q_churning", 0.08)
+	_add_connection("emo_disgust", "q_crawling", 0.06)
+
+	# Nervousness → flutter/prickling
+	_add_connection("emo_nervousness", "q_churning", 0.05)
+	_add_connection("emo_nervousness", "q_fluttering", 0.08)
+	_add_connection("emo_nervousness", "q_dry", 0.04)
+	_add_connection("emo_nervousness", "q_prickling", 0.04)
+
+	# Grief → hollow/cold/heavy
+	_add_connection("emo_grief", "q_hollow", 0.08)
+	_add_connection("emo_grief", "q_cold", 0.06)
+	_add_connection("emo_grief", "q_heavy", 0.06)
+	_add_connection("emo_grief", "q_constricted", 0.04)
+
+	# Joy → warm/light/open
+	_add_connection("emo_joy", "q_warm", 0.08)
+	_add_connection("emo_joy", "q_light", 0.06)
+	_add_connection("emo_joy", "q_open", 0.06)
+
+	# Excitement → fluttering/buzzing/aroused
+	_add_connection("emo_excitement", "q_fluttering", 0.08)
+	_add_connection("emo_excitement", "q_buzzing", 0.06)
+	_add_connection("emo_excitement", "q_aroused", 0.06)
+
+	# Sadness → heavy/foggy/cold
+	_add_connection("emo_sadness", "q_heavy", 0.08)
+	_add_connection("emo_sadness", "q_foggy", 0.06)
+	_add_connection("emo_sadness", "q_cold", 0.04)
+
+	# Embarrassment → warm(flush)/churning
+	_add_connection("emo_embarrassment", "q_warm", 0.04)
+	_add_connection("emo_embarrassment", "q_churning", 0.05)
+
+	# Relief → loose/settled/open
+	_add_connection("emo_relief", "q_loose", 0.08)
+	_add_connection("emo_relief", "q_settled", 0.06)
+	_add_connection("emo_relief", "q_open", 0.05)
+
+func _seed_emotion_action_connections() -> void:
+	## Seed emotion→action/task connections. These replace the hardcoded nudges in
+	## layer1_substrate.gd:apply_emotion_feedback(). fear→safety stays hardcoded
+	## because drive_safety is protected (propagation can't reach it).
+	_add_connection("emo_anger", "task_frustration", 0.06)
+	_add_connection("emo_curiosity", "action_observe", 0.06)
+	_add_connection("emo_fear", "action_flee", 0.07)
+	_add_connection("emo_joy", "action_approach", 0.05)
+	_add_connection("emo_nervousness", "action_avoid", 0.05)
+
 func _seed_connections(role: String) -> void:
 	# --- Quality neuron connections ---
 	_seed_quality_connections()
 
 	# --- Vagal neuron connections ---
 	_seed_vagal_connections()
+
+	# --- Emotion → quality + action connections ---
+	_seed_emotion_quality_connections()
+	_seed_emotion_action_connections()
 
 	# --- Sensory -> Drive (homeostatic) ---
 	_add_connection("sense_at_home", "drive_energy", 0.3)    # energy recovers at home
@@ -553,7 +655,7 @@ func hebbian_update(learning_rate_mod: float) -> void:
 		var dst_n: Dictionary = _neuron_map.get(conn["dst"], {})
 		if src_n.is_empty() or dst_n.is_empty():
 			continue
-		if src_n["protected"]:
+		if src_n["protected"] and not src_n.get("learnable_outgoing", false):
 			continue  # don't learn on pure input connections (src side)
 		if src_n["activation"] > HEBBIAN_THRESHOLD and dst_n["activation"] > HEBBIAN_THRESHOLD:
 			var score: float = src_n["activation"] + dst_n["activation"] + randf_range(0.0, 10.0)
@@ -599,7 +701,7 @@ func _check_spontaneous_connections(learning_rate_mod: float) -> void:
 	# Find pairs of non-protected neurons both above threshold with no existing connection
 	var active_neurons: Array = []
 	for neuron in neurons:
-		if neuron["protected"]:
+		if neuron["protected"] and not neuron.get("learnable_outgoing", false):
 			continue
 		if neuron["activation"] > HEBBIAN_THRESHOLD:
 			active_neurons.append(neuron)

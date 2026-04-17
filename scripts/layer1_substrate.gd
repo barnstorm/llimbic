@@ -186,7 +186,7 @@ func update(delta: float) -> void:
 	_somatic_timer += delta
 	if _somatic_timer >= SOMATIC_INTERVAL and _somatic != null:
 		_somatic_timer -= SOMATIC_INTERVAL
-		somatic_tags = _somatic.emit(_emotion_vector)
+		somatic_tags = _somatic.emit()
 
 func _update_sensory_neurons() -> void:
 	_network.set_activation("sense_at_home", 100.0 if _is_at_home else 0.0)
@@ -197,6 +197,20 @@ func _update_sensory_neurons() -> void:
 	_network.set_activation("sense_loc_familiarity", place_familiarity.get(_current_location, 0.3) * 100.0)
 	_network.set_activation("sense_is_night", 100.0 if (_hour >= 21.0 or _hour < 6.0) else 0.0)
 	_network.set_activation("sense_at_food", 100.0 if _current_location in ["bakery", "inn", "market", "farm"] else 0.0)
+
+	# Emotion sensory neurons — SET from cached emotion vector
+	if _emotion_vector.size() >= 27:
+		_network.set_activation("emo_fear", _emotion_vector[18] * 100.0)
+		_network.set_activation("emo_anger", _emotion_vector[12] * 100.0)
+		_network.set_activation("emo_disgust", _emotion_vector[16] * 100.0)
+		_network.set_activation("emo_nervousness", _emotion_vector[20] * 100.0)
+		_network.set_activation("emo_grief", _emotion_vector[19] * 100.0)
+		_network.set_activation("emo_joy", _emotion_vector[7] * 100.0)
+		_network.set_activation("emo_excitement", _emotion_vector[5] * 100.0)
+		_network.set_activation("emo_sadness", _emotion_vector[22] * 100.0)
+		_network.set_activation("emo_embarrassment", _emotion_vector[17] * 100.0)
+		_network.set_activation("emo_relief", _emotion_vector[11] * 100.0)
+		_network.set_activation("emo_curiosity", _emotion_vector[24] * 100.0)
 
 func _baseline_drift(rate: float) -> void:
 	# Energy depletes during activity, recovers at home
@@ -375,43 +389,18 @@ func should_interrupt_for(urgency: String) -> bool:
 # =========================================================================
 
 func apply_emotion_feedback(emotion_vector: Array) -> void:
-	## Emotions feed back into drives/actions. Small per-tick nudges.
+	## Cache emotion vector for sensory neuron writes in _update_sensory_neurons().
+	## Emotion→action/task nudges are now learnable Hebbian connections
+	## (emo_anger→task_frustration, emo_fear→action_flee, etc.).
+	## Only fear→safety remains hardcoded: drive_safety is protected, propagation can't reach it.
 	if _network == null or emotion_vector.size() < 27:
 		return
 	_emotion_vector = emotion_vector
-	var rate: float = 0.02  # small influence per tick
 
-	# Anger (12) boosts frustration
-	var anger: float = emotion_vector[12]
-	if anger > 0.3:
-		var f: float = _network.get_activation("task_frustration")
-		_network.set_activation("task_frustration", clampf(f + anger * rate * 50.0, 0.0, 100.0))
-
-	# Curiosity (24) boosts observe
-	var curiosity: float = emotion_vector[24]
-	if curiosity > 0.3:
-		var o: float = _network.get_activation("action_observe")
-		_network.set_activation("action_observe", clampf(o + curiosity * rate * 50.0, 0.0, 100.0))
-
-	# Fear (18) reduces safety feeling, boosts flee
 	var fear: float = emotion_vector[18]
 	if fear > 0.2:
 		var s: float = _network.get_activation("drive_safety")
-		_network.set_activation("drive_safety", clampf(s - fear * rate * 30.0, 0.0, 100.0))
-		var fl: float = _network.get_activation("action_flee")
-		_network.set_activation("action_flee", clampf(fl + fear * rate * 50.0, 0.0, 100.0))
-
-	# Joy (7) boosts approach
-	var joy: float = emotion_vector[7]
-	if joy > 0.3:
-		var a: float = _network.get_activation("action_approach")
-		_network.set_activation("action_approach", clampf(a + joy * rate * 30.0, 0.0, 100.0))
-
-	# Nervousness (20) boosts avoid
-	var nervousness: float = emotion_vector[20]
-	if nervousness > 0.3:
-		var av: float = _network.get_activation("action_avoid")
-		_network.set_activation("action_avoid", clampf(av + nervousness * rate * 30.0, 0.0, 100.0))
+		_network.set_activation("drive_safety", clampf(s - fear * 0.02 * 30.0, 0.0, 100.0))
 
 # =========================================================================
 # NETWORK DEBUG ACCESS

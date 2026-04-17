@@ -13,7 +13,6 @@ import json
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
-import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 import uvicorn
@@ -30,6 +29,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from layer3_model import Layer3Model
 from command_model import CommandModel
 from thought_loop import ThoughtLoop
+from trace_logger import trace_speech
 
 app = FastAPI(title="Burg Layer 3 Server", version="1.0")
 model: Layer3Model | None = None
@@ -44,7 +44,7 @@ class PlanRequest(BaseModel):
     npc_name: str = ""
     memory_summary: str = ""
     current_context: str = ""
-    emotion_summary: str = ""
+    somatic_tags: list[str] = []
 
 class PlanResponse(BaseModel):
     agenda: list[dict]
@@ -62,7 +62,7 @@ class ReflectResponse(BaseModel):
 class DialogueRequest(BaseModel):
     role: str
     npc_name: str = ""
-    emotion_summary: str = ""
+    somatic_tags: list[str] = []
     relationship_context: str = ""
     recent_events: list[str] = []
 
@@ -73,7 +73,7 @@ class DialogueResponse(BaseModel):
 class ChatRequest(BaseModel):
     role: str
     npc_name: str
-    emotion_summary: str = ""
+    somatic_tags: list[str] = []
     relationship_context: str = ""
     recent_events: list[str] = []
     conversation_history: list[dict] = []
@@ -90,7 +90,7 @@ class PlanPacketRequest(BaseModel):
     current_location: str = ""
     current_chunk: dict = {}
     replan_reason: str = "none"
-    top_emotions: list[dict] = []
+    somatic_tags: list[str] = []
     concerns: list[str] = []
     problem_objects: list[dict] = []
     recent_failures: list[dict] = []
@@ -99,10 +99,10 @@ class PlanPacketRequest(BaseModel):
 class ConverseRequest(BaseModel):
     speaker_role: str
     speaker_name: str = ""
-    speaker_emotion: str = ""
+    speaker_somatic: list[str] = []
     listener_role: str
     listener_name: str = ""
-    listener_emotion: str = ""
+    listener_somatic: list[str] = []
     shared_context: str = ""
     speaker_recent: list[str] = []
 
@@ -124,8 +124,8 @@ class HealthResponse(BaseModel):
 async def load_model():
     global model, thought_loop, startup_time
     startup_time = time.time()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    # Command model: SmolLM3-3B fine-tuned for adventure-command thought loop
+
+    # Command model: SmolLM3-3B fine-tuned for adventure-command thought loop (port 8423)
     cmd_model = None
     try:
         cmd_model = CommandModel()
@@ -133,14 +133,14 @@ async def load_model():
     except FileNotFoundError as e:
         print(f"Layer 3 server: CommandModel not available ({e}), using legacy thought generation")
 
-    model = Layer3Model(model_name="HuggingFaceTB/SmolLM2-1.7B-Instruct", device=device,
-                        command_model=cmd_model)
+    # Chat model: SmolLM3-3B base for chat/plan/dialogue/converse/reflect (port 8424)
+    model = Layer3Model(command_model=cmd_model)
 
     # Try to load L2 model for thought loop (limbic coloring of thoughts)
     l2_model = None
     try:
         from layer2_model import Layer2Model
-        l2_model = Layer2Model(device=device)
+        l2_model = Layer2Model()
         print("Layer 3 server: L2 limbic model loaded for thought loop")
     except Exception as e:
         print(f"Layer 3 server: L2 model not available for thought loop ({e}), "
@@ -158,7 +158,11 @@ async def _run(fn, *args):
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    gpu_mem = torch.cuda.memory_allocated() / 1e6 if torch.cuda.is_available() else 0
+    try:
+        import torch
+        gpu_mem = torch.cuda.memory_allocated() / 1e6 if torch.cuda.is_available() else 0
+    except ImportError:
+        gpu_mem = 0
     return HealthResponse(
         status="ok" if model else "loading",
         model=model.model_name if model else "not loaded",
@@ -168,9 +172,10 @@ async def health():
 
 @app.post("/layer3/plan", response_model=PlanResponse)
 async def plan(req: PlanRequest):
-    log.info(f"PLAN [{req.role}] context='{req.current_context[:60]}' emotion='{req.emotion_summary[:40]}'")
+    tags_preview = ", ".join(req.somatic_tags[:3]) if req.somatic_tags else "(none)"
+    log.info(f"PLAN [{req.role}] context='{req.current_context[:60]}' feel='{tags_preview}'")
     t0 = time.time()
-    result = await _run(model.plan, req.role, req.memory_summary, req.current_context, req.emotion_summary, req.npc_name)
+    result = await _run(model.plan, req.role, req.memory_summary, req.current_context, req.somatic_tags, req.npc_name)
     log.info(f"PLAN [{req.role}] -> {len(result.get('agenda',[]))} chunks ({result.get('source','?')}) [{time.time()-t0:.1f}s]")
     return PlanResponse(**result)
 
@@ -184,9 +189,10 @@ async def reflect(req: ReflectRequest):
 
 @app.post("/layer3/dialogue", response_model=DialogueResponse)
 async def dialogue(req: DialogueRequest):
-    log.info(f"DIALOGUE [{req.role}] emotion='{req.emotion_summary[:40]}'")
+    tags_preview = ", ".join(req.somatic_tags[:3]) if req.somatic_tags else "(none)"
+    log.info(f"DIALOGUE [{req.role}] feel='{tags_preview}'")
     t0 = time.time()
-    result = await _run(model.dialogue, req.role, req.emotion_summary,
+    result = await _run(model.dialogue, req.role, req.somatic_tags,
                          req.relationship_context, req.recent_events, req.npc_name)
     log.info(f"DIALOGUE [{req.role}] -> intent={result.get('intent','')} \"{result.get('utterance','')}\" [{time.time()-t0:.1f}s]")
     return DialogueResponse(**result)
@@ -196,7 +202,7 @@ async def chat(req: ChatRequest):
     log.info(f"CHAT [{req.npc_name}] player says: \"{req.player_message}\"")
     t0 = time.time()
     def _do():
-        return model.chat(req.role, req.npc_name, req.emotion_summary,
+        return model.chat(req.role, req.npc_name, req.somatic_tags,
                            req.relationship_context, req.recent_events,
                            req.conversation_history, req.player_message)
     result = await _run(_do)
@@ -208,8 +214,8 @@ async def converse(req: ConverseRequest):
     log.info(f"CONVERSE [{req.speaker_role}] -> [{req.listener_role}]")
     t0 = time.time()
     def _do():
-        return model.converse(req.speaker_role, req.speaker_emotion,
-                               req.listener_role, req.listener_emotion,
+        return model.converse(req.speaker_role, req.speaker_somatic,
+                               req.listener_role, req.listener_somatic,
                                req.shared_context, req.speaker_recent,
                                req.speaker_name, req.listener_name)
     result = await _run(_do)
@@ -249,17 +255,38 @@ async def websocket_endpoint(ws: WebSocket):
         try:
             result = await _dispatch(method, params)
             elapsed = time.time() - t0
-            # Log based on method
+            # Log based on method — always include utterances
+            npc = params.get("npc_name", params.get("speaker", {}).get("npc_name", ""))
+            utt = result.get("utterance", "")
             if method == "chat":
-                log.info(f"WS CHAT [{params.get('npc_name','')}] player: \"{params.get('player_message','')}\" -> \"{result.get('utterance','')}\" [{elapsed:.1f}s]")
+                log.info(f"WS CHAT [{npc}] player: \"{params.get('player_message','')}\" -> \"{utt}\" [{elapsed:.1f}s]")
+                trace_speech(npc, "chat", params, result, elapsed * 1000)
+            elif method == "chat_v2":
+                log.info(f"WS CHAT_V2 [{npc}] player: \"{params.get('player_message','')}\" -> \"{utt}\" [{elapsed:.1f}s]")
+                trace_speech(npc, "chat_v2", params, result, elapsed * 1000)
+            elif method == "dialogue_v2":
+                log.info(f"WS DIALOGUE_V2 [{npc}] intent={result.get('intent','')} \"{utt}\" [{elapsed:.1f}s]")
+                trace_speech(npc, "dialogue_v2", params, result, elapsed * 1000)
+            elif method == "converse_v2":
+                speaker_name = params.get("speaker", {}).get("npc_name", "")
+                listener_name = params.get("listener", {}).get("npc_name", "")
+                log.info(f"WS CONVERSE_V2 [{speaker_name}->{listener_name}] \"{utt}\" topic={result.get('topic','')} [{elapsed:.1f}s]")
+                trace_speech(speaker_name, "converse_v2", params, result, elapsed * 1000)
             elif method == "plan":
                 log.info(f"WS PLAN [{params.get('role','')}] -> {len(result.get('agenda',[]))} chunks ({result.get('source','?')}) [{elapsed:.1f}s]")
             elif method == "plan_v2":
-                log.info(f"WS PLAN_V2 [{params.get('npc_name','')}] reason={params.get('replan_reason','')} -> {len(result.get('agenda',[]))} chunks ({result.get('source','?')}) [{elapsed:.1f}s]")
+                log.info(f"WS PLAN_V2 [{npc}] reason={params.get('replan_reason','')} -> {len(result.get('agenda',[]))} chunks ({result.get('source','?')}) [{elapsed:.1f}s]")
             elif method == "dialogue":
-                log.info(f"WS DIALOGUE [{params.get('role','')}] -> \"{result.get('utterance','')}\" [{elapsed:.1f}s]")
+                log.info(f"WS DIALOGUE [{params.get('role','')}] -> \"{utt}\" [{elapsed:.1f}s]")
+                trace_speech(npc, "dialogue", params, result, elapsed * 1000)
             elif method == "converse":
-                log.info(f"WS CONVERSE [{params.get('speaker_role','')}] -> \"{result.get('utterance','')}\" [{elapsed:.1f}s]")
+                log.info(f"WS CONVERSE [{params.get('speaker_role','')}] -> \"{utt}\" [{elapsed:.1f}s]")
+                trace_speech(params.get("speaker_name", ""), "converse", params, result, elapsed * 1000)
+            elif method == "reflect_v2":
+                refs = result.get("reflections", [])
+                log.info(f"WS REFLECT_V2 [{npc}] {len(refs)} reflections, concerns={result.get('concerns',[])} [{elapsed:.1f}s]")
+            elif method == "state_update":
+                pass  # too noisy
             else:
                 log.info(f"WS {method.upper()} [{elapsed:.1f}s]")
             await safe_send(json.dumps({"id": req_id, "result": result}))
@@ -305,7 +332,7 @@ async def _dispatch(method: str, params: dict) -> dict:
         return await _run(model.plan, params.get("role", ""),
                            params.get("memory_summary", ""),
                            params.get("current_context", ""),
-                           params.get("emotion_summary", ""),
+                           params.get("somatic_tags", []),
                            params.get("npc_name", ""))
     elif method == "plan_v2":
         return await _run(model.plan_from_packet, params)
@@ -316,7 +343,7 @@ async def _dispatch(method: str, params: dict) -> dict:
         return await _run(model.reflect_from_packet, params)
     elif method == "dialogue":
         return await _run(model.dialogue, params.get("role", ""),
-                           params.get("emotion_summary", ""),
+                           params.get("somatic_tags", []),
                            params.get("relationship_context", ""),
                            params.get("recent_events", []),
                            params.get("npc_name", ""))
@@ -333,7 +360,7 @@ async def _dispatch(method: str, params: dict) -> dict:
     elif method == "chat":
         def _do():
             return model.chat(params.get("role", ""), params.get("npc_name", ""),
-                               params.get("emotion_summary", ""),
+                               params.get("somatic_tags", []),
                                params.get("relationship_context", ""),
                                params.get("recent_events", []),
                                params.get("conversation_history", []),
@@ -342,9 +369,9 @@ async def _dispatch(method: str, params: dict) -> dict:
     elif method == "converse":
         def _do():
             return model.converse(params.get("speaker_role", ""),
-                                   params.get("speaker_emotion", ""),
+                                   params.get("speaker_somatic", []),
                                    params.get("listener_role", ""),
-                                   params.get("listener_emotion", ""),
+                                   params.get("listener_somatic", []),
                                    params.get("shared_context", ""),
                                    params.get("speaker_recent", []),
                                    params.get("speaker_name", ""),

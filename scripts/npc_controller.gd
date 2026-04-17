@@ -538,8 +538,46 @@ func _send_state_snapshot() -> void:
 		"heard": heard,
 		"recent_events": brain.memory.get_recent_events_text(3) if brain.memory else [],
 		"active_intentions": brain.active_intentions,
+		"carried_items": brain.inventory.get_display_list() if brain.inventory else [],
+		"available_items": _get_location_items(),
+		"known_locations": brain.memory.get_known_location_names() if brain.memory else [],
+		"glimpsed_buildings": _get_glimpsed_buildings(),
 	}
 	_inference_client.send_state_snapshot(snapshot)
+
+func _get_location_items() -> Array:
+	## Get display names of takeable items at current location (from world objects).
+	var loc: String = brain.layer3.location_name_from_position(global_position) if brain and brain.layer3 else ""
+	if loc == "":
+		return []
+	if _world_object_registry and _world_object_registry.has_method("get_items_at_location"):
+		var items: Array = _world_object_registry.get_items_at_location(loc)
+		var names: Array = []
+		for item in items:
+			names.append(item.get("name", ""))
+		return names
+	return []
+
+func _get_glimpsed_buildings() -> Array:
+	## Returns directional info for glimpsed-but-unvisited locations.
+	if not brain or not brain.memory:
+		return []
+	var glimpsed_names: Array = brain.memory.get_glimpsed_location_names()
+	if glimpsed_names.is_empty():
+		return []
+	var L3Script: GDScript = load("res://scripts/layer3_executive.gd")
+	L3Script._ensure_locations_loaded()
+	var result: Array = []
+	for loc_name in glimpsed_names:
+		if L3Script.LOCATIONS.has(loc_name):
+			var loc_pos: Vector2 = L3Script.LOCATIONS[loc_name]
+			var dir: Vector2 = loc_pos - global_position
+			var dist_tiles: float = snapped(dir.length() / 32.0, 0.1)
+			result.append({
+				"direction": _direction_name(dir),
+				"distance_tiles": dist_tiles,
+			})
+	return result
 
 static func _direction_name(dir: Vector2) -> String:
 	if dir.length() < 1.0:

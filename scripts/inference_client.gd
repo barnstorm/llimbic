@@ -162,11 +162,11 @@ func layer2_modulate(directives: String, current_vector: Array, callback: Callab
 
 # --- Layer 3 API ---
 
-func layer3_plan(role: String, memory_summary: String, current_context: String, emotion_summary: String, callback: Callable, npc_name_str: String = "") -> String:
+func layer3_plan(role: String, memory_summary: String, current_context: String, somatic_tags: Array, callback: Callable, npc_name_str: String = "") -> String:
 	## Legacy prose-based plan request.
 	return _send(_ws3, _ws3_connected, _ws3_pending, "plan", {
 		"role": role, "npc_name": npc_name_str, "memory_summary": memory_summary,
-		"current_context": current_context, "emotion_summary": emotion_summary
+		"current_context": current_context, "somatic_tags": somatic_tags
 	}, callback)
 
 func layer3_plan_packet(packet: Dictionary, callback: Callable) -> String:
@@ -183,7 +183,7 @@ func layer3_plan_packet(packet: Dictionary, callback: Callable) -> String:
 			else:
 				safe_chunk[key] = val
 		safe_packet["current_chunk"] = safe_chunk
-	# Convert top_emotions value floats (already safe)
+	# Convert somatic_tags (string arrays, already safe)
 	# Convert problem_objects position fields
 	var problems: Array = safe_packet.get("problem_objects", [])
 	var safe_problems: Array = []
@@ -204,10 +204,10 @@ func layer3_reflect(memory_events: Array, callback: Callable, npc_name_str: Stri
 		"memory_events": memory_events, "npc_name": npc_name_str, "role": npc_role
 	}, callback)
 
-func layer3_dialogue(role: String, emotion_summary: String, relationship_context: String, recent_events: Array, callback: Callable, npc_name_str: String = "") -> String:
+func layer3_dialogue(role: String, somatic_tags: Array, relationship_context: String, recent_events: Array, callback: Callable, npc_name_str: String = "") -> String:
 	## Legacy prose-based dialogue request.
 	return _send(_ws3, _ws3_connected, _ws3_pending, "dialogue", {
-		"role": role, "npc_name": npc_name_str, "emotion_summary": emotion_summary,
+		"role": role, "npc_name": npc_name_str, "somatic_tags": somatic_tags,
 		"relationship_context": relationship_context, "recent_events": recent_events
 	}, callback)
 
@@ -230,19 +230,19 @@ func layer3_converse_packet(speaker_packet: Dictionary, listener_packet: Diction
 	}
 	return _send(_ws3, _ws3_connected, _ws3_pending, "converse_v2", payload, callback)
 
-func layer3_chat(role: String, npc_name_str: String, emotion_summary: String, relationship_context: String, recent_events: Array, conversation_history: Array, player_message: String, callback: Callable) -> String:
+func layer3_chat(role: String, npc_name_str: String, somatic_tags: Array, relationship_context: String, recent_events: Array, conversation_history: Array, player_message: String, callback: Callable) -> String:
 	return _send(_ws3, _ws3_connected, _ws3_pending, "chat", {
-		"role": role, "npc_name": npc_name_str, "emotion_summary": emotion_summary,
+		"role": role, "npc_name": npc_name_str, "somatic_tags": somatic_tags,
 		"relationship_context": relationship_context, "recent_events": recent_events,
 		"conversation_history": conversation_history, "player_message": player_message
 	}, callback)
 
-func layer3_converse(speaker_role: String, speaker_emotion: String, listener_role: String, listener_emotion: String, shared_context: String, speaker_recent: Array, callback: Callable, speaker_name_str: String = "", listener_name_str: String = "") -> String:
+func layer3_converse(speaker_role: String, speaker_somatic: Array, listener_role: String, listener_somatic: Array, shared_context: String, speaker_recent: Array, callback: Callable, speaker_name_str: String = "", listener_name_str: String = "") -> String:
 	return _send(_ws3, _ws3_connected, _ws3_pending, "converse", {
 		"speaker_role": speaker_role, "speaker_name": speaker_name_str,
-		"speaker_emotion": speaker_emotion,
+		"speaker_somatic": speaker_somatic,
 		"listener_role": listener_role, "listener_name": listener_name_str,
-		"listener_emotion": listener_emotion,
+		"listener_somatic": listener_somatic,
 		"shared_context": shared_context, "speaker_recent": speaker_recent
 	}, callback)
 
