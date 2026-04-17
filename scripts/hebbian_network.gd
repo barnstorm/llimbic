@@ -109,6 +109,13 @@ func setup_default_network(persona: Dictionary) -> void:
 	_add_neuron("task_frustration", "task", 0.0, false, "", "Frustration")
 	_add_neuron("task_int_tolerance", "task", 50.0, false, "", "IntTolerance")
 
+	# Salience — fires when the network state warrants executive attention.
+	# Starts unconnected. Learns what's worth thinking about through Hebbian
+	# co-activation: when salience fires AND the thought loop produces a useful
+	# result (action bias change, new intention), the connections that drove
+	# salience get reinforced. The being learns its own attention pattern.
+	_add_neuron("salience", "task", 0.0, false, "", "Salience")
+
 	# Sensory (protected)
 	_add_neuron("sense_at_home", "sensory", 0.0, true, "", "AtHome")
 	_add_neuron("sense_at_work", "sensory", 0.0, true, "", "AtWork")
@@ -427,62 +434,12 @@ func _seed_vagal_connections() -> void:
 	_add_connection("vagal_dorsal", "q_cold", 0.04)
 
 func _seed_emotion_quality_connections() -> void:
-	## Seed emotion→quality connections. These are the LEARNABLE replacements for the
-	## hardcoded _apply_emotion_to_qualities() in somatic_stream.gd.
-	## Two beings start identical but diverge through Hebbian co-activation.
-
-	# Fear → threat body sensations
-	_add_connection("emo_fear", "q_tight", 0.08)
-	_add_connection("emo_fear", "q_pounding", 0.06)
-	_add_connection("emo_fear", "q_prickling", 0.08)
-	_add_connection("emo_fear", "q_churning", 0.05)
-	_add_connection("emo_fear", "q_constricted", 0.05)
-
-	# Anger → tension body sensations
-	_add_connection("emo_anger", "q_tight", 0.06)
-	_add_connection("emo_anger", "q_coiled", 0.08)
-	_add_connection("emo_anger", "q_pressure", 0.05)
-	_add_connection("emo_anger", "q_raw", 0.04)
-
-	# Disgust → gut sensations
-	_add_connection("emo_disgust", "q_churning", 0.08)
-	_add_connection("emo_disgust", "q_crawling", 0.06)
-
-	# Nervousness → flutter/prickling
-	_add_connection("emo_nervousness", "q_churning", 0.05)
-	_add_connection("emo_nervousness", "q_fluttering", 0.08)
-	_add_connection("emo_nervousness", "q_dry", 0.04)
-	_add_connection("emo_nervousness", "q_prickling", 0.04)
-
-	# Grief → hollow/cold/heavy
-	_add_connection("emo_grief", "q_hollow", 0.08)
-	_add_connection("emo_grief", "q_cold", 0.06)
-	_add_connection("emo_grief", "q_heavy", 0.06)
-	_add_connection("emo_grief", "q_constricted", 0.04)
-
-	# Joy → warm/light/open
-	_add_connection("emo_joy", "q_warm", 0.08)
-	_add_connection("emo_joy", "q_light", 0.06)
-	_add_connection("emo_joy", "q_open", 0.06)
-
-	# Excitement → fluttering/buzzing/aroused
-	_add_connection("emo_excitement", "q_fluttering", 0.08)
-	_add_connection("emo_excitement", "q_buzzing", 0.06)
-	_add_connection("emo_excitement", "q_aroused", 0.06)
-
-	# Sadness → heavy/foggy/cold
-	_add_connection("emo_sadness", "q_heavy", 0.08)
-	_add_connection("emo_sadness", "q_foggy", 0.06)
-	_add_connection("emo_sadness", "q_cold", 0.04)
-
-	# Embarrassment → warm(flush)/churning
-	_add_connection("emo_embarrassment", "q_warm", 0.04)
-	_add_connection("emo_embarrassment", "q_churning", 0.05)
-
-	# Relief → loose/settled/open
-	_add_connection("emo_relief", "q_loose", 0.08)
-	_add_connection("emo_relief", "q_settled", 0.06)
-	_add_connection("emo_relief", "q_open", 0.05)
+	## No pre-wired emotion→quality connections.
+	## Emotions and quality neurons start unconnected. The being discovers
+	## what emotions feel like in its body through Hebbian co-activation:
+	## fear fires + tight fires (from low safety) → network learns fear→tight.
+	## Different beings develop different emotion→body mappings.
+	pass
 
 func _seed_emotion_action_connections() -> void:
 	## Seed emotion→action/task connections. These replace the hardcoded nudges in
@@ -1089,14 +1046,32 @@ func emit_quality_tags(suppression: Dictionary = {}) -> Array:
 			if tag_text not in region_qualities[region]:
 				region_qualities[region].append(tag_text)
 
-	# Concatenate: region:quality[:quality...]
+	# Build a quick lookup: (tag_text, region) -> max activation
+	var _quality_act_cache: Dictionary = {}  # "quality:region" -> float
+	for neuron in neurons:
+		if neuron["type"] != "quality":
+			continue
+		if neuron["activation"] < QUALITY_EMIT_THRESHOLD:
+			continue
+		var tt: String = neuron.get("tag_text", "")
+		for r in neuron.get("regions", []):
+			var key: String = tt + ":" + r
+			if not _quality_act_cache.has(key) or neuron["activation"] > _quality_act_cache[key]:
+				_quality_act_cache[key] = neuron["activation"]
+
+	# Pick strongest quality per region — one clear sensation, not a wall of noise
 	var tags: Array = []
 	for region in region_qualities:
-		var qualities: Array = region_qualities[region]
-		# Cap at 3 qualities per region to avoid noise
-		if qualities.size() > 3:
-			qualities = qualities.slice(0, 3)
-		tags.append(region + ":" + ":".join(qualities))
+		var best_quality: String = ""
+		var best_activation: float = 0.0
+		for quality in region_qualities[region]:
+			# Find the neuron that produced this quality to compare activations
+			var act: float = _quality_act_cache.get(quality + ":" + region, 0.0)
+			if act > best_activation:
+				best_activation = act
+				best_quality = quality
+		if best_quality != "":
+			tags.append(region + ":" + best_quality)
 
 	return tags
 

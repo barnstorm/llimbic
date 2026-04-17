@@ -32,7 +32,7 @@ echo "Starting Layer 2 server (Limbic TinyLlama-1.1B+LoRA, port 8420)..."
 uvicorn layer2_server:app --host 0.0.0.0 --port 8420 --log-level warning --workers 1 &
 L2_PID=$!
 
-echo "Starting Layer 3 server (SmolLM2-1.7B, port 8421)..."
+echo "Starting Layer 3 server (SmolLM3-3B x2: thought:8423 + chat:8424, port 8421)..."
 uvicorn layer3_server:app --host 0.0.0.0 --port 8421 --log-level warning --workers 1 &
 L3_PID=$!
 

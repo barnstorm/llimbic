@@ -103,10 +103,9 @@ func add_tagged_event(description: String, salience: float, tags: Array = [],
 		"time": Time.get_ticks_msec()
 	}
 	tagged_events.append(evt)
-	# Sort by salience descending, keep top N
-	tagged_events.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["salience"] > b["salience"])
+	# Keep chronological order, cap at max — oldest fall off
 	if tagged_events.size() > MAX_TAGGED_EVENTS:
-		tagged_events.resize(MAX_TAGGED_EVENTS)
+		tagged_events.pop_front()
 
 func update_relationship(entity_name: String, trust_delta: float, reason: String) -> void:
 	if not relationships.has(entity_name):

@@ -23,6 +23,7 @@
     {"src": "sense_nearby_npcs", "dst": "action_help", "weight": 0.03}
   ],
   "night_behavior": {"go_home_hour": 23.0, "override": null},
+  "starting_inventory": ["bread", "ale"],
   "fallback_dialogue": {
     "greeting": "Welcome! Pull up a chair.",
     "complaint": "The ale barrel's running low again.",

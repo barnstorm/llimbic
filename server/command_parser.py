@@ -33,10 +33,20 @@ _CMD_PATTERNS = [
     (re.compile(r"^FLEE\s+FROM\s+(.+)$"), "flee_from"),
     # APPROACH entity
     (re.compile(r"^APPROACH\s+(.+)$"), "approach"),
+    # EXPLORE direction (approach unknown building)
+    (re.compile(r"^EXPLORE\s+(.+)$"), "explore"),
     # WANDER AT location
     (re.compile(r"^WANDER\s+AT\s+(.+)$"), "wander_at"),
     # WANDER (no target)
     (re.compile(r"^WANDER$"), "wander"),
+    # TAKE item
+    (re.compile(r"^TAKE\s+(.+)$"), "take"),
+    # CONSUME item
+    (re.compile(r"^CONSUME\s+(.+)$"), "consume"),
+    # GIVE item TO entity
+    (re.compile(r"^GIVE\s+(.+)\s+TO\s+(.+)$"), "give_to"),
+    # DROP item
+    (re.compile(r"^DROP\s+(.+)$"), "drop"),
     # WAIT
     (re.compile(r"^WAIT$"), "wait"),
 ]
@@ -156,6 +166,13 @@ def _parse_command_line(cmd_line: str, context: dict) -> dict:
             })
             result["action_biases"]["approach"] = 0.1
 
+        elif cmd_type == "explore":
+            direction = m.group(1).strip().lower()
+            result["command"] = f"EXPLORE {direction}"
+            result["action_biases"]["approach"] = 0.4
+            result["action_biases"]["observe"] = 0.3
+            result["target"] = {"type": "direction", "name": direction}
+
         elif cmd_type == "wander":
             result["action_biases"]["approach"] = 0.1
 
@@ -180,6 +197,39 @@ def _parse_command_line(cmd_line: str, context: dict) -> dict:
                 "target": entity,
             })
             result["action_biases"]["approach"] = 0.3
+
+        elif cmd_type == "take":
+            item = m.group(1)
+            result["trigger_actions"].append({
+                "type": "take_item",
+                "item": item,
+            })
+
+        elif cmd_type == "consume":
+            item = m.group(1)
+            result["trigger_actions"].append({
+                "type": "consume_item",
+                "item": item,
+            })
+
+        elif cmd_type == "give_to":
+            item = m.group(1)
+            entity = m.group(2)
+            target = _resolve_noun(entity, context)
+            result["target"] = target
+            result["trigger_actions"].append({
+                "type": "give_item",
+                "item": item,
+                "target": entity,
+            })
+            result["action_biases"]["approach"] = 0.3
+
+        elif cmd_type == "drop":
+            item = m.group(1)
+            result["trigger_actions"].append({
+                "type": "drop_item",
+                "item": item,
+            })
 
         return result
 

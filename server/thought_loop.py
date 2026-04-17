@@ -19,6 +19,82 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 
 from npc_state import NPCState
+from trace_logger import trace_thought, trace_speech
+
+
+def _narrate_body(context: dict) -> str:
+    """Build a felt body-state narrative from drives and somatic tags.
+
+    Deterministic template — no model call. Produces 2-4 short second-person
+    sentences the command model can reason from.
+    """
+    drives = context.get("drives", {})
+    energy = drives.get("energy", 80)
+    hunger = drives.get("hunger", 20)
+    social = drives.get("social_need", 30)
+    safety = drives.get("safety", 80)
+    frustration = drives.get("frustration", 0)
+
+    vagal = context.get("vagal_state", {})
+    ventral = vagal.get("ventral", 60)
+    sympathetic = vagal.get("sympathetic", 20)
+    dorsal = vagal.get("dorsal", 5)
+
+    parts = []
+
+    # Hunger
+    if hunger > 80:
+        parts.append("Your stomach is gnawing at you. You need food badly.")
+    elif hunger > 60:
+        parts.append("Your stomach feels empty. You could use a meal.")
+    elif hunger > 40:
+        parts.append("You're getting a bit hungry.")
+    elif hunger < 10:
+        parts.append("Your stomach feels settled and full.")
+
+    # Energy
+    if energy < 15:
+        parts.append("You can barely keep your eyes open. Your body is shutting down.")
+    elif energy < 30:
+        parts.append("Your muscles are heavy and your head is foggy. You need rest.")
+    elif energy < 50:
+        parts.append("You're getting tired.")
+    elif energy > 85:
+        parts.append("You feel rested and alert.")
+
+    # Safety
+    if safety < 25:
+        parts.append("Your skin is prickling. Something feels wrong. You want to run.")
+    elif safety < 40:
+        parts.append("You feel uneasy. Your chest is tight.")
+    elif safety > 90:
+        parts.append("You feel safe here.")
+
+    # Social
+    if social > 80:
+        parts.append("There's an aching hollowness in your chest. You need to be around people.")
+    elif social > 60:
+        parts.append("You're feeling lonely. Some company would help.")
+    elif social > 40:
+        parts.append("You could use some conversation.")
+
+    # Frustration
+    if frustration > 0.7:
+        parts.append("Frustration is building. Nothing is going right.")
+    elif frustration > 0.4:
+        parts.append("You're feeling a bit frustrated.")
+
+    # Vagal state
+    if dorsal > sympathetic and dorsal > ventral and dorsal > 40:
+        parts.append("You feel disconnected, like you're watching from far away.")
+    elif sympathetic > ventral and sympathetic > 40:
+        parts.append("Your body is tense and alert. Ready to move.")
+
+    # Fallback — nothing notable
+    if not parts:
+        parts.append("You feel calm. Nothing demands your attention.")
+
+    return " ".join(parts)
 
 log = logging.getLogger("layer3")  # share logger with layer3_server for file output
 
@@ -115,21 +191,12 @@ class ThoughtLoop:
 
         t0 = time.time()
 
-        # Step 1: L2 limbic colors raw perception (emotion baseline for this cycle)
+        # Step 1: Build body narrative from drives + somatic tags
+        # Deterministic template — always correct, no model call needed.
+        # TinyLlama can refine this later once fine-tuned on narrative output.
         snap_emotions = {}
         emo_vec = context.get("emotion_vector", state.emotion_vector)
-        if self.l2 is not None:
-            try:
-                l2_result = await _run(
-                    self.l2.project,
-                    context["drives"],
-                    context["recent_events"],
-                    emo_vec,
-                )
-                emo_vec = l2_result.get("vector", emo_vec)
-                snap_emotions = l2_result.get("emotions", {})
-            except Exception as e:
-                log.warning(f"L2 projection failed for {npc_name}: {e}")
+        context["body_narrative"] = _narrate_body(context)
 
         # Step 2: L3 executive generates thoughts
         thought_result = {"thoughts": [], "intentions": [], "beliefs": [],
@@ -142,21 +209,8 @@ class ThoughtLoop:
             except Exception as e:
                 log.warning(f"L3 thought generation failed for {npc_name}: {e}")
 
-        # Step 3: L2 limbic colors the thoughts themselves
-        if thought_result["thoughts"] and self.l2 is not None:
-            combined_thought = ". ".join(thought_result["thoughts"][:2])
-            try:
-                thought_emo = await _run(
-                    self.l2.color_thought,
-                    combined_thought,
-                    snap_emotions,
-                    emo_vec,
-                )
-                emo_vec = thought_emo.get("vector", emo_vec)
-                # Merge attention from thought coloring
-                snap_emotions.update(thought_emo.get("emotions", {}))
-            except Exception as e:
-                log.warning(f"L2 thought coloring failed for {npc_name}: {e}")
+        # Step 3: (removed — L2 now narrates body state in Step 1,
+        # no longer colors thoughts into emotion vectors)
 
         # Step 4: Update state and compile push commands
         state.emotion_vector = emo_vec
@@ -234,20 +288,38 @@ class ThoughtLoop:
                 "biases": thought_result["action_biases"],
             })
 
-        # Push trigger actions (examine, speak) from command model
+        # Push trigger actions from command model
         for trigger in thought_result.get("trigger_actions", []):
-            if trigger.get("type") == "speak":
+            ttype = trigger.get("type", "")
+            if ttype == "speak":
                 commands.append({
                     "cmd": "speak",
                     "text": trigger["text"],
                     "target": trigger.get("target"),
                 })
-            elif trigger.get("type") == "examine":
+                trace_speech(npc_name, "say", {
+                    "text": trigger["text"],
+                    "target": trigger.get("target", ""),
+                    "somatic_tags": context.get("somatic_tags", []),
+                    "location": context.get("location", ""),
+                    "carried_items": context.get("carried_items", []),
+                    "current_thought": thought_result["thoughts"][0][:200] if thought_result.get("thoughts") else "",
+                }, {"utterance": trigger["text"]}, elapsed * 1000)
+            elif ttype == "examine":
                 commands.append({
                     "cmd": "examine",
                     "object_id": trigger.get("object_id"),
                     "target": trigger.get("target"),
                 })
+            elif ttype in ("take_item", "consume_item", "drop_item", "give_item"):
+                commands.append({
+                    "cmd": ttype,
+                    "item": trigger.get("item", ""),
+                    "target": trigger.get("target"),
+                })
+                log.info(f"INVENTORY [{npc_name}] {ttype}: {trigger.get('item', '')}")
+
+        elapsed = time.time() - t0
 
         # Push command + target if present (from adventure-command model)
         cmd_str = thought_result.get("command", "")
@@ -259,10 +331,25 @@ class ThoughtLoop:
                 "target": target,
             })
 
+        # Reward salience if this thought was productive — the being learns
+        # what's worth thinking about. A thought that produced new intentions,
+        # actions, or beliefs was useful. One that just said WAIT was not.
+        thought_productive = (
+            len(thought_result.get("intentions", [])) > 0
+            or len(thought_result.get("trigger_actions", [])) > 0
+            or len(thought_result.get("beliefs", [])) > 0
+            or cmd_str not in ("", "WAIT", "WANDER")
+        )
+        if thought_productive:
+            commands.append({"cmd": "reward_salience", "amount": 15.0})
+        else:
+            # Unproductive thought — slightly suppress salience so the being
+            # learns not to think when nothing needs thinking about.
+            commands.append({"cmd": "reward_salience", "amount": -5.0})
+
         # Step 5: Push to client
         await self._push_commands(npc_name, commands)
 
-        elapsed = time.time() - t0
         thought_preview = thought_result["thoughts"][0][:60] if thought_result["thoughts"] else "(no thought)"
         cmd_preview = thought_result.get("command", "")
         log.info(
@@ -273,6 +360,9 @@ class ThoughtLoop:
             f"biases={thought_result['action_biases']} "
             f"[{elapsed:.1f}s]"
         )
+
+        # Structured trace for training data
+        trace_thought(npc_name, context, thought_result, elapsed * 1000)
 
     async def _push_commands(self, npc_name: str, commands: list[dict]):
         """Push commands to client via WebSocket."""

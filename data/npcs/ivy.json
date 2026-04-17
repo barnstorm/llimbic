@@ -23,6 +23,7 @@
     {"src": "sense_loc_familiarity", "dst": "action_observe", "weight": 0.02}
   ],
   "night_behavior": {"go_home_hour": 21.0, "override": null},
+  "starting_inventory": ["remedy"],
   "fallback_dialogue": {
     "greeting": "Need a remedy? I have fresh stock.",
     "complaint": "The drying rack is almost bare.",

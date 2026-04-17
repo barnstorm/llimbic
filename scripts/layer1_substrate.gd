@@ -345,6 +345,7 @@ func get_state_dict() -> Dictionary:
 		"help": help,
 		"flee": flee,
 		"vagal_state": get_vagal_state(),
+		"salience": _network.get_activation("salience") if _network else 0.0,
 	}
 
 func get_somatic_tags() -> Array:

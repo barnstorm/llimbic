@@ -43,13 +43,16 @@ def _format_perception(context: dict) -> str:
     npc_name = context.get("npc_name", "unknown")
     role = context.get("role", "villager")
 
-    # Somatic tags — what the being feels (primary grounding)
-    somatic_tags = context.get("somatic_tags", [])
-    if somatic_tags:
-        feel_str = ", ".join(str(t) for t in somatic_tags)
+    # Body narrative from L2 (preferred) or fallback to raw somatic tags
+    body_narrative = context.get("body_narrative", "")
+    if body_narrative:
+        feel_str = body_narrative
     else:
-        # Fallback: synthesize minimal tags from drive floats if somatic stream not running
-        feel_str = _fallback_feel_from_drives(context.get("drives", {}))
+        somatic_tags = context.get("somatic_tags", [])
+        if somatic_tags:
+            feel_str = ", ".join(str(t) for t in somatic_tags)
+        else:
+            feel_str = _fallback_feel_from_drives(context.get("drives", {}))
 
     location = context.get("location", "unknown")
     current_action = context.get("current_action", "idle")

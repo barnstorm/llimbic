@@ -197,9 +197,19 @@ func process_server_commands(commands: Array) -> void:
 					)
 			"bias_action":
 				_server_action_biases = cmd.get("biases", {})
+			"reward_salience":
+				# Hebbian reward signal: nudge salience neuron up (productive thought)
+				# or down (unproductive). The network's learning rule will strengthen
+				# connections from whatever was active when salience fired.
+				var amount: float = cmd.get("amount", 0.0)
+				if layer1 and layer1._network:
+					var current: float = layer1._network.get_activation("salience")
+					layer1._network.set_activation("salience", clampf(current + amount, 0.0, 100.0))
 			"set_thought":
 				current_thought = cmd.get("text", "")
 				npc_log("THOUGHT: " + current_thought)
+				if memory and current_thought:
+					memory.add_tagged_event("Thought: %s" % current_thought.substr(0, 80), 0.15, ["thought"], "direct", "thought")
 			"trigger_action":
 				_set_override(cmd, cmd.get("duration", 3.0))
 			"speak":
@@ -283,6 +293,8 @@ func process_server_commands(commands: Array) -> void:
 				if motor_cmd:
 					npc_log("CMD: " + motor_cmd)
 					_handle_motor_command(motor_cmd, motor_target)
+					# Record the action as a memory event
+					_record_action_event(motor_cmd, motor_target)
 
 func _get_item_category(item_id: String) -> String:
 	## Look up item category from inventory, fall back to common names.
@@ -350,6 +362,56 @@ func _set_override(action: Dictionary, duration: float) -> void:
 	## resumes its active intention afterward instead of being stuck.
 	_server_action_override = action
 	_override_timer = duration
+
+func _record_action_event(cmd_str: String, target: Variant) -> void:
+	## Record the being's action as a memory event so future thoughts have context.
+	var target_dict: Dictionary = target if target is Dictionary else {}
+	var target_name: String = target_dict.get("name", "")
+	var event_text: String = ""
+	var salience: float = 0.2
+	var tags: Array = ["action"]
+
+	if cmd_str.begins_with("GO TO "):
+		event_text = "Headed toward %s" % cmd_str.substr(6)
+		tags.append("movement")
+	elif cmd_str.begins_with("LOOK AT "):
+		event_text = "Looked at %s" % target_name
+		salience = 0.3
+		tags.append("observation")
+	elif cmd_str.begins_with("APPROACH "):
+		event_text = "Approached %s" % target_name
+		salience = 0.4
+		tags.append("social")
+	elif cmd_str.begins_with("FLEE FROM "):
+		event_text = "Fled from %s" % target_name
+		salience = 0.7
+		tags.append("danger")
+	elif cmd_str.begins_with("EXAMINE "):
+		event_text = "Examined %s" % target_name
+		salience = 0.3
+		tags.append("observation")
+	elif cmd_str.begins_with("SAY "):
+		return  # speech events handled separately
+	elif cmd_str.begins_with("WANDER"):
+		event_text = "Wandered around"
+		salience = 0.1
+	elif cmd_str == "WAIT":
+		event_text = "Waited and watched"
+		salience = 0.1
+	elif cmd_str.begins_with("EXPLORE "):
+		event_text = "Explored toward %s" % target_name
+		salience = 0.4
+		tags.append("exploration")
+	elif cmd_str.begins_with("TAKE "):
+		return  # inventory events handled separately
+	elif cmd_str.begins_with("CONSUME "):
+		return  # inventory events handled separately
+	else:
+		event_text = cmd_str
+		salience = 0.2
+
+	if event_text and memory:
+		memory.add_tagged_event(event_text, salience, tags, "direct", "action")
 
 func _handle_motor_command(cmd_str: String, target: Variant) -> void:
 	## Convert a motor_command string into a timed action override or intention.

@@ -371,6 +371,49 @@ class Layer2Model:
             "summary": summary,
         }
 
+    def narrate_body_state(self, drives: dict, somatic_tags: list[str],
+                           vagal_state: dict, recent_events: list[str],
+                           current_action: str = "") -> str:
+        """Translate raw body state into felt second-person narrative.
+
+        This is the northbound interoception path: the being's body speaks
+        to its mind in natural language, not numbers or tag syntax.
+        """
+        context = self._build_context(drives, recent_events)
+        tags_str = ", ".join(somatic_tags[:6]) if somatic_tags else "calm"
+
+        # Vagal framing
+        vagal_frame = ""
+        if vagal_state:
+            v = vagal_state.get("ventral", 50)
+            s = vagal_state.get("sympathetic", 20)
+            d = vagal_state.get("dorsal", 5)
+            if d > s and d > v and d > 40:
+                vagal_frame = "You feel shut down, disconnected."
+            elif s > v and s > 40:
+                vagal_frame = "Your body is on edge, mobilized."
+            elif v > 60:
+                vagal_frame = "You feel safe and grounded."
+
+        user_input = (
+            f"Body signals: {tags_str}\n"
+            f"Context: {context}\n"
+            f"{f'Doing: {current_action}' + chr(10) if current_action else ''}"
+            f"{vagal_frame + chr(10) if vagal_frame else ''}"
+            f"Describe what this being feels in their body in 2-3 short "
+            f"second-person sentences. Be specific and physical, not emotional labels."
+        )
+
+        raw = self._generate(user_input, max_tokens=80, temperature=0.3)
+        # Clean up — take first 2-3 sentences
+        if raw:
+            sentences = [s.strip() for s in raw.replace('\n', ' ').split('.') if s.strip()]
+            narrative = '. '.join(sentences[:3])
+            if narrative and not narrative.endswith('.'):
+                narrative += '.'
+            return narrative
+        return "You feel settled. Nothing demands your attention."
+
     def _heuristic_summary(self, vec: list[float]) -> str:
         top = top_dimensions(vec, 3)
         if not top or top[0][1] < 0.05:

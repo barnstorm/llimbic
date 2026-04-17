@@ -23,6 +23,7 @@
     {"src": "sense_at_work", "dst": "drive_energy", "weight": -0.01}
   ],
   "night_behavior": {"go_home_hour": 21.0, "override": null},
+  "starting_inventory": ["apple", "apple"],
   "fallback_dialogue": {
     "greeting": "Good weather for crops today.",
     "complaint": "Soil's been dry. Need rain soon.",

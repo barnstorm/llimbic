@@ -1,12 +1,61 @@
 extends Node
 ## res://scripts/world_object_registry.gd — Persistent world object registry (autoload)
 ## Each object is a Dictionary with: id, name, type, position, location, state, owner, properties, discoverable, role_affinity
+## Items (type="item") are takeable world objects with consume_effects.
 
 var objects: Dictionary = {}  # id -> Dictionary
+var _item_counter: int = 0  # for generating unique IDs when dropping items
 
 func _ready() -> void:
 	_populate_initial_objects()
-	print("[WorldObjectRegistry] Registered %d world objects." % objects.size())
+	_populate_world_items()
+	print("[WorldObjectRegistry] Registered %d world objects (incl. items)." % objects.size())
+
+func _populate_world_items() -> void:
+	## Place actual takeable items in the world near relevant fixtures.
+	var food_fx: Dictionary = {"hunger": -30.0, "energy": 5.0}
+	var drink_fx: Dictionary = {"hunger": -10.0, "energy": 15.0}
+	var remedy_fx: Dictionary = {"energy": 25.0, "safety": 10.0}
+
+	# --- Bakery: bread loaves near the oven ---
+	_place_item("bakery_bread_01", "Bread", "bread", "food", Vector2(1680, 460), "bakery", food_fx)
+	_place_item("bakery_bread_02", "Bread", "bread", "food", Vector2(1695, 485), "bakery", food_fx)
+	_place_item("bakery_bread_03", "Bread", "bread", "food", Vector2(1710, 465), "bakery", food_fx)
+
+	# --- Inn: ale jugs and bread at the bar ---
+	_place_item("inn_ale_01", "Ale", "ale", "drink", Vector2(2530, 860), "inn", drink_fx)
+	_place_item("inn_ale_02", "Ale", "ale", "drink", Vector2(2545, 870), "inn", drink_fx)
+	_place_item("inn_bread_01", "Bread", "bread", "food", Vector2(2520, 880), "inn", food_fx)
+
+	# --- Market: mixed goods on stalls ---
+	_place_item("market_bread_01", "Bread", "bread", "food", Vector2(1500, 860), "market", food_fx)
+	_place_item("market_apple_01", "Apple", "apple", "food", Vector2(1520, 850), "market", food_fx)
+	_place_item("market_apple_02", "Apple", "apple", "food", Vector2(1535, 865), "market", food_fx)
+
+	# --- Farm: apples ---
+	_place_item("farm_apple_01", "Apple", "apple", "food", Vector2(650, 300), "farm", food_fx)
+	_place_item("farm_apple_02", "Apple", "apple", "food", Vector2(670, 310), "farm", food_fx)
+	_place_item("farm_apple_03", "Apple", "apple", "food", Vector2(660, 325), "farm", food_fx)
+
+	# --- Herbalist: remedies on the shelf ---
+	_place_item("herb_remedy_01", "Herbal Remedy", "remedy", "medicine", Vector2(515, 615), "herbalist_shop", remedy_fx)
+	_place_item("herb_remedy_02", "Herbal Remedy", "remedy", "medicine", Vector2(530, 620), "herbalist_shop", remedy_fx)
+
+func _place_item(id: String, display_name: String, item_id: String, category: String, pos: Vector2, location: String, effects: Dictionary) -> void:
+	register_object({
+		"id": id,
+		"name": display_name,
+		"item_id": item_id,
+		"type": "item",
+		"position": pos,
+		"location": location,
+		"state": "available",
+		"owner": "",
+		"properties": {"category": category},
+		"consume_effects": effects,
+		"discoverable": true,
+		"role_affinity": [],
+	})
 
 func register_object(obj: Dictionary) -> void:
 	var id: String = obj.get("id", "")
@@ -40,6 +89,53 @@ func get_all_objects() -> Array:
 func update_object_state(id: String, new_state: String) -> void:
 	if objects.has(id):
 		objects[id]["state"] = new_state
+
+func remove_object(id: String) -> Dictionary:
+	## Remove and return an object (used when items are picked up).
+	if objects.has(id):
+		var obj: Dictionary = objects[id]
+		objects.erase(id)
+		return obj
+	return {}
+
+func get_items_at_location(location: String) -> Array:
+	## Get all takeable items at a location.
+	var result: Array = []
+	for id in objects:
+		var obj: Dictionary = objects[id]
+		if obj.get("location", "") == location and obj.get("type", "") == "item":
+			result.append(obj)
+	return result
+
+func find_item_by_name(item_name: String, location: String) -> Dictionary:
+	## Find a specific item by name at a location (case-insensitive).
+	var lower: String = item_name.to_lower()
+	for id in objects:
+		var obj: Dictionary = objects[id]
+		if obj.get("type", "") == "item" and obj.get("location", "") == location:
+			if obj.get("name", "").to_lower() == lower or obj.get("item_id", "").to_lower() == lower:
+				return obj
+	return {}
+
+func spawn_item(item_id: String, item_name: String, category: String, pos: Vector2, location: String, effects: Dictionary = {}) -> String:
+	## Create a new item in the world (used when dropping items).
+	_item_counter += 1
+	var id: String = "item_%s_%d" % [item_id, _item_counter]
+	register_object({
+		"id": id,
+		"name": item_name,
+		"item_id": item_id,
+		"type": "item",
+		"position": pos,
+		"location": location,
+		"state": "on ground",
+		"owner": "",
+		"properties": {"category": category},
+		"consume_effects": effects,
+		"discoverable": true,
+		"role_affinity": [],
+	})
+	return id
 
 func _populate_initial_objects() -> void:
 	# --- Bakery ---

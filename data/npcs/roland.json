@@ -25,6 +25,7 @@
     {"src": "drive_safety", "dst": "action_flee", "weight": -0.03}
   ],
   "night_behavior": {"go_home_hour": 99.0, "override": {"location": "town_square", "duration": 8.0, "priority": 0.9, "purpose": "Night patrol"}},
+  "starting_inventory": [],
   "fallback_dialogue": {
     "greeting": "Stay safe, traveler.",
     "complaint": "Roads have been too quiet. That worries me.",

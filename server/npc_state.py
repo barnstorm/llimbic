@@ -94,10 +94,32 @@ class NPCState:
     # --- Cadence ---
 
     def should_think(self) -> bool:
-        """Check if enough time has passed and there's reason to think."""
+        """Check if the salience neuron warrants a thought cycle.
+
+        The salience neuron fires when network state shifts enough to need
+        executive attention. The being learns what's salient through Hebbian
+        co-activation. A minimum cooldown prevents thrashing.
+        """
         elapsed = time.time() - self.last_thought_time
-        interval = self._current_interval()
-        return elapsed >= interval
+        if elapsed < self.min_thought_interval:
+            return False  # hard floor — never think faster than 2s
+
+        # Read salience from last snapshot
+        drives = self.last_snapshot.get("drives", {}) if self.last_snapshot else {}
+        salience = drives.get("salience", 0.0)
+
+        # Salience neuron above threshold triggers thought
+        if salience > 40.0:
+            return True
+
+        # Fallback: if salience neuron hasn't learned yet (stays near 0),
+        # use a slow background cadence so the being isn't catatonic.
+        # This cadence lengthens as the being ages — early on, think more
+        # to build connections. Later, rely on salience.
+        if elapsed >= self.max_thought_interval:
+            return True
+
+        return False
 
     def compute_urgency(self) -> float:
         """0.0 (calm) to 1.0 (urgent) based on current state."""
@@ -163,9 +185,13 @@ class NPCState:
     def add_intention(self, goal: str, location: str, priority: float,
                       reason: str, expires_in: float | None = 600.0,
                       object_id: str = "", object_action: str = ""):
-        """Add or update an intention. Higher priority replaces lower for same goal."""
+        """Add or update an intention. Higher priority replaces lower for same goal.
+        Non-routine "go to" intentions replace each other — the being can only
+        walk to one place at a time."""
         now = time.time()
         expires_at = now + expires_in if expires_in else None
+
+        is_goto = goal.startswith("go to ")
 
         # Check for existing intention with same goal
         for i, existing in enumerate(self.active_intentions):
@@ -179,6 +205,13 @@ class NPCState:
                         "is_routine": False,
                     }
                 return
+
+        # A new "go to" replaces any existing non-routine "go to"
+        if is_goto:
+            self.active_intentions = [
+                i for i in self.active_intentions
+                if i.get("is_routine", False) or not i["goal"].startswith("go to ")
+            ]
 
         self.active_intentions.append({
             "goal": goal, "location": location, "priority": priority,
