@@ -401,6 +401,8 @@ mean_drift_count_per_appraisal >= 50
 
 ## Phase 12 — Emergence measurement tooling (~1 wk)
 
+**Status:** SHIPPED. All Phase 12 measurement surfaces are in `tools/`: `probe_embedding_semantics.py` (F1), `probe_fallback_decay.py` (F4), `probe_maturity.py` (F5, dual-mode), `probe_attention_entropy.py` (F6), `probe_magnitude_sensitivity.py` (F8, NEW Phase 12), `probe_intention_decay.py` (F11), and the unifying `compare_npcs.py` (NEW Phase 12) which produces per-NPC rollups + pairwise verb Jensen-Shannon + appraisal-embedding silhouette from trace + persisted `saves/*/appraisals.json`. F8 previously only had a Godot test; the new CLI extends the gate to post-deploy trace analysis. `compare_npcs.py` is the integration point for Phase 13's capstone — it takes a multi-NPC trace and surfaces every §9.2/§9.3/§9.4 metric the capstone needs without per-metric CLI invocations. Zero new tuning constants. Acceptance: every required CLI present (7 total); a mature synthetic trace passes F4+F5+F6+F11 in one sweep; cross-being §9.2.7 appraisal silhouette + §9.4 verb-distribution JS both computable from trace+saves; F8 CLI correctly fails on extreme verb divergence.
+
 ### Steps
 
 - NEW `tools/compare_npcs.py` — Hebbian-graph diff (Frobenius, edge-wise deltas), verb-distribution KL, appraisal-embedding silhouette

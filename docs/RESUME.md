@@ -4,7 +4,7 @@ Paste this into a fresh Claude Code conversation to pick up where we left off.
 
 ---
 
-I'm implementing the perception substrate per `docs/perception_spec.md` (Draft 3) following `docs/perception_implementation_plan.md`. **Phases 0-7 + 9 + 10 + 11 shipped; Phase 8 tooling shipped (runtime training/deploy operator-gated). Next up is Phase 12.**
+I'm implementing the perception substrate per `docs/perception_spec.md` (Draft 3) following `docs/perception_implementation_plan.md`. **Phases 0-7 + 9-12 shipped; Phase 8 tooling shipped (runtime training/deploy operator-gated). Next up is Phase 13 capstone.**
 
 ## Status — completed
 
@@ -26,8 +26,9 @@ I'm implementing the perception substrate per `docs/perception_spec.md` (Draft 3
 | 9 | Cross-modal binding neurogenesis. `stimulus_registry.emit` gains `emitter_eid` (canonical F9 entity_id); `sensor_system.query_hearing` carries it through; `npc_controller`'s three emit sites pass `entity_id()`. `HebbianNetwork.update_per_entity_heard` spawns/refreshes `sense_heard_{eid}` from aggregated hearing activation; same-tick co-activation with `sense_visible_{eid}` ≥30 logs a co-fire event. At `cross_modal_co_fire_count`=5 within `cross_modal_window_seconds`=30 (both already in constants), `bind_{eid}` spawns wired to both modality parents at 0.12 (existing compound-parent weight; no new constant). `PER_ENTITY_PREFIXES` extended with `sense_heard_` + `bind_` for F9 merge coverage. Phase 6's heard deferral retires: `layer1.get_perception_salience_all` sums visible + heard outgoing weights, `rank_percepts` accepts heard and partitions top-K across all three; `render_hear_block` drops the [:3] cap. Trace v2 carries `cross_modal_state: {heard, bind_active, new_bind_neurons}` with per-tick drain. Zero new constants added. | Acceptance: bind_{eid} spawns after 30 encounters (Godot live + Python simulation); partial activation (visible-only, heard-only, windowed-expired) does NOT spawn; bind events land in trace; F9 merge drops deprecated sense_heard_/bind_ families; F4/F6 gates still pass |
 | 10 | Temporal-texture neurogenesis. `HebbianNetwork.update_temporal_textures(dt)` reads the per-entity dwell/rate fields from Phase 3, accumulates sustained-above-threshold seconds per eid, and spawns `q_lingering_{eid}` when dwell ≥ `temporal_dwell_min` (30) continuously for `temporal_persistence_seconds` (8), `q_approaching_fast_{eid}` when rate ≥ `temporal_rate_min` (0.5). Discontinuous elevation resets the counter. Compounds wired to parent sense neuron at 0.12; category `compound_quality_temporal`; tag_text = "lingering"/"approaching_fast" directly decodes §5.5 temporal tokens. `update_temporal_activations` refreshes compound activation from parent dwell/rate each tick so they fade as the entity leaves or stops approaching. `_compound_quality_count` increments (F4 respects). `PER_ENTITY_PREFIXES` extended with both prefixes for F9. Snapshot: `temporal: {active, new_neurons}`. Phase 7 renderer inlines temporal kinds (alphabetical, leading) with identity decode within the 3-token density cap. Two new Tier-2 seeds added to `neurogenesis_thresholds`: `temporal_dwell_min`, `temporal_rate_min`. | Acceptance: 5 sustained dwell periods → 5 lingering compounds; 5 approach periods → 5 approaching; 15-min rotating session → 10 temporal neurons spanning both kinds; discontinuous dwell does NOT spawn; renderer inlines tokens per-eid and enforces density cap with temporal leading |
 | 11 | Active perception via intention-attention coupling. `server/intention_attention.py::IntentionAttention` embeds the top-priority goal via existing `EmbeddingSource`, scores bootstrap concepts (cosine vs `q_{concept}` names) + active appraisal neurons (cosine vs drifted embeddings), returns top-K neuron IDs. `HebbianNetwork.pulse_intention_context` sets their activation to 40 and seeds uniform `bootstrap_intention_seed` (0.005) edges to every per-entity sense neuron. `propagate()` applies `_intention_amp_cache` per-sense (`1 + Σ I_act × w_{I→S}`, clamped at `intention_amp_cap=5.0`) to outgoing contributions. `get_intention_bootstrap_variance` returns per-intention CV of I→S weights — starts ≈0 (uniform), grows as Hebbian reshapes. `tools/probe_intention_decay.py` is F11 continuous gate: FAIL if any intention's CV stays below floor across min-samples ticks. Swapping goals clears stale intention neurons; learned edges remain. Snapshot: `intention: {context_neurons, amplification, bootstrap_variance}`. Trace v2 adds `intention_state` + `intention_context`. Three new Tier-2 seeds: `bootstrap_intention_seed`, `intention_top_k_concepts`, `intention_amp_cap`. | Acceptance: two goals produce two different top-1 rankings on same scene (Oven vs Bed); F6 entropy stays above floor under cap-level amplification (1.814 > 1.248); F11 CLI catches stuck-uniform + passes learning traces; CV mechanism distinguishes uniform from learned |
+| 12 | Emergence measurement tooling. `tools/probe_magnitude_sensitivity.py` is the F8 CLI — given baseline + perturbed traces, compute Jensen-Shannon divergence on verb distributions and gate against `magnitude_sensitivity_max_kl` from constants. `tools/compare_npcs.py` unifies §9.2/§9.3/§9.4 analysis: per-NPC rollups (verb distribution, mean/min F6 entropy, mean F4 fallback, compound count, appr_identity count, mean drift, F11 CV), pairwise verb Jensen-Shannon (emergent diversity), pairwise appraisal-embedding cosine distance (read from `saves/*/appraisals.json`). Read-only, produces pretty text OR `--json` machine output. Zero new constants added. | Acceptance: all 7 required CLIs present (F1/F4/F5/F6/F8/F11/compare_npcs); mature synthetic trace passes F4+F5+F6+F11 in one sweep; cross-being §9.2.7 silhouette + §9.4 verb JS both computable from trace+saves; F8 CLI correctly fails on extreme verb divergence |
 
-## Test sweep — all 29 green
+## Test sweep — all 32 green
 
 ```bash
 python3 tests/test_constants_parity.py
@@ -48,6 +49,9 @@ python3 tests/test_phase9_acceptance.py
 python3 tests/test_phase10_acceptance.py
 python3 tests/test_intention_attention.py
 python3 tests/test_phase11_acceptance.py
+python3 tests/test_probe_magnitude_sensitivity.py
+python3 tests/test_compare_npcs.py
+python3 tests/test_phase12_acceptance.py
 godot --path . --headless --quit --script res://tests/test_appraisal_spawn.gd
 godot --path . --headless --quit --script res://tests/test_reward_gate.gd
 godot --path . --headless --quit --script res://tests/test_f8_magnitude_sensitivity.gd
@@ -69,6 +73,8 @@ python3 tools/probe_fallback_decay.py <trace.jsonl> --quiet     # F4
 python3 tools/probe_maturity.py --trace <trace.jsonl> --quiet   # F5 audit
 python3 tools/probe_maturity.py --corpus <corpus.jsonl> --quiet # F5 corpus validator
 python3 tools/probe_intention_decay.py <trace.jsonl> --quiet    # F11
+python3 tools/probe_magnitude_sensitivity.py <base.jsonl> <perturbed.jsonl> --quiet  # F8
+python3 tools/compare_npcs.py --trace <trace.jsonl> [--saves saves/]  # cross-being diff
 ```
 
 ## Phase 8 runtime runbook (operator-gated)
@@ -99,17 +105,33 @@ python3 tools/probe_attention_entropy.py <new_trace>
 python3 tools/probe_fallback_decay.py <new_trace>
 ```
 
-## Up next — Phase 12 (Emergence measurement tooling, ~1 wk)
+## Up next — Phase 13 (Capstone validation, ~1 wk)
 
-Per `docs/perception_implementation_plan.md` Phase 12:
-- NEW `tools/compare_npcs.py` — cross-being diff: Hebbian-graph Frobenius distance, edge-wise deltas, verb-distribution KL, appraisal-embedding silhouette.
-- **Decay verification probe** — scramble bootstrap seeds → measure steady-state convergence (tests §9.3 decay metrics).
-- **Behavioral-probe harness** — synthetic scene library + verb-distribution scoring.
-- **Attention-entropy regression tool** — F6 monitor exposed as reusable CLI (already shipped; may need Phase 12 wiring for cross-being comparison).
-- **Fallback-contribution decay verifier** — F4 CLI (already shipped).
-- **Maturity-classifier CLI** — F5 (already shipped).
-- Existing shipped CLIs (F1/F4/F5/F6/F11) get consolidated into a single `tools/compare_npcs.py`-driven regression suite.
-- Acceptance: all §9.3 (decay) and §9.4 (emergence) metrics computable from trace + persisted state; F1/F4/F5/F6/F11 monitors expose CLIs for ad-hoc analysis.
+Per `docs/perception_implementation_plan.md` Phase 13 (F7 — "the test of the spec"):
+
+**Setup:** two beings, distinct personas (e.g. Hugo, Ivy), shared world, distinct random seeds for action-tiebreak; run 1 simulated week each in accelerated sim; capture full trace v2.
+
+**Measurement battery (all from Phase 12 tools, all must pass):**
+- Identity-appraisal decoded-token overlap on shared entities (§9.2.7): < 60%
+- Sensory-propagation cosine distance between beings (§9.2.7): > 0.2
+- Behavioral verb-distribution KL between beings (§9.2.7): > 0.4
+- Seed-randomization probe being convergence (§9.3.8): within 10% of standard
+- Persona-prior falsification washout (§9.3.9): converges after ≥30 encounters
+- ±20% seed perturbation steady-state behavior delta (§9.3.10): < 5%
+- Top-1-verb divergence on 50-scene probe library (§9.4.11): ≥ 60%
+- t=1-week individuation > t=0 individuation (§9.4.12): strictly greater
+- Dynamic-neuron count > protected-neuron count at t=1 wk (§9.4.13): strictly greater
+- Per-entity identity-appraisal cluster silhouette (§9.4.14): > 0.3
+- F1 semantic-neighborhood probe still passes: no embedding-space corruption
+- F6 attention-entropy stability: no collapse events in either trace
+
+**Verdict:**
+- Green = spec validated; the substrate produces measurably distinct beings.
+- Red = re-open spec sections corresponding to failed metric. Do not paper over.
+
+Capstone is *not* "ship it." It's "the substrate is what the spec claimed it would be." Failures here are spec defects, by the document's own contract.
+
+Depends on: Phase 8 runtime (v3 LoRA GGUF) — if that hasn't been executed yet, the capstone runs on the v2 model with Phase 7's new prompt format, which will produce invalid commands (Phase 7 acceptance confirmed v1/v2 can't parse the new prompt). Schedule the v3 training run before attempting capstone.
 
 ## Working agreements (recorded from this conversation)
 
@@ -121,12 +143,13 @@ Per `docs/perception_implementation_plan.md` Phase 12:
 6. **Test sweeps run cleanly between phases.** When something regresses (e.g. Phase 3 made GC remove 2 neurons not 1), update the prior phase's test to match the new substrate behavior, not the other way.
 7. **A pile of fixed ____ is an antipattern.** When proposing a phase, don't invent new thresholds/weights/categories the plan doesn't already seed in `perception_constants.json`. Reuse existing spawn/wiring conventions (e.g. Phase 5 wires identity-appraisal incoming at 0.12 because that's the weight the existing quality-constellation spawn uses — not because the plan specifies it). Lemma-match in F2 is real lemmatization (WordNet) + a proper-noun plural-strip fallback because WordNet doesn't know proper-noun plurals — this is a correctness gap to watch for in future phases that lean on lemmas.
 
-## Key open questions for Phase 12+
+## Key open questions for Phase 13
 
-- **Cross-being comparison mechanics.** `tools/compare_npcs.py` needs to load two persisted states (saves/{npc}/appraisals.json + trace jsonl) and compute Frobenius distance on their Hebbian adjacency matrices. The graphs have different neuron sets (per-entity neurons diverge by encounter history) — need a canonical neuron alignment (by ID) with zero-padding for unmatched.
-- **Decay probes §9.3.** "Scramble bootstrap seeds → measure steady-state convergence" means: two beings started from different seed values of `bootstrap_concepts` etc. should converge to similar representations after exposure to the same environment. Requires accelerated-sim runs with perturbed constants.
-- **Behavioral-probe library.** Phase 12 + 13 need a repeatable scene library (maybe 50 scenes) each a stable scenario. This is §15.2 territory — synthetic scenarios already exist for Phase 8 training; extend to add scoring metrics.
-- **Most Phase 12 CLIs are already shipped.** `tools/probe_*.py` for F1/F4/F5/F6/F11 exists. Phase 12 is mostly UNIFICATION + cross-being diff (compare_npcs.py), not new gates.
-- **Phase 8 runtime still pending.** The v3 LoRA training run hasn't executed. Phase 13 capstone requires v3 model traces; budget operator time.
+- **Accelerated-sim 1-week runs.** Capstone spec is "1 simulated week each in accelerated sim". At Phase 1.5's measured ~30x, that's ~5.6 hours per being of wall-clock. Two beings = ~11 hours. Plan budget allowance.
+- **v3 model dependency.** Phase 8 runtime gated; if v3 hasn't been trained, the capstone either skips or runs on the v2 model on the OLD prompt format. Skip is cleaner — document the cap-stone as "v3-or-bust" and don't run until `docs/phase8_colab_prompt.md` has been executed.
+- **§9.3 perturbation setup.** `±20% seed perturbation steady-state behavior delta` requires THREE runs: baseline + perturbed-up + perturbed-down. The perturbation targets are values in `perception_constants.json`; build a variant-constants file per run.
+- **Persona-prior falsification washout (§9.3.9).** Each persona's initial biases (from `data/npcs/*.json` drive_defaults) need to demonstrably wash out after N encounters. Requires a controlled scenario where a being's drives conflict with its persona's schedule.
+- **50-scene probe library (§9.4.11).** Reuse `training/cognitive/synthetic_scenarios.py` (60 scenarios × multiple personas). Already covers the verb space; maturity isn't needed for probe purposes — just scoring.
+- **Capstone CLI wrapper.** Should build a `tools/run_capstone.py` that orchestrates the accelerated runs, collects traces, runs the full measurement battery via the existing probes + compare_npcs, and emits the green/red verdict. Right now those are separate CLIs — unifying them ensures the capstone is reproducible.
 
-Read `docs/perception_implementation_plan.md` Phase 12 in full and propose an implementation plan, then ask before writing code.
+Read `docs/perception_implementation_plan.md` Phase 13 in full and propose an implementation plan, then ask before writing code.
