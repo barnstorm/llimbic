@@ -14,3 +14,15 @@ resume.txt
 resume2.txt
 resume_mem.txt
 .codex/
+*.safetensors
+
+# Training artifacts (checkpoints, generated corpora). The TOOLING that
+# produces these IS committed (training/cognitive/*.py). The ARTIFACTS are
+# gigabytes of model weights + training data — keep out of history.
+training/cognitive/phi35-cognitive-lora/
+training/cognitive/smollm3-command-v2-lora-final/
+training/limbic-tinyllama-lora/
+training/limbic-tinyllama-merged/
+training/cognitive/*.jsonl
+training/cognitive/corpus_v3*.jsonl
+traces/

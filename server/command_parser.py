@@ -27,8 +27,20 @@ _CMD_PATTERNS = [
     (re.compile(r"^GO\s+TO\s+(.+)$"), "go_to"),
     # LOOK AT noun
     (re.compile(r"^LOOK\s+AT\s+(.+)$"), "look_at"),
+    # LISTEN TO noun
+    (re.compile(r"^LISTEN\s+TO\s+(.+)$"), "listen_to"),
     # EXAMINE noun
     (re.compile(r"^EXAMINE\s+(.+)$"), "examine"),
+    # INTERACT WITH object
+    (re.compile(r"^INTERACT\s+WITH\s+(.+)$"), "interact"),
+    # TOUCH noun
+    (re.compile(r"^TOUCH\s+(.+)$"), "touch"),
+    # POINT AT noun
+    (re.compile(r"^POINT\s+AT\s+(.+)$"), "point_at"),
+    # WATCH entity
+    (re.compile(r"^WATCH\s+(.+)$"), "watch"),
+    # FOLLOW entity
+    (re.compile(r"^FOLLOW\s+(.+)$"), "follow"),
     # FLEE FROM entity
     (re.compile(r"^FLEE\s+FROM\s+(.+)$"), "flee_from"),
     # APPROACH entity
@@ -43,10 +55,18 @@ _CMD_PATTERNS = [
     (re.compile(r"^TAKE\s+(.+)$"), "take"),
     # CONSUME item
     (re.compile(r"^CONSUME\s+(.+)$"), "consume"),
+    # OFFER item TO entity (must precede GIVE — distinct verb)
+    (re.compile(r"^OFFER\s+(.+)\s+TO\s+(.+)$"), "offer_to"),
+    # SHOW item TO entity
+    (re.compile(r"^SHOW\s+(.+)\s+TO\s+(.+)$"), "show_to"),
     # GIVE item TO entity
     (re.compile(r"^GIVE\s+(.+)\s+TO\s+(.+)$"), "give_to"),
     # DROP item
     (re.compile(r"^DROP\s+(.+)$"), "drop"),
+    # REST (body autonomy)
+    (re.compile(r"^REST$"), "rest"),
+    # HIDE (body autonomy)
+    (re.compile(r"^HIDE$"), "hide"),
     # WAIT
     (re.compile(r"^WAIT$"), "wait"),
 ]
@@ -230,6 +250,123 @@ def _parse_command_line(cmd_line: str, context: dict) -> dict:
                 "type": "drop_item",
                 "item": item,
             })
+
+        elif cmd_type == "touch":
+            noun = m.group(1)
+            target = _resolve_noun(noun, context)
+            result["target"] = target
+            if target:
+                result["trigger_actions"].append({
+                    "type": "touch",
+                    "target_type": target.get("type", ""),
+                    "target_name": noun,
+                    "object_id": target.get("id", noun),
+                    "target": target.get("position"),
+                })
+            result["action_biases"]["observe"] = 0.3
+
+        elif cmd_type == "interact":
+            noun = m.group(1)
+            target = _resolve_noun(noun, context)
+            result["target"] = target
+            if target:
+                result["trigger_actions"].append({
+                    "type": "interact",
+                    "object_id": target.get("id", noun),
+                    "target_name": noun,
+                    "target": target.get("position"),
+                })
+            result["action_biases"]["approach"] = 0.2
+            result["action_biases"]["observe"] = 0.2
+
+        elif cmd_type == "watch":
+            entity = m.group(1)
+            target = _resolve_noun(entity, context)
+            result["target"] = target
+            if target:
+                result["trigger_actions"].append({
+                    "type": "watch",
+                    "target": entity,
+                    "position": target.get("position"),
+                })
+            result["action_biases"]["observe"] = 0.6
+
+        elif cmd_type == "listen_to":
+            noun = m.group(1)
+            target = _resolve_noun(noun, context)
+            result["target"] = target
+            if target:
+                result["trigger_actions"].append({
+                    "type": "listen",
+                    "target_type": target.get("type", ""),
+                    "target_name": noun,
+                    "position": target.get("position"),
+                })
+            result["action_biases"]["observe"] = 0.4
+
+        elif cmd_type == "follow":
+            entity = m.group(1)
+            target = _resolve_noun(entity, context)
+            result["target"] = target
+            if target and target["type"] == "entity":
+                result["intentions"].append({
+                    "goal": f"follow {entity}",
+                    "location": "",
+                    "priority": 0.55,
+                    "reason": "command",
+                })
+                result["trigger_actions"].append({
+                    "type": "follow",
+                    "target": entity,
+                })
+            result["action_biases"]["approach"] = 0.4
+
+        elif cmd_type == "point_at":
+            noun = m.group(1)
+            target = _resolve_noun(noun, context)
+            result["target"] = target
+            if target:
+                result["trigger_actions"].append({
+                    "type": "point_at",
+                    "target_type": target.get("type", ""),
+                    "target_name": noun,
+                    "position": target.get("position"),
+                })
+            result["action_biases"]["observe"] = 0.2
+
+        elif cmd_type == "offer_to":
+            item = m.group(1)
+            entity = m.group(2)
+            target = _resolve_noun(entity, context)
+            result["target"] = target
+            result["trigger_actions"].append({
+                "type": "offer_item",
+                "item": item,
+                "target": entity,
+            })
+            result["action_biases"]["approach"] = 0.3
+
+        elif cmd_type == "show_to":
+            item = m.group(1)
+            entity = m.group(2)
+            target = _resolve_noun(entity, context)
+            result["target"] = target
+            result["trigger_actions"].append({
+                "type": "show_item",
+                "item": item,
+                "target": entity,
+            })
+            result["action_biases"]["approach"] = 0.2
+
+        elif cmd_type == "rest":
+            result["trigger_actions"].append({"type": "rest"})
+            result["action_biases"]["approach"] = -0.4
+            result["action_biases"]["observe"] = -0.2
+
+        elif cmd_type == "hide":
+            result["trigger_actions"].append({"type": "hide"})
+            result["action_biases"]["avoid"] = 0.5
+            result["action_biases"]["approach"] = -0.3
 
         return result
 

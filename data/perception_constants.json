@@ -1,0 +1,109 @@
+{
+  "_comment": "Tier-2 seed values for the perception substrate. Read by both Python (server/) and GDScript (scripts/). Parity enforced by tests/test_constants_parity.py. Per docs/perception_spec.md and docs/perception_implementation_plan.md, every value here has either a documented decay path or is a defensible tuning parameter. Editing values here is the ONLY supported way to tune the substrate; constants in code are bugs.",
+
+  "embedding_bridge": {
+    "_decay": "Bootstrap concepts wash out after ~500 drift cycles via cortical feedback (§4.2). drift_count_persist_threshold gates which neurons survive session boundaries.",
+    "drift_rate": 0.01,
+    "gravity_rate": 0.001,
+    "drift_count_persist_threshold": 10,
+    "decode_top_k": 3,
+    "embedding_cache_size": 2048,
+    "bootstrap_concepts": [
+      "tight", "loose", "warm", "heavy", "settled",
+      "churning", "pounding", "hollow", "prickling",
+      "open", "clear", "foggy", "buzzing", "numb"
+    ]
+  },
+
+  "hebbian": {
+    "_decay": "Reward-gating modifier active at runtime; weights move via Hebbian rule per §2.4.",
+    "eta": 0.05,
+    "theta": 30.0,
+    "beta": 0.5,
+    "reward_signal_decay_seconds": 2.0
+  },
+
+  "neurogenesis_thresholds": {
+    "_decay": "Spawn rates, not content. Affect how quickly the being develops new neurons, not what those neurons represent (§4.5).",
+    "quality_constellation_min": 2,
+    "quality_constellation_sustained_count": 8,
+    "quality_constellation_window_seconds": 30,
+    "appraisal_constellation_min": 3,
+    "appraisal_constellation_threshold": 50.0,
+    "appraisal_constellation_sustained_seconds": 6,
+    "stress_threshold": 75,
+    "stress_sustained_seconds": 3,
+    "novelty_threshold": 30,
+    "novelty_sustained_seconds": 5,
+    "encounter_threshold": 5,
+    "distance_action_co_fire_count": 10,
+    "distance_action_window_seconds": 60,
+    "cross_modal_co_fire_count": 5,
+    "cross_modal_window_seconds": 30,
+    "temporal_persistence_seconds": 8,
+    "temporal_dwell_min": 30.0,
+    "temporal_rate_min": 0.5
+  },
+
+  "sensors": {
+    "_decay": "Physical body constraints. Treat as Tier 1 for default beings; listed here only for scenario-specific experiments (§4.6).",
+    "fov_pixels": 96,
+    "hearing_pixels": 80,
+    "distance_tau_tiles": 4,
+    "tracker_expiry_ticks": 600,
+    "dwell_ema_alpha": 0.05
+  },
+
+  "capacity": {
+    "_decay": "Capacity caps. Not decaying. Tunable per experiment.",
+    "max_appraisal_per_being": 12,
+    "max_compound_quality": 16,
+    "prompt_top_k_percepts": 8
+  },
+
+  "reward_magnitudes": {
+    "_decay": "F8 magnitude-sensitivity gate verifies behavior is robust to ±2x perturbation. If gate fails, magnitudes are bypassing reward-gating normalization.",
+    "reward_drive_satisfaction": 0.7,
+    "reward_drive_stabilization": 0.3,
+    "reward_social_accepted": 0.6,
+    "reward_rest_recovered": 0.4,
+    "reward_explore_discovered": 0.5,
+    "reward_threat_avoided": 0.8,
+    "reward_action_succeeded": 0.2
+  },
+
+  "drive_thresholds": {
+    "_doc": "Phase 1 drive-crossing detection. Urgency threshold = drive at or above this is 'urgent' (signals reward when crossing back below). Safe band lower = sustained drive at or above this counts toward stabilization. drive_safety is the only inverted drive (high=safe).",
+    "energy": {"urgency": 30.0, "safe_band": 60.0, "inverted": true},
+    "hunger": {"urgency": 70.0, "safe_band": 40.0, "inverted": false},
+    "social_need": {"urgency": 70.0, "safe_band": 40.0, "inverted": false},
+    "safety": {"urgency": 40.0, "safe_band": 70.0, "inverted": true},
+    "stabilization_sustained_seconds": 5.0
+  },
+
+  "thought_entity_bind_threshold": 0.45,
+  "_thought_entity_bind_threshold_doc": "F2: cosine threshold for binding a thought to an entity-encounter. Filters out ambient thoughts (back pain, hunger) that would otherwise poison identity-appraisal. Phase 5.",
+
+  "identity_filter_min_rejection_rate": 0.15,
+  "_identity_filter_min_rejection_rate_doc": "F2 acceptance gate: fraction of thought-entity association attempts that must be REJECTED by the name-or-cosine filter for the filter to be 'doing work' (not pass-through). If rejection rate falls below this in trace audits, the filter thresholds are too permissive and identity-appraisals will collapse. Phase 5.",
+
+  "h_min_attention_entropy_factor": 0.6,
+  "_h_min_attention_entropy_factor_doc": "F6: H_MIN = factor * log(K). Rolling 10-min mean attention entropy must exceed this floor or the stability gate fails (tunnel vision). Phase 6+.",
+
+  "n_fallback_retire": 8,
+  "_n_fallback_retire_doc": "F4: cold-start verb-grammar fallback contribution decays as max(0, 1 - compound_count / N). At N compound neurons, fallback is zero. Phase 7.",
+
+  "training_maturity": {
+    "_decay": "F5: Phase 8 trace harvest accepts only post-maturity thoughts. Synthetic-to-replay weighting prevents overfitting to whatever cold-start beings happened to do.",
+    "min_compound_neurons": 6,
+    "min_appr_identity": 3,
+    "min_mean_drift_per_appraisal": 50,
+    "synthetic_to_replay_ratio": 2.0
+  },
+
+  "magnitude_sensitivity_max_kl": 0.15,
+  "_magnitude_sensitivity_max_kl_doc": "F8 gate: verb-distribution KL between baseline and 2x-magnitude beings must stay below this after 10 simulated minutes.",
+
+  "semantic_probe_min_pass_rate": 0.7,
+  "_semantic_probe_min_pass_rate_doc": "F1 hard gate: fraction of semantic-neighborhood probes (~30 probes) where ≥1 expected neighbor is in top-10. Below threshold → T0 produces lexical noise → Phase 0.5 (T1) mandatory."
+}

@@ -5,6 +5,14 @@
   "spawn_position": [1168, 592],
   "home_location": "blacksmith",
   "work_location": "blacksmith",
+  "sensor_profile": {
+    "vision_range": 80.0,
+    "vision_arc_deg": 70.0,
+    "eye_offset": [0.0, -8.0],
+    "hearing_threshold": 0.15,
+    "hearing_sensitivity": 0.8,
+    "ear_offset": [0.0, 0.0]
+  },
   "personality": {
     "traits": ["blunt", "hardworking", "proud"],
     "speech_style": "direct and matter-of-fact, no wasted words",
@@ -20,7 +28,9 @@
   "emotion_baseline": {"pride": 0.4, "admiration": 0.2},
   "drive_defaults": {"energy": 80.0, "hunger": 20.0, "social": 30.0, "safety": 80.0},
   "neural_biases": [
-    {"src": "task_momentum", "dst": "action_approach", "weight": 0.02}
+    {"src": "task_momentum", "dst": "action_approach", "weight": 0.02},
+    {"src": "task_momentum", "dst": "vagal_ventral", "weight": 0.03},
+    {"src": "task_frustration", "dst": "vagal_sympathetic", "weight": 0.03}
   ],
   "night_behavior": {"go_home_hour": 21.0, "override": null},
   "starting_inventory": ["iron_nail"],

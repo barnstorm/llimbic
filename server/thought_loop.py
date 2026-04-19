@@ -16,10 +16,36 @@ import asyncio
 import json
 import time
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import numpy as np
 
 from npc_state import NPCState
+from perception_rank import attention_entropy, h_floor
+from identity_phantom import build_phantom_nudges
 from trace_logger import trace_thought, trace_speech
+
+# Optional appraisal bridge (Phase 0). Both imports are guarded so the server
+# still works when the embedding bridge or decode matrix isn't yet available.
+try:
+    from embedding_source import EmbeddingSource  # noqa: F401  (type only)
+    from appraisal_embeddings import AppraisalEmbeddingManager
+    _APPRAISAL_AVAILABLE = True
+except Exception as _e:  # pragma: no cover
+    AppraisalEmbeddingManager = None  # type: ignore
+    _APPRAISAL_AVAILABLE = False
+
+# Phase 5 identity-appraisal tracker. Same guard — no-op gracefully if the
+# embedding bridge isn't available (tracker needs the source for the F2
+# cosine branch).
+try:
+    from identity_appraisal import IdentityAppraisalTracker
+    _IDENTITY_AVAILABLE = True
+except Exception as _e:  # pragma: no cover
+    IdentityAppraisalTracker = None  # type: ignore
+    _IDENTITY_AVAILABLE = False
 
 
 def _narrate_body(context: dict) -> str:
@@ -101,6 +127,19 @@ log = logging.getLogger("layer3")  # share logger with layer3_server for file ou
 # Shared executor for blocking model calls
 _executor = ThreadPoolExecutor(max_workers=4)
 
+# F6 attention-entropy floor factor. Seeded from constants at import time; the
+# thought-loop records this alongside the tick entropy so every trace carries
+# the threshold it was measured against (no hardcoded gate in replay).
+try:
+    import json as _json
+    _fp = Path(__file__).resolve().parent.parent / "data" / "perception_constants.json"
+    with _fp.open() as _cf:
+        _H_FACTOR_FOR_THOUGHT_LOOP = float(_json.load(_cf).get(
+            "h_min_attention_entropy_factor", 0.6
+        ))
+except Exception:
+    _H_FACTOR_FOR_THOUGHT_LOOP = 0.6
+
 
 async def _run(fn, *args):
     return await asyncio.get_event_loop().run_in_executor(_executor, fn, *args)
@@ -109,13 +148,58 @@ async def _run(fn, *args):
 class ThoughtLoop:
     """Manages per-NPC thought loops and push delivery."""
 
-    def __init__(self, l2_model, l3_model):
+    def __init__(
+        self,
+        l2_model,
+        l3_model,
+        embedding_source=None,
+        appraisal_manager=None,
+        saves_dir: str | Path = "saves",
+    ):
         self.l2 = l2_model
         self.l3 = l3_model
         self.npc_states: dict[str, NPCState] = {}
         self._ws = None  # shared WebSocket reference (set when client connects)
         self._tasks: dict[str, asyncio.Task] = {}  # npc_name -> running loop task
         self._running = True
+
+        # Phase 0 bridge — both may be None if the matrix or server isn't ready.
+        # When None, snapshot handling and cortical feedback no-op gracefully.
+        self.embedding_source = embedding_source
+        self.appraisal_manager = appraisal_manager
+        self.saves_dir = Path(saves_dir)
+        if self.appraisal_manager is None:
+            log.info("ThoughtLoop: appraisal embedding bridge DISABLED "
+                     "(no manager provided). Cortical feedback will no-op.")
+        else:
+            log.info("ThoughtLoop: appraisal embedding bridge ENABLED. "
+                     "Saves dir: %s", self.saves_dir)
+
+        # Phase 5 — identity-appraisal tracker. Reads constants lazily so it
+        # picks up whatever seed values are current at startup. Disabled if
+        # the embedding bridge is off (needs the source for F2 cosine match).
+        self.identity_tracker = None
+        if (_IDENTITY_AVAILABLE
+                and self.embedding_source is not None
+                and self.appraisal_manager is not None):
+            try:
+                import json as _json
+                _consts_path = Path(__file__).resolve().parent.parent / "data" / "perception_constants.json"
+                with _consts_path.open() as _f:
+                    _consts = _json.load(_f)
+                _enc_thr = int(_consts["neurogenesis_thresholds"]["encounter_threshold"])
+                _bind_thr = float(_consts["thought_entity_bind_threshold"])
+                self.identity_tracker = IdentityAppraisalTracker(
+                    self.embedding_source,
+                    encounter_threshold=_enc_thr,
+                    bind_cosine_threshold=_bind_thr,
+                )
+                log.info("ThoughtLoop: identity-appraisal tracker ENABLED "
+                         "(encounter_threshold=%d, bind_threshold=%.2f)",
+                         _enc_thr, _bind_thr)
+            except Exception as e:
+                log.warning("ThoughtLoop: identity-appraisal tracker failed to init: %s", e)
+                self.identity_tracker = None
 
     def set_websocket(self, ws):
         """Set the shared WebSocket for push delivery."""
@@ -135,6 +219,16 @@ class ThoughtLoop:
         log.info(f"[THOUGHT LOOP] Registered {npc_name} ({role}), "
               f"{len(state.active_intentions)} routine intentions")
 
+        # Load persisted appraisals if any (per spec §3.7).
+        if self.appraisal_manager is not None:
+            try:
+                path = self.saves_dir / npc_name / "appraisals.json"
+                loaded = self.appraisal_manager.load(npc_name, path)
+                if loaded:
+                    log.info(f"[THOUGHT LOOP] {npc_name}: loaded {loaded} persisted appraisals")
+            except Exception as e:
+                log.warning(f"[THOUGHT LOOP] {npc_name}: appraisal load failed: {e}")
+
         # Start the thought loop coroutine
         task = asyncio.create_task(self._npc_loop(npc_name))
         self._tasks[npc_name] = task
@@ -149,9 +243,41 @@ class ThoughtLoop:
             return
         state.receive_snapshot(snapshot)
 
+        # Drain newly-spawned appraisal neurons announced by the GDScript Hebbian
+        # network (handshake per perception_implementation_plan.md Phase 0.6) and
+        # initialize each in the embedding manager.
+        if self.appraisal_manager is None:
+            return
+        appraisal = snapshot.get("appraisal") or {}
+        new_neurons = appraisal.get("new_neurons") or []
+        for entry in new_neurons:
+            try:
+                neuron_id = str(entry.get("id"))
+                seed = entry.get("embedding_seed") or {}
+                if not neuron_id or not seed:
+                    continue
+                if self.appraisal_manager.has_neuron(npc_name, neuron_id):
+                    continue
+                # seed values from GDScript are 0..100; normalize to 0..1 weights.
+                seed_weights = {str(k): float(v) / 100.0 for k, v in seed.items()}
+                self.appraisal_manager.initialize(npc_name, neuron_id, seed_weights)
+                log.info("[APPRAISAL] %s: initialized %s seed=%s",
+                         npc_name, neuron_id, list(seed_weights.keys()))
+            except Exception as e:
+                log.warning("[APPRAISAL] %s: initialize failed for %s: %s",
+                            npc_name, entry, e)
+
     async def shutdown(self):
-        """Stop all thought loops."""
+        """Stop all thought loops and persist appraisal state."""
         self._running = False
+        # Persist long-standing appraisal neurons before shutdown.
+        if self.appraisal_manager is not None:
+            for npc_name in list(self.npc_states.keys()):
+                try:
+                    path = self.saves_dir / npc_name / "appraisals.json"
+                    self.appraisal_manager.persist(npc_name, path)
+                except Exception as e:
+                    log.warning(f"[APPRAISAL] persist failed for {npc_name}: {e}")
         for task in self._tasks.values():
             task.cancel()
         self._tasks.clear()
@@ -189,6 +315,14 @@ class ThoughtLoop:
         state = self.npc_states[npc_name]
         context = state.build_thought_context()
 
+        # Phase 6 — F6 attention-entropy monitor. `context` now carries the
+        # top-K propagation weights for the ranked percepts consumed this
+        # cycle. Compute Shannon entropy over the normalized weights and
+        # push into the rolling-window gate. Zero-weight cold-start yields
+        # H=0 which correctly signals undifferentiated attention.
+        tick_entropy = attention_entropy(context.get("perception_top_k_weights", []))
+        state.record_entropy(tick_entropy)
+
         t0 = time.time()
 
         # Step 1: Build body narrative from drives + somatic tags
@@ -197,6 +331,21 @@ class ThoughtLoop:
         snap_emotions = {}
         emo_vec = context.get("emotion_vector", state.emotion_vector)
         context["body_narrative"] = _narrate_body(context)
+
+        # Phase 7 — decode active identity-appraisals BEFORE rendering the
+        # prompt so the flat Percept renderer can inline tokens per spec §6.4.
+        # Without this, decoded tokens are only computed post-thought for the
+        # trace and the model never sees emergent identity content in-prompt.
+        pre_prompt_identity_decoded: dict[str, list[str]] = {}
+        if self.appraisal_manager is not None:
+            try:
+                for eid in state.visible_eid_to_name.keys():
+                    nid = f"appr_identity_{eid}"
+                    if self.appraisal_manager.has_neuron(npc_name, nid):
+                        pre_prompt_identity_decoded[eid] = self.appraisal_manager.decode(npc_name, nid)
+            except Exception as e:
+                log.warning(f"[IDENTITY] pre-prompt decode failed for {npc_name}: {e}")
+        context["identity_appraisal_decoded"] = pre_prompt_identity_decoded
 
         # Step 2: L3 executive generates thoughts
         thought_result = {"thoughts": [], "intentions": [], "beliefs": [],
@@ -208,6 +357,79 @@ class ThoughtLoop:
                 thought_result = await _run(self.l3.generate_thought, context)
             except Exception as e:
                 log.warning(f"L3 thought generation failed for {npc_name}: {e}")
+
+        # Step 2b: Cortical feedback — drift active appraisal embeddings toward
+        # the generated thought (perception_spec §3.6). This is what gives each
+        # appraisal a per-being trajectory through LLM latent space, decoded
+        # back to tokens that reflect *this* being's interpretation of *this*
+        # body pattern.
+        #
+        # Phase 5: the same thought embedding also feeds the identity-appraisal
+        # tracker, which runs the F2 association filter against currently-
+        # visible entities and (on threshold) requests a spawn.
+        thought_emb = None
+        identity_events: list = []
+        identity_spawns: list = []
+        if (self.embedding_source is not None
+                and thought_result.get("thoughts")):
+            try:
+                think_text = thought_result["thoughts"][0]
+                if think_text:
+                    thought_emb = await _run(self.embedding_source.embed, think_text)
+                    if not (isinstance(thought_emb, np.ndarray)
+                            and float(np.linalg.norm(thought_emb)) > 1e-6):
+                        thought_emb = None
+            except Exception as e:
+                log.warning(f"[APPRAISAL] embed(thought) failed for {npc_name}: {e}")
+                thought_emb = None
+
+        if (thought_emb is not None
+                and self.appraisal_manager is not None
+                and state.last_active_appraisals):
+            try:
+                for nid, activation in state.last_active_appraisals.items():
+                    self.appraisal_manager.drift(
+                        npc=npc_name,
+                        neuron_id=nid,
+                        activation=float(activation),
+                        thought_embedding=thought_emb,
+                    )
+            except Exception as e:
+                log.warning(f"[APPRAISAL] cortical feedback failed for {npc_name}: {e}")
+
+        if (thought_emb is not None
+                and self.identity_tracker is not None
+                and self.appraisal_manager is not None
+                and state.visible_eid_to_name):
+            try:
+                visible_pairs = list(state.visible_eid_to_name.items())
+                think_text = thought_result["thoughts"][0] if thought_result.get("thoughts") else ""
+                events, spawns = self.identity_tracker.associate_thought(
+                    npc=npc_name,
+                    thought_text=think_text,
+                    thought_emb=thought_emb,
+                    visible_entities=visible_pairs,
+                )
+                identity_events = events
+                for sp in spawns:
+                    # Python side: initialize the embedding from the deque mean.
+                    if not self.appraisal_manager.has_neuron(npc_name, sp.neuron_id):
+                        self.appraisal_manager.initialize_from_thoughts(
+                            npc=npc_name,
+                            neuron_id=sp.neuron_id,
+                            thought_embeddings=sp.thought_embeddings,
+                        )
+                        identity_spawns.append({
+                            "neuron_id": sp.neuron_id,
+                            "entity_id": sp.entity_id,
+                            "entity_name": sp.entity_name,
+                            "thought_count": len(sp.thought_embeddings),
+                        })
+                        log.info("[IDENTITY] %s: spawned %s for %s (from %d thoughts)",
+                                 npc_name, sp.neuron_id, sp.entity_name,
+                                 len(sp.thought_embeddings))
+            except Exception as e:
+                log.warning(f"[IDENTITY] tracker failed for {npc_name}: {e}")
 
         # Step 3: (removed — L2 now narrates body state in Step 1,
         # no longer colors thoughts into emotion vectors)
@@ -318,6 +540,55 @@ class ThoughtLoop:
                     "target": trigger.get("target"),
                 })
                 log.info(f"INVENTORY [{npc_name}] {ttype}: {trigger.get('item', '')}")
+            elif ttype in ("offer_item", "show_item"):
+                commands.append({
+                    "cmd": ttype,
+                    "item": trigger.get("item", ""),
+                    "target": trigger.get("target"),
+                })
+                log.info(f"SOCIAL [{npc_name}] {ttype}: {trigger.get('item', '')} -> {trigger.get('target', '')}")
+            elif ttype == "touch":
+                commands.append({
+                    "cmd": "touch",
+                    "target_type": trigger.get("target_type", ""),
+                    "target_name": trigger.get("target_name", ""),
+                    "object_id": trigger.get("object_id", ""),
+                    "target": trigger.get("target"),
+                })
+            elif ttype == "interact":
+                commands.append({
+                    "cmd": "interact",
+                    "target_name": trigger.get("target_name", ""),
+                    "object_id": trigger.get("object_id", ""),
+                    "target": trigger.get("target"),
+                })
+            elif ttype == "watch":
+                commands.append({
+                    "cmd": "watch",
+                    "target": trigger.get("target", ""),
+                    "position": trigger.get("position"),
+                })
+            elif ttype == "listen":
+                commands.append({
+                    "cmd": "listen",
+                    "target_type": trigger.get("target_type", ""),
+                    "target_name": trigger.get("target_name", ""),
+                    "position": trigger.get("position"),
+                })
+            elif ttype == "follow":
+                commands.append({
+                    "cmd": "follow",
+                    "target": trigger.get("target", ""),
+                })
+            elif ttype == "point_at":
+                commands.append({
+                    "cmd": "point_at",
+                    "target_type": trigger.get("target_type", ""),
+                    "target_name": trigger.get("target_name", ""),
+                    "position": trigger.get("position"),
+                })
+            elif ttype in ("rest", "hide"):
+                commands.append({"cmd": ttype})
 
         elapsed = time.time() - t0
 
@@ -347,6 +618,33 @@ class ThoughtLoop:
             # learns not to think when nothing needs thinking about.
             commands.append({"cmd": "reward_salience", "amount": -5.0})
 
+        # Phase 5 — push any identity-appraisal spawns produced this cycle.
+        # The Hebbian side will wire sense_visible_{eid} + active somatic
+        # inputs at receipt; outgoing wiring emerges via Hebbian learning.
+        for sp in identity_spawns:
+            commands.append({
+                "cmd": "spawn_identity_appraisal",
+                "neuron_id": sp["neuron_id"],
+                "entity_id": sp["entity_id"],
+            })
+
+        # Phase 7 §7.2 — somatic phantom activation driven by active identity-
+        # appraisal decoded tokens instead of the removed memory-lookup path.
+        # Each visible entity whose `appr_identity_{eid}` is firing contributes
+        # nudges to the q_{tok} neurons named by its top decoded tokens.
+        identity_activations = {
+            nid: float(act)
+            for nid, act in state.last_active_appraisals.items()
+            if str(nid).startswith("appr_identity_")
+        }
+        if identity_activations and identity_decoded:
+            phantom_cmds = build_phantom_nudges(
+                identity_decoded=identity_decoded,
+                active_identity_activations=identity_activations,
+                visible_eids=list(state.visible_eid_to_name.keys()),
+            )
+            commands.extend(phantom_cmds)
+
         # Step 5: Push to client
         await self._push_commands(npc_name, commands)
 
@@ -361,8 +659,101 @@ class ThoughtLoop:
             f"[{elapsed:.1f}s]"
         )
 
+        # Decode currently-active appraisals for the trace (v2 schema). The
+        # decoded tokens are what downstream training-data replay turns into
+        # the "Body sense:" line of the LLM prompt; capturing them per-cycle
+        # is essential for replay fidelity.
+        appraisal_decoded: dict[str, list[str]] = {}
+        if (self.appraisal_manager is not None
+                and state.last_active_appraisals):
+            try:
+                appraisal_decoded = self.appraisal_manager.get_active_decoded(
+                    npc_name, state.last_active_appraisals,
+                )
+            except Exception as e:
+                log.warning(f"[APPRAISAL] decode failed for {npc_name}: {e}")
+
+        # Phase 5 — eid-keyed decoded tokens for every identity-appraisal
+        # currently tracked on the Python side. This is the trace field the
+        # spec calls out as "decoded tokens flow into trace v2 alongside the
+        # entity". Use has_neuron() to avoid decoding non-identity appraisals.
+        identity_decoded: dict[str, list[str]] = {}
+        if self.appraisal_manager is not None:
+            try:
+                for eid in state.visible_eid_to_name.keys():
+                    nid = f"appr_identity_{eid}"
+                    if self.appraisal_manager.has_neuron(npc_name, nid):
+                        identity_decoded[eid] = self.appraisal_manager.decode(npc_name, nid)
+            except Exception as e:
+                log.warning(f"[IDENTITY] decode failed for {npc_name}: {e}")
+
+        # Serialize F2 audit events for trace v2.
+        entity_thought_associations: list[dict] = [
+            {"eid": ev.eid, "name": ev.name, "matched": ev.matched,
+             "method": ev.method, "score": round(float(ev.score), 4)}
+            for ev in identity_events
+        ]
+
+        # Phase 8 F5 — per-tick appraisal drift_count snapshot. Needed so the
+        # maturity classifier (and the v3 training-data generator) can gate
+        # on `mean_drift_count_per_appraisal`. Without this, drift-count is
+        # only available at shutdown via the persist file.
+        appraisal_drift_counts: dict[str, int] = {}
+        if self.appraisal_manager is not None:
+            try:
+                appraisal_drift_counts = self.appraisal_manager.get_drift_counts(npc_name)
+            except Exception as e:
+                log.warning(f"[APPRAISAL] drift_counts snapshot failed for {npc_name}: {e}")
+
+        # Phase 6 F6 trace fields — per-tick entropy plus rolling 10-min mean
+        # and the current H_MIN floor (derived from K). Traces are the
+        # regression substrate for F6 across every later phase, so the full
+        # context lands here rather than only the tick value.
+        k_for_floor = max(1, len(context.get("perception_top_k_weights", [])))
+        attention_entropy_info = {
+            "tick": float(tick_entropy),
+            "mean_10min": float(state.rolling_entropy_mean(600.0)),
+            "h_min": float(h_floor(k_for_floor, _H_FACTOR_FOR_THOUGHT_LOOP)),
+            "k": int(k_for_floor),
+            "fallback": bool(context.get("perception_fallback", False)),
+            "total_considered": int(context.get("perception_total_considered", 0)),
+        }
+
+        # Phase 7 — rebuild the rendered prompt and compound/fallback metrics
+        # for trace recording. The prompt string is the exact input the model
+        # saw this tick; spec §6.5 requires it for v3-training replay fidelity.
+        try:
+            from perception import render as _render_perception
+            prompt_rendered_text, _ = _render_perception(context)
+        except Exception:
+            prompt_rendered_text = ""
+        # Grammar-derived F4 metrics flow through the thought_result (set in
+        # command_model); fall back to None so the trace field is null rather
+        # than a fabricated zero if the legacy path generates the thought.
+        compounds_state = context.get("compounds") or {}
+
         # Structured trace for training data
-        trace_thought(npc_name, context, thought_result, elapsed * 1000)
+        trace_thought(
+            npc_name, context, thought_result, elapsed * 1000,
+            active_appraisals=state.last_active_appraisals,
+            appraisal_decoded=appraisal_decoded,
+            reward_events=state.last_reward_events,
+            new_identity_appraisals=identity_spawns,
+            entity_thought_associations=entity_thought_associations,
+            identity_appraisal_decoded=identity_decoded,
+            attention_entropy=attention_entropy_info,
+            prompt_rendered=prompt_rendered_text,
+            fallback_contribution=thought_result.get("fallback_contribution"),
+            fallback_coefficient=thought_result.get("fallback_coefficient"),
+            compounds_state=compounds_state,
+            verbs_via_compound=thought_result.get("verbs_via_compound") or [],
+            verbs_via_fallback=thought_result.get("verbs_via_fallback") or [],
+            appraisal_drift_counts=appraisal_drift_counts,
+            cross_modal_state=context.get("cross_modal"),
+            temporal_state=context.get("temporal"),
+        )
+        # Drain so we don't double-attribute to the next thought cycle.
+        state.last_reward_events = []
 
     async def _push_commands(self, npc_name: str, commands: list[dict]):
         """Push commands to client via WebSocket."""

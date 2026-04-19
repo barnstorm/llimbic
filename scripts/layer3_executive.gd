@@ -261,7 +261,7 @@ func get_object_target_position(world_object_registry: Node) -> Vector2:
 	return obj.get("position", Vector2.ZERO)
 
 func location_name_from_position(world_pos: Vector2) -> String:
-	var best_name: String = "unknown"
+	var best_name: String = ""
 	var best_dist: float = 999999.0
 	for loc_name in LOCATIONS:
 		var loc_pos: Vector2 = LOCATIONS[loc_name]
@@ -269,6 +269,6 @@ func location_name_from_position(world_pos: Vector2) -> String:
 		if dist < best_dist:
 			best_dist = dist
 			best_name = loc_name
-	if best_dist > 200.0:
-		return "unknown"
+	# Nearest-named-location always wins — no "unknown" string reaches the LLM.
+	# The richer prose label (sector/arena) is provided separately via WorldLabelSystem.
 	return best_name

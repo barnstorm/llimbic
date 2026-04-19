@@ -5,6 +5,14 @@
   "spawn_position": [1712, 464],
   "home_location": "bakery",
   "work_location": "bakery",
+  "sensor_profile": {
+    "vision_range": 96.0,
+    "vision_arc_deg": 75.0,
+    "eye_offset": [0.0, -6.0],
+    "hearing_threshold": 0.1,
+    "hearing_sensitivity": 1.1,
+    "ear_offset": [0.0, 0.0]
+  },
   "personality": {
     "traits": ["warm", "pragmatic", "early-riser"],
     "speech_style": "casual and terse, references bread and baking in metaphors",
@@ -20,7 +28,9 @@
   "emotion_baseline": {"joy": 0.4, "caring": 0.3},
   "drive_defaults": {"energy": 75.0, "hunger": 10.0, "social": 30.0, "safety": 80.0},
   "neural_biases": [
-    {"src": "drive_hunger", "dst": "action_approach", "weight": 0.02}
+    {"src": "drive_hunger", "dst": "action_approach", "weight": 0.02},
+    {"src": "sense_at_home", "dst": "vagal_ventral", "weight": 0.03},
+    {"src": "task_momentum", "dst": "vagal_ventral", "weight": 0.02}
   ],
   "night_behavior": {"go_home_hour": 21.0, "override": null},
   "starting_inventory": ["bread", "bread", "bread"],
@@ -30,5 +40,5 @@
     "gossip": "Did you see who was at the market?",
     "busy": "Can't stop now, bread's in the oven."
   },
-  "relationships": {"Hugo": 0.6, "Aldric": 0.55}
+  "relationships": {"Hugo": 0.6, "Aldric": 0.55, "Mabel": 0.5}
 }

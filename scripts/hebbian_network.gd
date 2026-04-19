@@ -35,7 +35,9 @@ var _next_id: int = 0
 # Trigger accumulators (updated externally by substrate)
 var sustained_stress_timer: float = 0.0
 var novelty_exposure_timer: float = 0.0
-var recent_reward_signal: float = 0.0
+var recent_reward_signal: float = 0.0  # accumulator in [0, 1]; decays per propagate()
+var _recent_reward_events: Array = []   # drained by snapshot for trace v2
+var _reward_consts_cache: Dictionary = {}  # lazy from PerceptionConstants
 
 # Last event for debug
 var last_neurogenesis_event: Dictionary = {}  # {type, context, tick}
@@ -76,6 +78,56 @@ const VAGAL_COACT_SPAWN_THRESHOLD: float = 4.0  # seconds of sustained co-activa
 const QUALITY_COACT_WINDOW: int = 30000  # 30s window for co-activation counting
 var _compound_quality_count: int = 0
 const MAX_COMPOUND_QUALITIES: int = 16
+
+# Appraisal neurogenesis state — quality-constellation spawn (perception_spec §3.5,
+# appraisal_layer_spec §5). Constants lazy-loaded from PerceptionConstants on
+# first check (see _appraisal_consts()). Defaults match spec values.
+var _appraisal_count: int = 0
+var _appraisal_constellations: Dictionary = {}  # "id1,id2,id3" -> {sustained_seconds, quality_ids, last_tick}
+var _appraisal_consts_cache: Dictionary = {}    # lazy-loaded from PerceptionConstants
+var _new_appraisal_neurons: Array = []          # drained by snapshot for Python-side embedding init
+var _last_appraisal_check_tick: int = 0         # for internal dt computation
+
+# Phase 2 — per-entity sensory neurogenesis (perception_spec §5.2 prep work,
+# spec'd in perception_implementation_plan.md Phase 2). The network keeps a
+# tracker per entity_id (canonical UUID per F9, not display name); first
+# encounter spawns a sense_visible_{entity_id} neuron, subsequent encounters
+# re-activate it. Neurons GC'd after tracker_expiry_ticks of non-firing.
+var _per_entity_trackers: Dictionary = {}       # entity_id -> {last_fire_tick, encounter_count}
+var _per_entity_consts_cache: Dictionary = {}   # lazy from PerceptionConstants
+
+# Phase 9 — cross-modal binding neurogenesis (spec §5.4).
+# Per-eid history of same-tick visible+heard co-activations. When enough
+# co-fire events accumulate within the cross_modal_window_seconds, a compound
+# `bind_{entity_id}` neuron spawns wired to both modality channels.
+var _cross_modal_co_fires: Dictionary = {}     # entity_id -> Array[tick_msec]
+var _bind_spawned_eids: Dictionary = {}        # entity_id -> true (dedup)
+var _new_bind_neurons: Array = []              # drained by snapshot for trace v2
+
+# Phase 10 — temporal-texture neurogenesis (spec §5.5).
+# Tracks per-eid sustained-above-threshold elapsed time on sense_visible_{eid}
+# dwell (→ lingering) and sense_dist_{eid} rate (→ approaching_fast). When
+# elapsed ≥ temporal_persistence_seconds, spawn the corresponding compound.
+# The state is {eid -> {"lingering_secs": float, "approaching_secs": float,
+# "last_tick": int}}; ticks below threshold reset the counter to 0.
+var _temporal_tracker: Dictionary = {}
+var _temporal_spawned: Dictionary = {}          # "{kind}:{eid}" -> true (dedup)
+var _new_temporal_textures: Array = []          # drain for trace v2
+
+# Phase 4 — distance × action-success compound emergence (spec §5.1).
+# - signal_action_success(verb, target_eid) emits a transient "action_success_{verb}"
+#   neuron at activation 50; it decays over ACTION_SUCCESS_DECAY_SECONDS.
+# - The same call records the at-success distance in _action_success_history.
+# - Once a verb accumulates N samples (distance_action_co_fire_count) within
+#   distance_action_window_seconds at a stable distance band, q_{verb}able
+#   spawns with a receptive field = mean ± std of recorded distances.
+# - q_{verb}able is activated per-tick by sampling all visible sense_dist_*
+#   and applying a gaussian over (current_dist - center).
+const ACTION_SUCCESS_DECAY_SECONDS: float = 2.0
+const ACTION_SUCCESS_INIT_ACTIVATION: float = 50.0
+var _action_success_history: Dictionary = {}    # verb -> Array of {distance, ts, target_eid}
+var _qable_neurons: Dictionary = {}             # verb -> {center, sigma, success_count}
+var _action_success_consts_cache: Dictionary = {}
 
 # =========================================================================
 # SETUP
@@ -550,6 +602,13 @@ func set_activation(id: String, value: float) -> void:
 # =========================================================================
 
 func propagate(delta: float) -> void:
+	# Decay the reward gate every tick so it fades within decay_seconds even
+	# if no consumer (neurogenesis, etc.) explicitly resets it.
+	decay_reward(delta)
+	# Phase 4: action_success_* neurons drop linearly over 2s. Standard
+	# DECAY_PER_FRAME (~0.998) is too slow to give the spec's transient feel.
+	_decay_action_success(delta)
+
 	# Accumulate connection contributions
 	var contributions: Dictionary = {}
 	for conn in connections:
@@ -640,7 +699,13 @@ func hebbian_update(learning_rate_mod: float) -> void:
 		if _neuron_map[conn["src"]]["age"] < 20 or _neuron_map[conn["dst"]]["age"] < 20:
 			lr *= 2.0
 
-		var delta_w: float = lr * (src_act / 100.0) * (dst_act / 100.0)
+		# Reward-gating modifier per spec §2.4. recent_reward_signal accumulates
+		# from signal_reward() and decays via decay_reward() called per tick.
+		# β = 0.5 default → signal=1.0 doubles updates, signal=0 leaves them.
+		var beta: float = float(_reward_consts()["beta"])
+		var reward_gate: float = 1.0 + beta * recent_reward_signal
+
+		var delta_w: float = lr * (src_act / 100.0) * (dst_act / 100.0) * reward_gate
 		conn["weight"] = clampf(
 			conn["weight"] + delta_w - (conn["weight"] * HEBBIAN_DECAY),
 			-1.0, 1.0
@@ -666,6 +731,11 @@ func _check_spontaneous_connections(learning_rate_mod: float) -> void:
 	if active_neurons.size() < 2:
 		return
 
+	# Reward-gating also applies to new spontaneous connections — what fired
+	# together AND was followed by reward gets bound more strongly.
+	var beta: float = float(_reward_consts()["beta"])
+	var reward_gate: float = 1.0 + beta * recent_reward_signal
+
 	# Check pairs (limit to avoid O(n^2) explosion)
 	var checked: int = 0
 	for i in active_neurons.size():
@@ -679,7 +749,7 @@ func _check_spontaneous_connections(learning_rate_mod: float) -> void:
 				continue
 			# Create new connection with small initial weight
 			var lr: float = HEBBIAN_LR * learning_rate_mod
-			var initial_w: float = lr * (a["activation"] / 100.0) * (b["activation"] / 100.0)
+			var initial_w: float = lr * (a["activation"] / 100.0) * (b["activation"] / 100.0) * reward_gate
 			if absf(initial_w) > 0.001:
 				_add_connection(a["id"], b["id"], initial_w)
 
@@ -697,14 +767,18 @@ func check_neurogenesis() -> void:
 	if _dynamic_count >= MAX_DYNAMIC:
 		return
 
-	# Priority: stress > novelty > reward > vagal
+	# Priority: stress > novelty > reward > vagal > distance-action compound
 	if _check_stress_neurogenesis():
 		return
 	if _check_novelty_neurogenesis():
 		return
 	if _check_reward_neurogenesis():
 		return
-	_check_vagal_neurogenesis()
+	if _check_vagal_neurogenesis():
+		return
+	# Phase 4: distance-action compound. Doesn't count toward MAX_DYNAMIC
+	# (it's a compound quality, capped separately by max_compound_quality).
+	check_distance_action_neurogenesis()
 
 func _check_stress_neurogenesis() -> bool:
 	if stress_count >= MAX_STRESS:
@@ -998,8 +1072,70 @@ func update_novelty_tracking(familiarity_01: float, delta: float) -> void:
 	else:
 		novelty_exposure_timer = maxf(novelty_exposure_timer - delta * 0.5, 0.0)
 
-func signal_reward() -> void:
-	recent_reward_signal = 1.0
+func _reward_consts() -> Dictionary:
+	## Lazy-load Tier-2 reward seeds from PerceptionConstants (autoload).
+	## Falls back to spec defaults if the autoload isn't available (headless tests).
+	if not _reward_consts_cache.is_empty():
+		return _reward_consts_cache
+	var pc: Node = null
+	if Engine.has_singleton("PerceptionConstants"):
+		pc = Engine.get_singleton("PerceptionConstants")
+	else:
+		var tree: SceneTree = Engine.get_main_loop() as SceneTree
+		if tree != null and tree.root != null:
+			pc = tree.root.get_node_or_null("/root/PerceptionConstants")
+	var lookup := func(key: String, default_value: Variant) -> Variant:
+		if pc == null:
+			return default_value
+		var v: Variant = pc.call("get_value", key, default_value)
+		return v if v != null else default_value
+	_reward_consts_cache = {
+		"beta":          float(lookup.call("hebbian.beta", 0.5)),
+		"decay_seconds": float(lookup.call("hebbian.reward_signal_decay_seconds", 2.0)),
+	}
+	return _reward_consts_cache
+
+func signal_reward(source_tag: String = "generic", magnitude: float = 1.0) -> void:
+	## Emit a reward event. Accumulates into recent_reward_signal (capped at 1.0)
+	## which gates Hebbian weight updates per spec §2.4: Δw *= (1 + β · signal).
+	## After firing, the signal decays via decay_reward(dt) called by propagate().
+	##
+	## source_tag: short tag from data/perception_constants.json:reward_magnitudes
+	##   e.g. "reward_drive_satisfaction", "reward_action_succeeded"
+	## magnitude: [0, 1] event strength
+	var m: float = clampf(magnitude, 0.0, 1.0)
+	recent_reward_signal = clampf(recent_reward_signal + m, 0.0, 1.0)
+	_recent_reward_events.append({
+		"tag": source_tag,
+		"magnitude": m,
+		"tick": Time.get_ticks_msec(),
+	})
+
+func decay_reward(dt_seconds: float) -> void:
+	## Exponential decay of the reward gate. Called by propagate() each tick so
+	## the gate's effect fades within reward_signal_decay_seconds even if no
+	## explicit consumer (e.g. neurogenesis) zeroes the signal.
+	if recent_reward_signal <= 0.0:
+		return
+	var consts: Dictionary = _reward_consts()
+	var tau: float = float(consts["decay_seconds"])
+	if tau <= 0.0:
+		recent_reward_signal = 0.0
+		return
+	# Exponential half-life feel: signal halves every ~tau seconds.
+	var k: float = exp(-dt_seconds / tau)
+	recent_reward_signal *= k
+	if recent_reward_signal < 1e-4:
+		recent_reward_signal = 0.0
+
+func drain_recent_reward_events() -> Array:
+	## Pop reward events accumulated since last drain. Snapshot calls this once
+	## per tick to forward to the trace_logger (trace v2 reward_events_this_tick).
+	if _recent_reward_events.is_empty():
+		return []
+	var out: Array = _recent_reward_events.duplicate()
+	_recent_reward_events.clear()
+	return out
 
 # =========================================================================
 # SOMATIC TAG EMISSION — called every tick by somatic stream
@@ -1174,6 +1310,1162 @@ func _spawn_compound_quality(parent_a_id: String, parent_b_id: String) -> void:
 		"parents": [parent_a_id, parent_b_id],
 		"tick": Time.get_ticks_msec(),
 	}
+
+# =========================================================================
+# APPRAISAL NEUROGENESIS — quality-constellation spawn
+# (perception_spec.md §3.5, appraisal_layer_spec.md §5)
+# =========================================================================
+
+func _appraisal_consts() -> Dictionary:
+	## Lazy-load Tier-2 seeds from PerceptionConstants (autoload singleton).
+	## Falls back to spec-default values if the autoload isn't available
+	## (e.g., when this RefCounted is used outside the engine main loop).
+	if not _appraisal_consts_cache.is_empty():
+		return _appraisal_consts_cache
+	var pc: Node = null
+	if Engine.has_singleton("PerceptionConstants"):
+		pc = Engine.get_singleton("PerceptionConstants")
+	else:
+		var tree: SceneTree = Engine.get_main_loop() as SceneTree
+		if tree != null and tree.root != null:
+			pc = tree.root.get_node_or_null("/root/PerceptionConstants")
+	var lookup := func(key: String, default_value: Variant) -> Variant:
+		if pc == null:
+			return default_value
+		var v: Variant = pc.call("get_value", key, default_value)
+		return v if v != null else default_value
+	_appraisal_consts_cache = {
+		"max":           int(lookup.call("capacity.max_appraisal_per_being", 12)),
+		"min_size":      int(lookup.call("neurogenesis_thresholds.appraisal_constellation_min", 3)),
+		"threshold":     float(lookup.call("neurogenesis_thresholds.appraisal_constellation_threshold", 50.0)),
+		"sustained_sec": float(lookup.call("neurogenesis_thresholds.appraisal_constellation_sustained_seconds", 6.0)),
+	}
+	return _appraisal_consts_cache
+
+func check_appraisal_neurogenesis() -> bool:
+	## Spawn an appraisal neuron when 3+ quality neurons sustain co-activation
+	## above threshold for `sustained_sec` continuous seconds.
+	##
+	## dt is computed internally from Time.get_ticks_msec() since the last
+	## call. Returns true if a neuron was spawned this call.
+	var now: int = Time.get_ticks_msec()
+	var dt_seconds: float
+	if _last_appraisal_check_tick == 0:
+		dt_seconds = 0.0
+	else:
+		dt_seconds = (now - _last_appraisal_check_tick) / 1000.0
+	_last_appraisal_check_tick = now
+	# Clamp dt to a reasonable range — long pauses (debugger, breakpoints)
+	# shouldn't accumulate huge sustained-time swings.
+	dt_seconds = clamp(dt_seconds, 0.0, 1.0)
+
+	var consts: Dictionary = _appraisal_consts()
+	if _appraisal_count >= int(consts["max"]):
+		return false
+
+	var min_size: int = int(consts["min_size"])
+	var threshold: float = float(consts["threshold"])
+	var sustained_required: float = float(consts["sustained_sec"])
+
+	# Find all quality neurons above the appraisal threshold (higher than
+	# QUALITY_EMIT_THRESHOLD — appraisals fire on stronger sustained patterns).
+	var active_qualities: Array = []
+	for neuron in neurons:
+		if neuron["type"] == "quality" and neuron["activation"] >= threshold:
+			active_qualities.append(neuron["id"])
+
+	if active_qualities.size() < min_size:
+		# Constellation broke; let trackers age out (handled below).
+		_decay_appraisal_constellations(dt_seconds)
+		return false
+
+	active_qualities.sort()
+	var key: String = ",".join(active_qualities)
+
+	if not _appraisal_constellations.has(key):
+		_appraisal_constellations[key] = {
+			"sustained_seconds": 0.0,
+			"quality_ids": active_qualities.duplicate(),
+			"last_tick": now,
+		}
+	var entry: Dictionary = _appraisal_constellations[key]
+	entry["sustained_seconds"] = float(entry["sustained_seconds"]) + dt_seconds
+	entry["last_tick"] = now
+
+	# Other constellations not currently active decay (lose accumulated time)
+	# to prevent stale partial constellations from accumulating across long gaps.
+	_decay_appraisal_constellations(dt_seconds, key)
+
+	if float(entry["sustained_seconds"]) >= sustained_required:
+		_spawn_appraisal_neuron(active_qualities)
+		_appraisal_constellations.erase(key)
+		return true
+
+	return false
+
+func _decay_appraisal_constellations(dt_seconds: float, except_key: String = "") -> void:
+	## Constellations that didn't fire this tick lose accumulated sustained-time
+	## at the same rate, so a constellation must fire CONTINUOUSLY (or near-so)
+	## for the full window to spawn — not intermittently across many disjoint
+	## periods.
+	var to_erase: Array = []
+	for key in _appraisal_constellations.keys():
+		if key == except_key:
+			continue
+		var e: Dictionary = _appraisal_constellations[key]
+		e["sustained_seconds"] = float(e["sustained_seconds"]) - dt_seconds
+		if float(e["sustained_seconds"]) <= 0.0:
+			to_erase.append(key)
+	for k in to_erase:
+		_appraisal_constellations.erase(k)
+
+func _spawn_appraisal_neuron(quality_ids: Array) -> void:
+	## Create a new appraisal neuron from a quality constellation.
+	##
+	## - Activation seeded at 40 (active enough to participate immediately).
+	## - Incoming connections from each parent quality at weight 0.12.
+	## - Outgoing connections develop via Hebbian learning over time.
+	## - embedding_seed = {tag_text: activation} of each parent — Python-side
+	##   AppraisalEmbeddingManager uses these to compute the initial embedding
+	##   as a weighted mean of concept embeddings.
+	## - Pushed onto _new_appraisal_neurons; snapshot drains and forwards to
+	##   Python so the embedding manager can initialize this neuron's vector.
+	if quality_ids.is_empty():
+		return
+
+	var neuron_id: String = "appr_%d" % _next_id
+	_next_id += 1
+
+	# Build embedding_seed from parent quality tag_texts (the words like
+	# "tight", "pounding", "prickling") weighted by current activation. These
+	# are the concepts whose embeddings get weighted-mean'd to form the
+	# appraisal neuron's initial vector in LLM space.
+	var embedding_seed: Dictionary = {}
+	var parent_label_parts: Array = []
+	for qid in quality_ids:
+		var qn: Dictionary = _neuron_map.get(qid, {})
+		if qn.is_empty():
+			continue
+		var tag: String = qn.get("tag_text", "")
+		if tag == "":
+			continue
+		embedding_seed[tag] = float(qn.get("activation", 0.0))
+		parent_label_parts.append(tag)
+
+	if embedding_seed.is_empty():
+		return
+
+	var label: String = "appraisal(%s)" % "+".join(parent_label_parts)
+	var neuron: Dictionary = {
+		"id": neuron_id,
+		"type": "appraisal",
+		"activation": 40.0,
+		"protected": false,
+		"category": "appraisal",
+		"age": 0,
+		"label": label,
+		"parent_qualities": quality_ids.duplicate(),
+		"embedding_seed": embedding_seed,
+		"co_activation_count": 0,
+	}
+	neurons.append(neuron)
+	_neuron_map[neuron_id] = neuron
+
+	# Wire incoming from each parent quality.
+	for qid in quality_ids:
+		if _neuron_map.has(qid):
+			_add_connection(qid, neuron_id, 0.12)
+
+	_appraisal_count += 1
+	_dynamic_count += 1
+
+	# Publish for the Python-side handshake. Snapshot drains this list each tick.
+	_new_appraisal_neurons.append({
+		"id": neuron_id,
+		"label": label,
+		"embedding_seed": embedding_seed,
+		"parent_qualities": quality_ids.duplicate(),
+		"spawned_tick": Time.get_ticks_msec(),
+	})
+
+	last_neurogenesis_event = {
+		"type": "appraisal",
+		"context": label,
+		"parents": quality_ids.duplicate(),
+		"embedding_seed": embedding_seed,
+		"tick": Time.get_ticks_msec(),
+	}
+
+func spawn_identity_appraisal(neuron_id: String, entity_id: String) -> bool:
+	## Phase 5 — spawn an identity-appraisal for one entity_id. Python owns the
+	## embedding state (mean of encounter-thought-embeddings in the
+	## AppraisalEmbeddingManager); GDScript only wires the Hebbian node.
+	##
+	## Per docs/perception_implementation_plan.md §Phase 5:
+	##   - Hebbian wiring: appr_identity_{entity_id} ← from sense_visible_{entity_id}
+	##     + active somatic streams during spawn.
+	##   - Outgoing to action / vagal develops via Hebbian learning — not authored.
+	##
+	## Incoming weight 0.12 mirrors the existing appraisal-from-quality parent
+	## convention in _spawn_appraisal_neuron (kept as one rule, not a new knob).
+	## "Active somatic stream" at spawn time = quality-type neurons with
+	## activation ≥ 30 (same threshold get_active_appraisal_activations uses
+	## for "currently firing"; no new tunable). Returns true on spawn, false
+	## if the neuron already exists or the sense_visible prerequisite is missing.
+	if neuron_id == "" or entity_id == "":
+		return false
+	if _neuron_map.has(neuron_id):
+		return false
+
+	var sense_visible_id: String = "sense_visible_" + entity_id
+	if not _neuron_map.has(sense_visible_id):
+		# The spawn request arrived before the per-entity sense neuron exists.
+		# Refuse silently; a subsequent visibility tick will create the sense
+		# neuron and the next thought-cycle spawn attempt will land.
+		return false
+
+	var neuron: Dictionary = {
+		"id": neuron_id,
+		"type": "appraisal",
+		"activation": 40.0,
+		"protected": false,
+		"category": "identity_appraisal",
+		"age": 0,
+		"label": "identity(%s)" % entity_id,
+		"entity_id": entity_id,
+		"parent_qualities": [],
+		"embedding_seed": {},  # Python-owned for identity appraisals
+		"co_activation_count": 0,
+	}
+	neurons.append(neuron)
+	_neuron_map[neuron_id] = neuron
+
+	# Incoming: sense_visible_{eid}.
+	_add_connection(sense_visible_id, neuron_id, 0.12)
+
+	# Incoming: every active somatic (type=quality) neuron at spawn time.
+	# Use the same activation floor (30) the cortical-feedback path uses to
+	# decide which appraisals are "active" — keeps the semantics of "active"
+	# consistent across the substrate.
+	var wired_somatic: int = 0
+	for n in neurons:
+		if n.get("type", "") != "quality":
+			continue
+		if float(n.get("activation", 0.0)) < 30.0:
+			continue
+		if n.get("id", "") == neuron_id:
+			continue
+		_add_connection(String(n["id"]), neuron_id, 0.12)
+		wired_somatic += 1
+
+	_appraisal_count += 1
+	_dynamic_count += 1
+
+	last_neurogenesis_event = {
+		"type": "identity_appraisal",
+		"context": entity_id,
+		"tick": Time.get_ticks_msec(),
+		"somatic_parents": wired_somatic,
+	}
+	return true
+
+func drain_new_appraisal_neurons() -> Array:
+	## Pop all appraisal neurons spawned since the last drain. Called by the
+	## per-tick snapshot builder; the returned list goes to Python so the
+	## AppraisalEmbeddingManager can initialize() each one before drift starts.
+	if _new_appraisal_neurons.is_empty():
+		return []
+	var out: Array = _new_appraisal_neurons.duplicate()
+	_new_appraisal_neurons.clear()
+	return out
+
+# =========================================================================
+# PER-ENTITY SENSORY NEUROGENESIS — Phase 2
+# (perception_implementation_plan.md Phase 2; F9 entity_id_protocol.md)
+# =========================================================================
+
+func _per_entity_consts() -> Dictionary:
+	if not _per_entity_consts_cache.is_empty():
+		return _per_entity_consts_cache
+	var pc: Node = null
+	if Engine.has_singleton("PerceptionConstants"):
+		pc = Engine.get_singleton("PerceptionConstants")
+	else:
+		var tree: SceneTree = Engine.get_main_loop() as SceneTree
+		if tree != null and tree.root != null:
+			pc = tree.root.get_node_or_null("/root/PerceptionConstants")
+	var lookup := func(key: String, default_value: Variant) -> Variant:
+		if pc == null:
+			return default_value
+		var v: Variant = pc.call("get_value", key, default_value)
+		return v if v != null else default_value
+	_per_entity_consts_cache = {
+		"tracker_expiry_ticks": int(lookup.call("sensors.tracker_expiry_ticks", 600)),
+		"distance_tau_tiles":   float(lookup.call("sensors.distance_tau_tiles", 4.0)),
+		# α for the dwell EMA. Smaller = slower-rising / longer-memory dwell.
+		# 0.05 ≈ "remembers ~20 ticks of history"; tunable per future need.
+		"dwell_ema_alpha":      float(lookup.call("sensors.dwell_ema_alpha", 0.05)),
+	}
+	return _per_entity_consts_cache
+
+func update_per_entity_sensory(visible_entities: Array) -> void:
+	## Called every brain tick with the current list of visible entities/objects.
+	## Each entry must carry:
+	##   - id:              canonical entity_id (F9), e.g. "ent_a3f2…"
+	##   - exposure:        [0, 1] — drives sense_visible activation
+	##   - distance_tiles:  optional float; drives sense_dist activation
+	##                      (falls back to 0 if absent)
+	##
+	## Per Phase 3 of perception_implementation_plan.md:
+	##   - sense_visible_{eid}: activation = exposure * 100
+	##   - sense_dist_{eid}:    activation = 100 * exp(-dist_tiles / TAU)
+	## Each per-entity neuron also tracks rate (Δ activation / tick) and dwell
+	## (exponential moving average) as fields on the neuron dict; these channels
+	## are queryable via get_per_entity_channels() and feed Phase 4 compound
+	## neurogenesis.
+	##
+	## Out-of-vision per-entity neurons decay naturally via propagate(); the
+	## tracker is not refreshed, so eventually gc_per_entity_sensory drops them.
+	var now: int = Time.get_ticks_msec()
+	var consts: Dictionary = _per_entity_consts()
+	var tau: float = float(consts["distance_tau_tiles"])
+	var dwell_alpha: float = float(consts["dwell_ema_alpha"])
+
+	for entity in visible_entities:
+		var eid: String = str(entity.get("id", ""))
+		if eid == "":
+			continue
+		var exposure: float = float(entity.get("exposure", 0.0))
+		var dist_tiles: float = float(entity.get("distance_tiles", 0.0))
+		var visible_act: float = clampf(exposure * 100.0, 0.0, 100.0)
+		var dist_act: float = 100.0 * exp(-max(0.0, dist_tiles) / max(tau, 1e-6))
+		dist_act = clampf(dist_act, 0.0, 100.0)
+
+		_upsert_per_entity_neuron("sense_visible_" + eid, eid, "sees(%s)" % eid,
+			visible_act, dwell_alpha)
+		_upsert_per_entity_neuron("sense_dist_" + eid, eid, "near(%s)" % eid,
+			dist_act, dwell_alpha)
+
+		var tr: Dictionary = _per_entity_trackers.get(eid, {})
+		if tr.is_empty():
+			tr = {
+				"last_fire_tick": now,
+				"encounter_count": 1,
+				"first_seen_tick": now,
+			}
+			last_neurogenesis_event = {
+				"type": "per_entity_sensory",
+				"context": eid,
+				"tick": now,
+			}
+		else:
+			tr["last_fire_tick"] = now
+			tr["encounter_count"] = int(tr.get("encounter_count", 0)) + 1
+		_per_entity_trackers[eid] = tr
+
+func _upsert_per_entity_neuron(neuron_id: String, eid: String, label: String,
+		new_activation: float, dwell_alpha: float) -> void:
+	## Spawn or refresh a per-entity neuron, updating its rate/dwell channels.
+	if not _neuron_map.has(neuron_id):
+		var neuron: Dictionary = {
+			"id": neuron_id,
+			"type": "sensory",
+			"activation": new_activation,
+			"protected": true,
+			"learnable_outgoing": true,
+			"category": "per_entity_sensory",
+			"age": 0,
+			"label": label,
+			"entity_id": eid,
+			# Phase 3 channels.
+			"prev_activation": new_activation,
+			"rate": 0.0,
+			"dwell": new_activation,
+		}
+		neurons.append(neuron)
+		_neuron_map[neuron_id] = neuron
+		return
+	var n: Dictionary = _neuron_map[neuron_id]
+	var prev: float = float(n.get("activation", 0.0))
+	n["prev_activation"] = prev
+	n["activation"] = new_activation
+	n["rate"] = new_activation - prev
+	# Exponential moving average: dwell ← (1-α)·dwell + α·activation
+	n["dwell"] = (1.0 - dwell_alpha) * float(n.get("dwell", new_activation)) + dwell_alpha * new_activation
+
+func get_per_entity_channels() -> Dictionary:
+	## Return per-entity channel values for snapshot/trace recording.
+	## Shape: {entity_id: {visible, dist, rate_visible, rate_dist, dwell_visible, dwell_dist}}
+	## Channels for entities currently in the per-entity registry only.
+	var out: Dictionary = {}
+	for eid in _per_entity_trackers.keys():
+		var v_id: String = "sense_visible_" + eid
+		var d_id: String = "sense_dist_" + eid
+		var v: Dictionary = _neuron_map.get(v_id, {})
+		var d: Dictionary = _neuron_map.get(d_id, {})
+		if v.is_empty() and d.is_empty():
+			continue
+		out[eid] = {
+			"visible":       float(v.get("activation", 0.0)),
+			"dist":          float(d.get("activation", 0.0)),
+			"rate_visible":  float(v.get("rate", 0.0)),
+			"rate_dist":     float(d.get("rate", 0.0)),
+			"dwell_visible": float(v.get("dwell", 0.0)),
+			"dwell_dist":    float(d.get("dwell", 0.0)),
+		}
+	return out
+
+func gc_per_entity_sensory() -> int:
+	## Remove sense_visible_{entity_id} neurons whose tracker hasn't fired
+	## within tracker_expiry_ticks. Returns count removed.
+	## Call at the same cadence as other neurogenesis checks (~every 2s).
+	var consts: Dictionary = _per_entity_consts()
+	var expiry_ms: int = int(consts["tracker_expiry_ticks"]) * 16  # ~16ms/frame at 60Hz
+	var now: int = Time.get_ticks_msec()
+	var removed: int = 0
+	var to_drop: Array = []
+	for eid in _per_entity_trackers.keys():
+		var tr: Dictionary = _per_entity_trackers[eid]
+		if now - int(tr.get("last_fire_tick", 0)) > expiry_ms:
+			to_drop.append(eid)
+	for eid in to_drop:
+		# Phase 3: each entity has multiple per-entity neuron families
+		# (sense_visible_*, sense_dist_*); GC them all together.
+		var neuron_ids: Array = ["sense_visible_" + eid, "sense_dist_" + eid]
+		for neuron_id in neuron_ids:
+			if not _neuron_map.has(neuron_id):
+				continue
+			neurons = neurons.filter(func(n: Dictionary) -> bool: return n["id"] != neuron_id)
+			_neuron_map.erase(neuron_id)
+			connections = connections.filter(func(c: Dictionary) -> bool:
+				return c["src"] != neuron_id and c["dst"] != neuron_id
+			)
+			removed += 1
+		_per_entity_trackers.erase(eid)
+	return removed
+
+# =========================================================================
+# F9 MERGE PROTOCOL — entity_id reconciliation
+# (data/entity_id_protocol.md)
+# =========================================================================
+
+func merge_entity_ids(canonical_id: String, deprecated_id: String) -> bool:
+	## Reconcile two entity_id neuron families when they refer to the same
+	## real entity (e.g. initial misidentification, save migration). Per F9:
+	## activation = max, weights = sum, tracker = combined. Handles every
+	## per-entity neuron family registered in PER_ENTITY_PREFIXES.
+	##
+	## For the common case (stranger → name-bind), no merge is needed because
+	## neurons are keyed on the immutable entity_id, not display name. This
+	## function exists for the genuine same-entity-two-ids case.
+	if canonical_id == "" or deprecated_id == "" or canonical_id == deprecated_id:
+		return false
+	var any_merge: bool = false
+
+	# Every per-entity prefix that participates in the merge. Add new ones here
+	# as future phases introduce more per-entity neuron families.
+	const PER_ENTITY_PREFIXES: Array = [
+		"sense_visible_", "sense_dist_", "appr_identity_",
+		"sense_heard_", "bind_",                            # Phase 9 cross-modal
+		"q_lingering_", "q_approaching_fast_",              # Phase 10 temporal
+	]
+	for prefix in PER_ENTITY_PREFIXES:
+		if _merge_per_entity_neuron(prefix, canonical_id, deprecated_id):
+			any_merge = true
+
+	# Tracker merge.
+	if _per_entity_trackers.has(deprecated_id):
+		var dep_tr: Dictionary = _per_entity_trackers[deprecated_id]
+		var canon_tr: Dictionary = _per_entity_trackers.get(canonical_id, {})
+		var combined: Dictionary = {
+			"last_fire_tick": max(
+				int(canon_tr.get("last_fire_tick", 0)),
+				int(dep_tr.get("last_fire_tick", 0))
+			),
+			"encounter_count": int(canon_tr.get("encounter_count", 0)) + int(dep_tr.get("encounter_count", 0)),
+			"first_seen_tick": min(
+				int(canon_tr.get("first_seen_tick", dep_tr.get("first_seen_tick", 0))),
+				int(dep_tr.get("first_seen_tick", canon_tr.get("first_seen_tick", 0)))
+			),
+		}
+		_per_entity_trackers[canonical_id] = combined
+		_per_entity_trackers.erase(deprecated_id)
+		any_merge = true
+
+	return any_merge
+
+func _merge_per_entity_neuron(prefix: String, canonical_id: String, deprecated_id: String) -> bool:
+	## Merge one per-entity neuron family ({prefix}{deprecated_id}) into its
+	## canonical counterpart. Activation=max, weights=sum, then drop deprecated.
+	var canon_id: String = prefix + canonical_id
+	var dep_id: String = prefix + deprecated_id
+	if not _neuron_map.has(dep_id):
+		return false
+	if _neuron_map.has(canon_id):
+		_neuron_map[canon_id]["activation"] = max(
+			float(_neuron_map[canon_id]["activation"]),
+			float(_neuron_map[dep_id]["activation"])
+		)
+		for c in connections:
+			if c["src"] == dep_id:
+				var existing: int = _find_connection(canon_id, c["dst"])
+				if existing >= 0:
+					connections[existing]["weight"] = clampf(
+						float(connections[existing]["weight"]) + float(c["weight"]),
+						-1.0, 1.0
+					)
+				else:
+					_add_connection(canon_id, c["dst"], float(c["weight"]))
+			elif c["dst"] == dep_id:
+				var existing2: int = _find_connection(c["src"], canon_id)
+				if existing2 >= 0:
+					connections[existing2]["weight"] = clampf(
+						float(connections[existing2]["weight"]) + float(c["weight"]),
+						-1.0, 1.0
+					)
+				else:
+					_add_connection(c["src"], canon_id, float(c["weight"]))
+	else:
+		# No canonical exists; rename deprecated in place.
+		_neuron_map[dep_id]["id"] = canon_id
+		_neuron_map[dep_id]["entity_id"] = canonical_id
+		_neuron_map[canon_id] = _neuron_map[dep_id]
+		for c in connections:
+			if c["src"] == dep_id:
+				c["src"] = canon_id
+			if c["dst"] == dep_id:
+				c["dst"] = canon_id
+	neurons = neurons.filter(func(n: Dictionary) -> bool: return n["id"] != dep_id)
+	_neuron_map.erase(dep_id)
+	connections = connections.filter(func(c: Dictionary) -> bool:
+		return c["src"] != dep_id and c["dst"] != dep_id
+	)
+	return true
+
+func _find_connection(src: String, dst: String) -> int:
+	for i in range(connections.size()):
+		if connections[i]["src"] == src and connections[i]["dst"] == dst:
+			return i
+	return -1
+
+# =========================================================================
+# PHASE 4 — DISTANCE × ACTION-SUCCESS COMPOUND EMERGENCE (spec §5.1)
+# =========================================================================
+
+func _action_success_consts() -> Dictionary:
+	if not _action_success_consts_cache.is_empty():
+		return _action_success_consts_cache
+	var pc: Node = null
+	if Engine.has_singleton("PerceptionConstants"):
+		pc = Engine.get_singleton("PerceptionConstants")
+	else:
+		var tree: SceneTree = Engine.get_main_loop() as SceneTree
+		if tree != null and tree.root != null:
+			pc = tree.root.get_node_or_null("/root/PerceptionConstants")
+	var lookup := func(key: String, default_value: Variant) -> Variant:
+		if pc == null:
+			return default_value
+		var v: Variant = pc.call("get_value", key, default_value)
+		return v if v != null else default_value
+	_action_success_consts_cache = {
+		"co_fire_count":   int(lookup.call("neurogenesis_thresholds.distance_action_co_fire_count", 10)),
+		"window_seconds":  float(lookup.call("neurogenesis_thresholds.distance_action_window_seconds", 60.0)),
+		"max_compound":    int(lookup.call("capacity.max_compound_quality", 16)),
+	}
+	return _action_success_consts_cache
+
+func signal_action_success(verb: String, target_eid: String = "") -> void:
+	## Engine-side hook: emits a transient action_success_{verb} signal at
+	## activation 50. The signal decays over ACTION_SUCCESS_DECAY_SECONDS via
+	## propagate(). If target_eid is provided AND a sense_dist_{eid} exists,
+	## the at-success distance is recorded for distance-action neurogenesis.
+	if verb == "":
+		return
+	var v: String = verb.to_lower()
+	var neuron_id: String = "action_success_" + v
+	if not _neuron_map.has(neuron_id):
+		var neuron: Dictionary = {
+			"id": neuron_id,
+			"type": "sensory",
+			"activation": ACTION_SUCCESS_INIT_ACTIVATION,
+			"protected": true,
+			"learnable_outgoing": true,
+			"category": "action_success",
+			"age": 0,
+			"label": "success(%s)" % v,
+			"verb": v,
+		}
+		neurons.append(neuron)
+		_neuron_map[neuron_id] = neuron
+	else:
+		# Latest pulse wins (don't accumulate above 50 — substrate-level cap).
+		_neuron_map[neuron_id]["activation"] = max(
+			float(_neuron_map[neuron_id]["activation"]),
+			ACTION_SUCCESS_INIT_ACTIVATION
+		)
+
+	# Record at-success distance for compound neurogenesis.
+	if target_eid != "":
+		var dist_neuron: Dictionary = _neuron_map.get("sense_dist_" + target_eid, {})
+		if not dist_neuron.is_empty():
+			var dist_act: float = float(dist_neuron.get("activation", 0.0))
+			# Activation = 100·exp(-d/τ), so d = -τ·ln(act/100). Recover the tile
+			# distance from the activation we observed at success.
+			var tau: float = float(_per_entity_consts().get("distance_tau_tiles", 4.0))
+			var dist_tiles: float = -tau * log(max(dist_act, 1e-3) / 100.0)
+			var hist: Array = _action_success_history.get(v, [])
+			hist.append({
+				"distance_tiles": dist_tiles,
+				"ts": Time.get_ticks_msec(),
+				"target_eid": target_eid,
+			})
+			_action_success_history[v] = hist
+
+func _decay_action_success(dt_seconds: float) -> void:
+	## Linear decay: action_success_* neurons drop from 50 → 0 over
+	## ACTION_SUCCESS_DECAY_SECONDS. Called from propagate() each tick.
+	if _neuron_map.is_empty():
+		return
+	var drop: float = (ACTION_SUCCESS_INIT_ACTIVATION / max(ACTION_SUCCESS_DECAY_SECONDS, 1e-3)) * dt_seconds
+	for neuron in neurons:
+		if neuron.get("category", "") == "action_success":
+			neuron["activation"] = max(0.0, float(neuron["activation"]) - drop)
+
+func check_distance_action_neurogenesis() -> bool:
+	## Spec §5.1: when N action-success events for verb V cluster at a stable
+	## distance band within window_seconds, spawn q_{verb}able with that band
+	## as its receptive field. Called every neurogenesis cycle.
+	var consts: Dictionary = _action_success_consts()
+	var n_required: int = int(consts["co_fire_count"])
+	var window_sec: float = float(consts["window_seconds"])
+	var max_comp: int = int(consts["max_compound"])
+	var now: int = Time.get_ticks_msec()
+	var window_ms: int = int(window_sec * 1000.0)
+
+	for verb in _action_success_history.keys():
+		# Already have a q_{verb}able? Skip (one per verb for now).
+		if _qable_neurons.has(verb):
+			continue
+		if _compound_quality_count >= max_comp:
+			return false
+
+		# Drop expired samples.
+		var hist: Array = _action_success_history[verb]
+		hist = hist.filter(func(h: Dictionary) -> bool:
+			return now - int(h["ts"]) <= window_ms
+		)
+		_action_success_history[verb] = hist
+		if hist.size() < n_required:
+			continue
+
+		# Compute receptive band statistics.
+		var distances: Array = []
+		for h in hist:
+			distances.append(float(h["distance_tiles"]))
+		var mean_d: float = 0.0
+		for d in distances:
+			mean_d += d
+		mean_d /= distances.size()
+		var var_sum: float = 0.0
+		for d in distances:
+			var_sum += (d - mean_d) * (d - mean_d)
+		var std_d: float = sqrt(var_sum / distances.size())
+		# Clamp σ to a useful range — too tight = brittle, too wide = useless.
+		std_d = clampf(std_d, 0.5, 6.0)
+
+		_spawn_qable_compound(verb, mean_d, std_d, distances.size())
+		# Clear history once the compound exists.
+		_action_success_history.erase(verb)
+		return true
+	return false
+
+func _spawn_qable_compound(verb: String, center: float, sigma: float, sample_count: int) -> void:
+	var compound_id: String = "q_%sable" % verb
+	if _neuron_map.has(compound_id):
+		return
+	var neuron: Dictionary = {
+		"id": compound_id,
+		"type": "quality",
+		"activation": 0.0,
+		"protected": false,
+		"category": "compound_quality_distance",
+		"age": 0,
+		"label": "%sable@%.1f±%.1f" % [verb, center, sigma],
+		"tag_text": "%sable" % verb,
+		"regions": ["body"],
+		# Phase 4 receptive field — read by update_qable_activations().
+		"verb": verb,
+		"receptive_center": center,
+		"receptive_sigma":  sigma,
+		"success_count":    sample_count,
+	}
+	neurons.append(neuron)
+	_neuron_map[compound_id] = neuron
+	_qable_neurons[verb] = neuron
+
+	# Wire incoming from all currently-known per-entity sense_dist neurons
+	# (receptive activation overrides on tick; these wires let propagate also
+	# carry contribution). New sense_dist neurons added later won't auto-wire,
+	# but Phase 4's gaussian update reads them directly each tick anyway.
+	for n in neurons:
+		if n.get("category", "") == "per_entity_sensory" and n["id"].begins_with("sense_dist_"):
+			_add_connection(n["id"], compound_id, 0.05)
+
+	_compound_quality_count += 1
+	last_neurogenesis_event = {
+		"type": "compound_quality_distance",
+		"context": compound_id,
+		"verb": verb,
+		"center": center,
+		"sigma": sigma,
+		"samples": sample_count,
+		"tick": Time.get_ticks_msec(),
+	}
+
+func update_qable_activations() -> void:
+	## Phase 4 receptive-field activation. For each q_{verb}able, sample all
+	## visible sense_dist_* neurons and set activation = 100·exp(-((d-c)²)/(2σ²))
+	## taken at its peak (closest to center). This makes the compound fire when
+	## an entity is currently at the empirically-successful distance for the verb.
+	if _qable_neurons.is_empty():
+		return
+	var tau: float = float(_per_entity_consts().get("distance_tau_tiles", 4.0))
+	# Pre-compute the current distance (in tiles) for each visible entity.
+	var visible_distances: Array = []
+	for n in neurons:
+		if n.get("category", "") == "per_entity_sensory" and n["id"].begins_with("sense_dist_"):
+			var act: float = float(n.get("activation", 0.0))
+			if act < 1.0:
+				continue  # not really visible
+			var d: float = -tau * log(max(act, 1e-3) / 100.0)
+			visible_distances.append(d)
+
+	for verb in _qable_neurons.keys():
+		var qn: Dictionary = _qable_neurons[verb]
+		var c: float = float(qn["receptive_center"])
+		var sigma: float = max(float(qn["receptive_sigma"]), 0.5)
+		var best: float = 0.0
+		for d in visible_distances:
+			var x: float = (d - c) / sigma
+			var act: float = 100.0 * exp(-0.5 * x * x)
+			if act > best:
+				best = act
+		qn["activation"] = best
+
+func get_active_appraisal_activations() -> Dictionary:
+	## Return {appraisal_id: activation} for appraisal neurons above 30.
+	## Used by the cortical-feedback loop to know which appraisals to drift.
+	var out: Dictionary = {}
+	for neuron in neurons:
+		if neuron["type"] == "appraisal" and float(neuron["activation"]) >= 30.0:
+			out[neuron["id"]] = float(neuron["activation"])
+	return out
+
+# =========================================================================
+# PHASE 9 — CROSS-MODAL BINDING
+# (perception_implementation_plan.md Phase 9, perception_spec.md §5.4)
+# =========================================================================
+
+func update_per_entity_heard(heard_entities: Array) -> void:
+	## Called each brain tick with the set of eids the being heard this tick.
+	## Each entry: { id: entity_id, strength: 0..1 (e.g. perceived_volume) }.
+	## Spawns/refreshes sense_heard_{eid}; if sense_visible_{eid} is also
+	## firing above 30 this same tick, logs a co-activation for the cross-
+	## modal binding neurogenesis rule.
+	##
+	## Unlike sense_visible_, there is no GC schedule tied to a tracker — the
+	## neuron decays naturally via propagate() when no new heard events arrive.
+	## The binding-coactivation history is time-windowed on its own.
+	if heard_entities.is_empty():
+		return
+	var now: int = Time.get_ticks_msec()
+	var window_ms: int = int(float(_cross_modal_consts().get("cross_modal_window_seconds", 30.0)) * 1000.0)
+	var cfire_count: int = int(_cross_modal_consts().get("cross_modal_co_fire_count", 5))
+	var dwell_alpha: float = float(_per_entity_consts().get("dwell_ema_alpha", 0.05))
+
+	for entry in heard_entities:
+		var eid: String = str(entry.get("id", ""))
+		if eid == "":
+			continue
+		var strength: float = clampf(float(entry.get("strength", 0.0)), 0.0, 1.0)
+		var heard_act: float = strength * 100.0
+		_upsert_per_entity_neuron("sense_heard_" + eid, eid, "hears(%s)" % eid,
+			heard_act, dwell_alpha)
+
+		# Co-activation check. sense_visible_ must be present AND active above
+		# the 30 "active" floor used consistently throughout the substrate.
+		var visible_id: String = "sense_visible_" + eid
+		if _neuron_map.has(visible_id) and float(_neuron_map[visible_id].get("activation", 0.0)) >= 30.0 \
+				and heard_act >= 30.0:
+			var history: Array = _cross_modal_co_fires.get(eid, [])
+			history.append(now)
+			# Prune outside the window.
+			var cutoff: int = now - window_ms
+			while history.size() > 0 and int(history[0]) < cutoff:
+				history.pop_front()
+			_cross_modal_co_fires[eid] = history
+			if history.size() >= cfire_count and not _bind_spawned_eids.get(eid, false):
+				_spawn_cross_modal_binding(eid)
+
+func _cross_modal_consts() -> Dictionary:
+	## Small lazy accessor for the two constants this phase uses. Reuses the
+	## neurogenesis_thresholds block that the plan already populates.
+	var pc: Node = null
+	if Engine.has_singleton("PerceptionConstants"):
+		pc = Engine.get_singleton("PerceptionConstants")
+	else:
+		var tree: SceneTree = Engine.get_main_loop() as SceneTree
+		if tree != null and tree.root != null:
+			pc = tree.root.get_node_or_null("/root/PerceptionConstants")
+	var lookup := func(key: String, default_value: Variant) -> Variant:
+		if pc == null:
+			return default_value
+		var v: Variant = pc.call("get_value", key, default_value)
+		return v if v != null else default_value
+	return {
+		"cross_modal_co_fire_count": int(lookup.call("neurogenesis_thresholds.cross_modal_co_fire_count", 5)),
+		"cross_modal_window_seconds": float(lookup.call("neurogenesis_thresholds.cross_modal_window_seconds", 30.0)),
+	}
+
+func _spawn_cross_modal_binding(entity_id: String) -> void:
+	## Spawn bind_{entity_id} compound neuron wired to both modality channels.
+	## The compound counts toward `_compound_quality_count` so F4 fallback
+	## decay treats it the same as Phase 4's q_*able compounds — a new
+	## bind-compound is a new piece of substrate affordance.
+	if entity_id == "":
+		return
+	var neuron_id: String = "bind_" + entity_id
+	if _neuron_map.has(neuron_id):
+		return
+	var visible_id: String = "sense_visible_" + entity_id
+	var heard_id: String = "sense_heard_" + entity_id
+	if not (_neuron_map.has(visible_id) and _neuron_map.has(heard_id)):
+		return
+
+	var neuron: Dictionary = {
+		"id": neuron_id,
+		"type": "compound_quality",
+		"activation": 40.0,
+		"protected": false,
+		"category": "compound_quality_cross_modal",
+		"age": 0,
+		"label": "bind(%s)" % entity_id,
+		"entity_id": entity_id,
+		"parent_visible": visible_id,
+		"parent_heard": heard_id,
+	}
+	neurons.append(neuron)
+	_neuron_map[neuron_id] = neuron
+
+	# Incoming wiring from both modality sense-neurons. Weight 0.12 matches
+	# the existing appraisal-parent + identity-appraisal-parent convention —
+	# no new tuning constant; the Hebbian rule will refine them.
+	_add_connection(visible_id, neuron_id, 0.12)
+	_add_connection(heard_id, neuron_id, 0.12)
+
+	_compound_quality_count += 1
+	_dynamic_count += 1
+	_bind_spawned_eids[entity_id] = true
+
+	_new_bind_neurons.append({
+		"id": neuron_id,
+		"entity_id": entity_id,
+		"spawned_tick": Time.get_ticks_msec(),
+	})
+
+	last_neurogenesis_event = {
+		"type": "cross_modal_binding",
+		"context": entity_id,
+		"tick": Time.get_ticks_msec(),
+	}
+
+func drain_new_bind_neurons() -> Array:
+	## Pop all bind_* neurons spawned since the last drain. Called by the
+	## per-tick snapshot builder; mirrors drain_new_appraisal_neurons.
+	if _new_bind_neurons.is_empty():
+		return []
+	var out: Array = _new_bind_neurons.duplicate()
+	_new_bind_neurons.clear()
+	return out
+
+# =========================================================================
+# PHASE 10 — TEMPORAL TEXTURE NEUROGENESIS
+# (perception_implementation_plan.md Phase 10, perception_spec.md §5.5)
+# =========================================================================
+
+func _temporal_consts() -> Dictionary:
+	## Lazy accessor for the three temporal-texture constants.
+	var pc: Node = null
+	if Engine.has_singleton("PerceptionConstants"):
+		pc = Engine.get_singleton("PerceptionConstants")
+	else:
+		var tree: SceneTree = Engine.get_main_loop() as SceneTree
+		if tree != null and tree.root != null:
+			pc = tree.root.get_node_or_null("/root/PerceptionConstants")
+	var lookup := func(key: String, default_value: Variant) -> Variant:
+		if pc == null:
+			return default_value
+		var v: Variant = pc.call("get_value", key, default_value)
+		return v if v != null else default_value
+	return {
+		"persistence_seconds": float(lookup.call("neurogenesis_thresholds.temporal_persistence_seconds", 8.0)),
+		"dwell_min": float(lookup.call("neurogenesis_thresholds.temporal_dwell_min", 30.0)),
+		"rate_min": float(lookup.call("neurogenesis_thresholds.temporal_rate_min", 0.5)),
+	}
+
+func update_temporal_textures(dt_seconds: float) -> void:
+	## Called every brain tick. For every per-entity tracker eid still live,
+	## inspect the parent sense neurons' dwell/rate channels. Each channel's
+	## "sustained above threshold" elapsed time is a separate counter: when
+	## the counter crosses `temporal_persistence_seconds`, the corresponding
+	## compound spawns (once — dedup by "{kind}:{eid}").
+	##
+	## This rule is per-entity. Different eids accumulate independently; one
+	## entity going briefly below threshold does NOT reset another's counter.
+	## Partial sustaining (e.g. 3 seconds high, 0.5 s low, 3 seconds high)
+	## resets the counter on the low tick — spec §5.5's "high for T seconds"
+	## means continuous.
+	var consts: Dictionary = _temporal_consts()
+	var persistence: float = float(consts["persistence_seconds"])
+	var dwell_min: float = float(consts["dwell_min"])
+	var rate_min: float = float(consts["rate_min"])
+
+	for eid in _per_entity_trackers.keys():
+		var vis: Dictionary = _neuron_map.get("sense_visible_" + eid, {})
+		var dst: Dictionary = _neuron_map.get("sense_dist_" + eid, {})
+		if vis.is_empty() and dst.is_empty():
+			continue
+		var tr: Dictionary = _temporal_tracker.get(eid, {
+			"lingering_secs": 0.0,
+			"approaching_secs": 0.0,
+		})
+
+		# Lingering: sustained high dwell on the visibility channel.
+		var dwell: float = float(vis.get("dwell", 0.0))
+		if dwell >= dwell_min:
+			tr["lingering_secs"] = float(tr.get("lingering_secs", 0.0)) + dt_seconds
+		else:
+			tr["lingering_secs"] = 0.0
+
+		# Approaching fast: sustained high POSITIVE rate on the distance channel.
+		# sense_dist activation = 100*exp(-d/τ) — it INCREASES as distance
+		# decreases, so positive rate = getting closer. A positive magnitude
+		# threshold avoids firing on micro-jitter (rate ~0 but technically > 0).
+		var rate: float = float(dst.get("rate", 0.0))
+		if rate >= rate_min:
+			tr["approaching_secs"] = float(tr.get("approaching_secs", 0.0)) + dt_seconds
+		else:
+			tr["approaching_secs"] = 0.0
+
+		_temporal_tracker[eid] = tr
+
+		# Spawn checks — one per kind, dedup via _temporal_spawned keys.
+		if float(tr["lingering_secs"]) >= persistence:
+			_spawn_temporal_texture("lingering", eid, "sense_visible_" + eid)
+		if float(tr["approaching_secs"]) >= persistence:
+			_spawn_temporal_texture("approaching_fast", eid, "sense_dist_" + eid)
+
+func _spawn_temporal_texture(kind: String, entity_id: String, parent_sense_id: String) -> void:
+	## Spawn q_{kind}_{entity_id} compound wired to its parent sense-neuron.
+	## `tag_text` carries the spec's decoded token ("lingering" / "approaching")
+	## so Phase 7's renderer can pick it up as an inline token for the eid.
+	if kind == "" or entity_id == "":
+		return
+	var neuron_id: String = "q_%s_%s" % [kind, entity_id]
+	if _temporal_spawned.get("%s:%s" % [kind, entity_id], false):
+		return
+	if _neuron_map.has(neuron_id):
+		_temporal_spawned["%s:%s" % [kind, entity_id]] = true
+		return
+	if not _neuron_map.has(parent_sense_id):
+		# Parent was GC'd between tracker tick and spawn — bail; next encounter
+		# will rebuild the counter.
+		return
+
+	var tag: String = kind  # "lingering" or "approaching_fast"
+	var neuron: Dictionary = {
+		"id": neuron_id,
+		"type": "compound_quality",
+		"activation": 40.0,
+		"protected": false,
+		"category": "compound_quality_temporal",
+		"age": 0,
+		"label": "%s(%s)" % [kind, entity_id],
+		"entity_id": entity_id,
+		"tag_text": tag,
+		"temporal_kind": kind,
+		"parent_sense": parent_sense_id,
+	}
+	neurons.append(neuron)
+	_neuron_map[neuron_id] = neuron
+
+	_add_connection(parent_sense_id, neuron_id, 0.12)
+
+	_compound_quality_count += 1
+	_dynamic_count += 1
+	_temporal_spawned["%s:%s" % [kind, entity_id]] = true
+
+	_new_temporal_textures.append({
+		"id": neuron_id,
+		"kind": kind,
+		"entity_id": entity_id,
+		"parent_sense": parent_sense_id,
+		"spawned_tick": Time.get_ticks_msec(),
+	})
+
+	last_neurogenesis_event = {
+		"type": "temporal_texture",
+		"context": "%s(%s)" % [kind, entity_id],
+		"tick": Time.get_ticks_msec(),
+	}
+
+func update_temporal_activations() -> void:
+	## Per-tick activation refresh for temporal textures. A q_lingering_{eid}
+	## fires in proportion to the parent sense_visible_{eid}'s current dwell;
+	## a q_approaching_fast_{eid} fires in proportion to the parent
+	## sense_dist_{eid}'s current rate (clamped positive). When the parent
+	## channel fades (entity leaves / stops approaching), the compound's
+	## activation correctly fades with it.
+	for n in neurons:
+		if String(n.get("category", "")) != "compound_quality_temporal":
+			continue
+		var parent_id: String = String(n.get("parent_sense", ""))
+		if parent_id == "" or not _neuron_map.has(parent_id):
+			n["activation"] = 0.0
+			continue
+		var parent: Dictionary = _neuron_map[parent_id]
+		var kind: String = String(n.get("temporal_kind", ""))
+		var new_act: float = 0.0
+		if kind == "lingering":
+			new_act = clampf(float(parent.get("dwell", 0.0)), 0.0, 100.0)
+		elif kind == "approaching_fast":
+			var rate: float = float(parent.get("rate", 0.0))
+			# Map a modest positive rate (≥ rate_min) to a reportable activation.
+			# 10x scaling centers typical approach rates (0.5..5 per tick) into
+			# the 5..50 activation band where the "active" floor reads.
+			new_act = clampf(maxf(0.0, rate) * 10.0, 0.0, 100.0)
+		n["activation"] = new_act
+
+func drain_new_temporal_textures() -> Array:
+	## Drain recently-spawned temporal texture neurons for trace v2.
+	if _new_temporal_textures.is_empty():
+		return []
+	var out: Array = _new_temporal_textures.duplicate()
+	_new_temporal_textures.clear()
+	return out
+
+func get_active_temporal_textures(floor: float = 30.0) -> Dictionary:
+	## {entity_id: {"lingering": act_or_0, "approaching_fast": act_or_0}}
+	## for per-entity temporal compounds currently firing above `floor`. Used
+	## by the Phase 7 renderer to inline "lingering" / "approaching" tokens
+	## on the matching entity's prompt line.
+	var out: Dictionary = {}
+	for n in neurons:
+		if String(n.get("category", "")) != "compound_quality_temporal":
+			continue
+		if float(n.get("activation", 0.0)) < floor:
+			continue
+		var eid: String = String(n.get("entity_id", ""))
+		if eid == "":
+			continue
+		var kind: String = String(n.get("temporal_kind", ""))
+		var entry: Dictionary = out.get(eid, {})
+		entry[kind] = float(n["activation"])
+		out[eid] = entry
+	return out
+
+func get_active_heard_activations(floor: float = 0.0) -> Dictionary:
+	## Phase 9 — {eid: activation of sense_heard_{eid}} for the caller to
+	## rank heard percepts alongside visible ones. Empty/undifferentiated
+	## return at cold-start is correct (no heard neurons yet).
+	var out: Dictionary = {}
+	for n in neurons:
+		var id: String = String(n.get("id", ""))
+		if not id.begins_with("sense_heard_"):
+			continue
+		var act: float = float(n.get("activation", 0.0))
+		if act < floor:
+			continue
+		out[id.substr("sense_heard_".length())] = act
+	return out
+
+func get_active_bind_activations(floor: float = 30.0) -> Dictionary:
+	## {eid: activation} for currently-firing cross-modal bind compounds.
+	## Used by trace recording and downstream diagnostics (§9.4 probes).
+	var out: Dictionary = {}
+	for n in neurons:
+		if String(n.get("category", "")) != "compound_quality_cross_modal":
+			continue
+		if float(n.get("activation", 0.0)) < floor:
+			continue
+		out[String(n.get("entity_id", ""))] = float(n["activation"])
+	return out
+
+func get_active_compounds(activation_floor: float = 30.0) -> Dictionary:
+	## Phase 7 — {compound_neuron_id: activation} for compound-quality neurons
+	## above `activation_floor`. Covers both `compound_quality` (quality-pair
+	## compounds, Phase 4's q_{a}+{b}) and `compound_quality_distance`
+	## (q_{verb}able, the distance-action compounds that gate affordance verbs).
+	##
+	## The 30.0 floor matches the "active appraisal" convention used everywhere
+	## else in the substrate — no new tuning constant.
+	var out: Dictionary = {}
+	for neuron in neurons:
+		var cat: String = String(neuron.get("category", ""))
+		if not (cat == "compound_quality" or cat == "compound_quality_distance"):
+			continue
+		var act: float = float(neuron.get("activation", 0.0))
+		if act < activation_floor:
+			continue
+		out[String(neuron["id"])] = act
+	return out
+
+func get_compound_count() -> int:
+	## Phase 7 F4 — number of compound-quality neurons currently in the graph
+	## (regardless of activation). Drives the fallback-decay coefficient:
+	## `max(0, 1 - count / N_FALLBACK_RETIRE)` retires the crude distance
+	## fallback once enough compounds have emerged.
+	return int(_compound_quality_count)
+
+func get_outgoing_weight_sum(neuron_id: String) -> float:
+	## Phase 6 — summed absolute outgoing propagation weight of a single neuron.
+	##
+	## Per docs/perception_spec.md §5.3 and docs/perception_implementation_plan.md
+	## Phase 6: a percept's salience = "summed outgoing propagation weight of
+	## their sense-neuron". Two beings with the same sensory field but different
+	## reward histories will have different Hebbian weights, and therefore
+	## different propagation sums on their per-entity sense neurons — this is
+	## the mechanism by which attention individuates.
+	##
+	## Absolute value because a strongly-negative outgoing weight (inhibitory)
+	## is still influence on downstream state; the being "pays attention" to
+	## the percept either way. No new tuning constant, no new fixed weight —
+	## every weight read here is Hebbian-learned from co-activation history.
+	if neuron_id == "":
+		return 0.0
+	var s: float = 0.0
+	for c in connections:
+		if String(c["src"]) == neuron_id:
+			s += absf(float(c["weight"]))
+	return s
+
+func get_perception_salience(entity_ids: Array) -> Dictionary:
+	## Phase 6 — per-entity perception salience from sense_visible_{eid}
+	## outgoing weight sums. Returns {eid: float}; eids with no matching sense
+	## neuron (never encountered, or GC'd) map to 0.0.
+	##
+	## NOTE: keyed on sense_visible_{eid} alone. sense_dist_{eid} captures the
+	## same entity at a different substrate level; its outgoing weights will
+	## track visibility patterns closely. The spec's "sense_X" language reads
+	## most naturally as the base visibility neuron, which also matches how
+	## Phase 2's F9 merge protocol already treats the family.
+	var out: Dictionary = {}
+	for eid in entity_ids:
+		var s: String = String(eid)
+		if s == "":
+			continue
+		out[s] = get_outgoing_weight_sum("sense_visible_" + s)
+	return out
 
 # =========================================================================
 # DEBUG

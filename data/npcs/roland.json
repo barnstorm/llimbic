@@ -5,6 +5,14 @@
   "spawn_position": [2320, 464],
   "home_location": "guard_post",
   "work_location": "guard_post",
+  "sensor_profile": {
+    "vision_range": 144.0,
+    "vision_arc_deg": 120.0,
+    "eye_offset": [0.0, -8.0],
+    "hearing_threshold": 0.08,
+    "hearing_sensitivity": 1.1,
+    "ear_offset": [0.0, 0.0]
+  },
   "personality": {
     "traits": ["vigilant", "stoic", "duty-bound"],
     "speech_style": "clipped and formal, speaks in short declarative statements",
@@ -22,7 +30,10 @@
   "drive_defaults": {"energy": 90.0, "hunger": 20.0, "social": 20.0, "safety": 90.0},
   "neural_biases": [
     {"src": "drive_safety", "dst": "action_observe", "weight": 0.03},
-    {"src": "drive_safety", "dst": "action_flee", "weight": -0.03}
+    {"src": "drive_safety", "dst": "action_flee", "weight": -0.03},
+    {"src": "drive_safety", "dst": "vagal_ventral", "weight": 0.04},
+    {"src": "sense_nearby_npcs", "dst": "vagal_ventral", "weight": 0.03},
+    {"src": "task_frustration", "dst": "vagal_sympathetic", "weight": 0.02}
   ],
   "night_behavior": {"go_home_hour": 99.0, "override": {"location": "town_square", "duration": 8.0, "priority": 0.9, "purpose": "Night patrol"}},
   "starting_inventory": [],
@@ -32,5 +43,5 @@
     "gossip": "Saw something on the east road last night.",
     "busy": "On patrol. Make it quick."
   },
-  "relationships": {"Greta": 0.6, "Hugo": 0.5}
+  "relationships": {"Greta": 0.6, "Hugo": 0.5, "Aldric": 0.45, "Felix": 0.5}
 }

@@ -146,7 +146,86 @@ async def load_model():
         print(f"Layer 3 server: L2 model not available for thought loop ({e}), "
               f"thought coloring will be skipped")
 
-    thought_loop = ThoughtLoop(l2_model=l2_model, l3_model=model)
+    # Phase 0/0.5: appraisal embedding bridge.
+    #
+    # Tier selection (auto):
+    #   T1 — preferred. Mid-layer (24) residual via transformers. The F1
+    #        semantic-neighborhood probe (tools/probe_embedding_semantics.py
+    #        --tier t1) verified 93% pass on this source/matrix pair.
+    #   T0 — fallback. Last-layer pooled via llama-server /embedding. F1 only
+    #        scores 62% (fails the gate); kept as a working bridge for systems
+    #        without the T1 matrix or sufficient GPU memory.
+    #
+    # If neither matrix exists, ThoughtLoop runs without the bridge — cortical
+    # feedback no-ops gracefully and the rest of the game functions normally.
+    embedding_source = None
+    appraisal_manager = None
+    try:
+        from appraisal_embeddings import AppraisalEmbeddingManager
+        from transformers import AutoTokenizer
+        import json as _json
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _root = os.path.dirname(_here)
+        _decode_t1 = os.path.join(_root, "data", "token_embeddings_layer24.safetensors")
+        _decode_t0 = os.path.join(_root, "data", "token_embeddings_layer0.safetensors")
+        _consts_path = os.path.join(_root, "data", "perception_constants.json")
+
+        if os.path.exists(_decode_t1):
+            from embedding_source import TransformersMidLayerEmbeddingSource
+            _tier = "T1"
+            _decode_path = _decode_t1
+            _source_factory = lambda eb: TransformersMidLayerEmbeddingSource(
+                model_name="HuggingFaceTB/SmolLM3-3B",
+                layer=24,
+                cache_size=int(eb.get("embedding_cache_size", 2048)),
+            )
+        elif os.path.exists(_decode_t0):
+            from embedding_source import LlamaServerEmbeddingSource
+            _tier = "T0"
+            _decode_path = _decode_t0
+            _source_factory = lambda eb: LlamaServerEmbeddingSource(
+                port=8423,
+                hidden_dim=2048,
+                cache_size=int(eb.get("embedding_cache_size", 2048)),
+            )
+        else:
+            _tier = None
+            _decode_path = None
+            _source_factory = None
+
+        if _tier is None:
+            print("Layer 3 server: no token decode matrix found. Appraisal bridge DISABLED.")
+            print("  → Run: python tools/extract_token_embeddings_t1.py  (recommended, T1)")
+            print("  → Or:  python tools/extract_token_embeddings.py     (T0 fallback)")
+        else:
+            with open(_consts_path) as f:
+                _consts = _json.load(f)
+            _eb = _consts.get("embedding_bridge", {})
+            embedding_source = _source_factory(_eb)
+            _tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM3-3B")
+            appraisal_manager = AppraisalEmbeddingManager(
+                source=embedding_source,
+                token_decode_path=_decode_path,
+                tokenizer=_tokenizer,
+                drift_rate=float(_eb.get("drift_rate", 0.01)),
+                gravity_rate=float(_eb.get("gravity_rate", 0.001)),
+                decode_top_k=int(_eb.get("decode_top_k", 3)),
+                persist_drift_threshold=int(_eb.get("drift_count_persist_threshold", 10)),
+            )
+            print(f"Layer 3 server: appraisal embedding bridge ENABLED "
+                  f"(tier={_tier}, decode matrix={os.path.basename(_decode_path)})")
+    except Exception as _e:
+        print(f"Layer 3 server: appraisal bridge construction failed ({_e}). "
+              "Cortical feedback disabled.")
+        embedding_source = None
+        appraisal_manager = None
+
+    thought_loop = ThoughtLoop(
+        l2_model=l2_model, l3_model=model,
+        embedding_source=embedding_source,
+        appraisal_manager=appraisal_manager,
+        saves_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "saves"),
+    )
     print("Layer 3 server ready (thought loop initialized).")
 
 

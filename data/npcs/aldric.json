@@ -5,6 +5,14 @@
   "spawn_position": [2992, 592],
   "home_location": "farm",
   "work_location": "farm",
+  "sensor_profile": {
+    "vision_range": 96.0,
+    "vision_arc_deg": 90.0,
+    "eye_offset": [0.0, -8.0],
+    "hearing_threshold": 0.12,
+    "hearing_sensitivity": 0.85,
+    "ear_offset": [0.0, 0.0]
+  },
   "personality": {
     "traits": ["patient", "weathered", "superstitious"],
     "speech_style": "slow and deliberate, references weather and seasons constantly",
@@ -20,7 +28,9 @@
   "emotion_baseline": {"relief": 0.3, "optimism": 0.3},
   "drive_defaults": {"energy": 85.0, "hunger": 15.0, "social": 30.0, "safety": 80.0},
   "neural_biases": [
-    {"src": "sense_at_work", "dst": "drive_energy", "weight": -0.01}
+    {"src": "sense_at_work", "dst": "drive_energy", "weight": -0.01},
+    {"src": "sense_at_work", "dst": "vagal_ventral", "weight": 0.03},
+    {"src": "drive_safety", "dst": "vagal_dorsal", "weight": 0.02}
   ],
   "night_behavior": {"go_home_hour": 21.0, "override": null},
   "starting_inventory": ["apple", "apple"],
@@ -30,5 +40,5 @@
     "gossip": "Ivy says the herbs near the creek are dying. Bad sign.",
     "busy": "Working the field. Sun won't wait."
   },
-  "relationships": {"Ivy": 0.6, "Edith": 0.55, "Hugo": 0.5}
+  "relationships": {"Ivy": 0.6, "Edith": 0.55, "Hugo": 0.5, "Roland": 0.45}
 }

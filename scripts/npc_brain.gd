@@ -20,6 +20,7 @@ var _game_manager: Node = null
 var _world_object_registry: Node = null
 
 var _last_world_pos: Vector2 = Vector2.ZERO
+var _per_entity_gc_tick: int = 0  # Phase 2 — counts ticks between per-entity GC sweeps
 
 # Chunk tracking for modulation triggers
 var _last_chunk_index: int = -1
@@ -92,6 +93,10 @@ func setup(p_name: String, p_role: String) -> void:
 	memory.npc_role = role
 	memory.on_tagged_event = func(desc: String, salience: float) -> void:
 		npc_log("MEM [%.1f]: %s" % [salience, desc])
+	# Phase 1: reward when a glimpsed location becomes visited.
+	memory.on_discovery = func(_loc_name: String) -> void:
+		if layer1:
+			layer1.signal_reward("reward_explore_discovered")
 
 	# Seed location discovery: NPC knows home, work, and schedule locations from birth
 	var known_locs: Array = []
@@ -205,6 +210,28 @@ func process_server_commands(commands: Array) -> void:
 				if layer1 and layer1._network:
 					var current: float = layer1._network.get_activation("salience")
 					layer1._network.set_activation("salience", clampf(current + amount, 0.0, 100.0))
+			"spawn_identity_appraisal":
+				# Phase 5 — Python owns identity-appraisal embedding state and
+				# decides when to spawn (encounter_threshold + F2 filter). Here
+				# we materialize the Hebbian node and its incoming wiring.
+				var nid: String = cmd.get("neuron_id", "")
+				var eid: String = cmd.get("entity_id", "")
+				if nid and eid and layer1 and layer1._network:
+					var ok: bool = layer1._network.spawn_identity_appraisal(nid, eid)
+					if ok:
+						npc_log("IDENTITY_APPRAISAL: spawned %s for %s" % [nid, eid])
+			"nudge_quality":
+				# Phase 7 §7.2 — identity-appraisal-driven phantom quality
+				# activation. Python computes nudges from active identity-
+				# appraisal decoded tokens and pushes each as a named quality
+				# bump. Replaces the removed memory-driven threat-table
+				# phantom activation in somatic_stream.gd.
+				var qid: String = cmd.get("quality_id", "")
+				var amt: float = cmd.get("amount", 0.0)
+				if qid and layer1 and layer1._network:
+					var cur: float = layer1._network.get_activation(qid)
+					if cur >= 0.0:  # neuron exists
+						layer1._network.set_activation(qid, clampf(cur + amt, 0.0, 100.0))
 			"set_thought":
 				current_thought = cmd.get("text", "")
 				npc_log("THOUGHT: " + current_thought)
@@ -286,6 +313,26 @@ func process_server_commands(commands: Array) -> void:
 						"item_name": item_id.capitalize(),
 						"target": target_name,
 					}, 3.0)  # 3s to hand over
+			"touch":
+				_handle_touch(cmd)
+			"interact":
+				_handle_interact(cmd)
+			"watch":
+				_handle_watch(cmd)
+			"listen":
+				_handle_listen(cmd)
+			"follow":
+				_handle_follow(cmd)
+			"point_at":
+				_handle_point_at(cmd)
+			"offer_item":
+				_handle_offer(cmd)
+			"show_item":
+				_handle_show(cmd)
+			"rest":
+				_handle_rest()
+			"hide":
+				_handle_hide()
 			"motor_command":
 				# Adventure-command: convert to action override for entity-targeted commands
 				var motor_cmd: String = cmd.get("command", "")
@@ -412,6 +459,333 @@ func _record_action_event(cmd_str: String, target: Variant) -> void:
 
 	if event_text and memory:
 		memory.add_tagged_event(event_text, salience, tags, "direct", "action")
+
+func _nudge_qualities(quality_nudges: Dictionary) -> void:
+	## Push activation into one or more quality (or any) neurons.
+	## TOUCH and INTERACT use this to ground the body in real contact.
+	if layer1 == null or layer1._network == null:
+		return
+	for q_id in quality_nudges:
+		var amount: float = float(quality_nudges[q_id])
+		var current: float = layer1._network.get_activation(str(q_id))
+		if current >= 0.0:
+			layer1._network.set_activation(str(q_id), clampf(current + amount, 0.0, 100.0))
+
+func _apply_drive_effects(drive_effects: Dictionary) -> void:
+	## Apply drive deltas (e.g. drinking water nudges hunger down, energy up).
+	if layer1 == null:
+		return
+	for d in drive_effects:
+		var delta: float = float(drive_effects[d])
+		match str(d):
+			"energy":
+				layer1.energy = clampf(layer1.energy + delta, 0.0, 100.0)
+			"hunger":
+				layer1.hunger = clampf(layer1.hunger + delta, 0.0, 100.0)
+			"social", "social_need":
+				layer1.social_need = clampf(layer1.social_need + delta, 0.0, 100.0)
+			"safety":
+				layer1.safety = clampf(layer1.safety + delta, 0.0, 100.0)
+
+func _resolve_object_id_by_name(target_name: String) -> String:
+	## Find a visible-object id by display name. Used when the parser only knows the name.
+	if perception:
+		for obj in perception.visible_objects:
+			if obj.get("name", "") == target_name or obj.get("id", "") == target_name:
+				return obj.get("id", "")
+	return ""
+
+func _handle_touch(cmd: Dictionary) -> void:
+	var target_type: String = cmd.get("target_type", "")
+	var target_name: String = cmd.get("target_name", "")
+	var object_id: String = cmd.get("object_id", "")
+	var pos: Variant = cmd.get("target")
+
+	# Resolve object id from name if not provided directly
+	if object_id == "" and target_type in ["object", "item"]:
+		object_id = _resolve_object_id_by_name(target_name)
+
+	# Look up tactile signature from the world object registry
+	var tactile_desc: String = ""
+	if _world_object_registry and object_id != "":
+		var tactile: Dictionary = _world_object_registry.get_tactile(object_id)
+		if not tactile.is_empty():
+			_nudge_qualities(tactile.get("quality_nudges", {}))
+			tactile_desc = tactile.get("description", "")
+
+	# Generic fallback: touching an entity warms the skin slightly
+	if tactile_desc == "" and target_type == "entity":
+		_nudge_qualities({"q_warm": 8.0, "q_settled": 4.0})
+		tactile_desc = "skin warmth, breath, presence"
+	elif tactile_desc == "":
+		# Generic object/item with no tactile metadata
+		_nudge_qualities({"q_settled": 3.0})
+		tactile_desc = "contact"
+
+	npc_log("TOUCH: %s — %s" % [target_name, tactile_desc])
+	if memory:
+		memory.add_tagged_event(
+			"Touched %s — %s" % [target_name, tactile_desc],
+			0.35, ["touch", "somatic", target_type], "direct", "touch"
+		)
+	# Phase 4: TOUCH succeeded on this target. The target's entity_id flows
+	# into action-success history so q_touchable's receptive field is built
+	# from real successful-distance samples.
+	if layer1:
+		var touch_eid: String = object_id if object_id != "" else _resolve_entity_id_for_name(target_name)
+		layer1.signal_action_success("touch", touch_eid)
+
+	# Brief observe-pose override so the touching is visible
+	if pos is Vector2:
+		_set_override({
+			"type": "observe",
+			"target": pos,
+			"reason": "CMD: TOUCH " + target_name,
+			"speed_mul": 0.0,
+		}, 2.0)
+
+func _handle_interact(cmd: Dictionary) -> void:
+	var target_name: String = cmd.get("target_name", "")
+	var object_id: String = cmd.get("object_id", "")
+	var pos: Variant = cmd.get("target")
+
+	if object_id == "":
+		object_id = _resolve_object_id_by_name(target_name)
+	# Phase 4: INTERACT succeeded on this target.
+	if layer1:
+		layer1.signal_action_success("interact", object_id)
+
+	# Pull the affordance from the world registry — the world owns what happens
+	var affordance: Dictionary = {}
+	if _world_object_registry and object_id != "":
+		affordance = _world_object_registry.get_affordance(object_id)
+
+	var description: String = affordance.get("description", "")
+	if description == "":
+		# No affordance defined — generic acknowledgement
+		description = "you handle it, briefly"
+
+	_apply_drive_effects(affordance.get("drive_effects", {}))
+	_nudge_qualities(affordance.get("quality_nudges", {}))
+
+	# Optional state change (e.g. depleting a resource)
+	var new_state: String = affordance.get("state", "")
+	if new_state != "" and _world_object_registry and object_id != "":
+		_world_object_registry.update_object_state(object_id, new_state)
+
+	npc_log("INTERACT: %s — %s" % [target_name, description])
+	if memory:
+		var tags: Array = ["interact"]
+		for t in affordance.get("memory_tags", []):
+			if t not in tags:
+				tags.append(t)
+		memory.add_tagged_event(
+			"Interacted with %s — %s" % [target_name, description],
+			0.45, tags, "direct", "interact"
+		)
+
+	if pos is Vector2:
+		_set_override({
+			"type": "observe",
+			"target": pos,
+			"reason": "CMD: INTERACT WITH " + target_name,
+			"speed_mul": 0.0,
+		}, 3.0)
+
+func _handle_watch(cmd: Dictionary) -> void:
+	var target_name: String = cmd.get("target", "")
+	var pos: Variant = cmd.get("position")
+	npc_log("WATCH: " + target_name)
+	if memory:
+		memory.add_tagged_event(
+			"Watched %s" % target_name, 0.35,
+			["watch", "observation", "social"], "direct", "watch"
+		)
+	# Salience nudge: sustained attention is itself a productive event
+	if layer1 and layer1._network:
+		var s: float = layer1._network.get_activation("salience")
+		layer1._network.set_activation("salience", clampf(s + 8.0, 0.0, 100.0))
+	if pos is Vector2:
+		_set_override({
+			"type": "observe",
+			"target": pos,
+			"reason": "CMD: WATCH " + target_name,
+			"speed_mul": 0.0,
+		}, 6.0)  # sustained — long lock
+
+func _handle_listen(cmd: Dictionary) -> void:
+	var target_name: String = cmd.get("target_name", "")
+	var pos: Variant = cmd.get("position")
+	npc_log("LISTEN: " + target_name)
+	if memory:
+		memory.add_tagged_event(
+			"Listened to %s" % target_name, 0.3,
+			["listen", "observation"], "direct", "listen"
+		)
+	# Brief auditory-focus quality nudge: clarity rises, body settles
+	_nudge_qualities({"q_clear": 5.0, "q_settled": 3.0})
+	if pos is Vector2:
+		_set_override({
+			"type": "observe",
+			"target": pos,
+			"reason": "CMD: LISTEN TO " + target_name,
+			"speed_mul": 0.0,
+		}, 5.0)
+
+func _handle_follow(cmd: Dictionary) -> void:
+	var target_name: String = cmd.get("target", "")
+	npc_log("FOLLOW: " + target_name)
+	if memory:
+		memory.add_tagged_event(
+			"Started following %s" % target_name, 0.4,
+			["follow", "social", "movement"], "direct", "follow"
+		)
+	# Resolve and chase — re-resolved each tick by the override movement code
+	var pos: Vector2 = _resolve_entity_position(target_name)
+	if pos != Vector2.ZERO:
+		_set_override({
+			"type": "move_toward",
+			"target": pos,
+			"reason": "CMD: FOLLOW " + target_name,
+			"speed_mul": 0.7,
+			"follow_target": target_name,  # marker for movement code if it wants to retarget
+		}, 12.0)
+
+func _handle_point_at(cmd: Dictionary) -> void:
+	var target_name: String = cmd.get("target_name", "")
+	var pos: Variant = cmd.get("position")
+	npc_log("POINT AT: " + target_name)
+	if memory:
+		memory.add_tagged_event(
+			"Pointed at %s" % target_name, 0.3,
+			["point", "social", "joint_attention"], "direct", "point"
+		)
+	if pos is Vector2:
+		_set_override({
+			"type": "observe",
+			"target": pos,
+			"reason": "CMD: POINT AT " + target_name,
+			"speed_mul": 0.0,
+		}, 2.0)
+
+func _handle_offer(cmd: Dictionary) -> void:
+	## OFFER differs from GIVE in semantics: a presented item, not a forced transfer.
+	## Mechanically v1: same item movement as GIVE, distinct memory tag, recipient
+	## perception event (future task wires acceptance/refusal logic).
+	var item_name: String = cmd.get("item", "")
+	var item_id: String = item_name.to_lower()
+	var target_name: String = cmd.get("target", "")
+	if item_id == "" or target_name == "":
+		return
+	if not (inventory and inventory.has(item_id)):
+		npc_log("OFFER FAILED (don't have): %s" % item_name)
+		return
+
+	inventory.remove(item_id, 1)
+	npc_log("OFFER: %s to %s" % [item_id, target_name])
+	if memory:
+		memory.add_tagged_event(
+			"Offered %s to %s" % [item_id, target_name], 0.5,
+			["inventory", "offer", "social"], "direct", "social"
+		)
+	_set_override({
+		"type": "give",
+		"item_id": item_id,
+		"item_name": item_id.capitalize(),
+		"target": target_name,
+		"social_act": "offer",  # marker for recipient-side perception (task 5)
+	}, 4.0)
+	# Phase 1: offer initiation = social attempt. True acceptance detection
+	# (recipient took the item) is a Phase-2 follow-up; for now reward at
+	# half magnitude on the optimistic assumption an attempt is socially valued.
+	if layer1:
+		layer1.signal_reward("reward_social_accepted",
+			0.5 * float(layer1._load_reward_magnitudes().get("reward_social_accepted", 0.6)))
+	# Phase 4: OFFER succeeded — record the at-success distance to the
+	# recipient so q_offerable's receptive field reflects social-handoff range.
+	if layer1:
+		layer1.signal_action_success("offer", _resolve_entity_id_for_name(target_name))
+
+func _handle_show(cmd: Dictionary) -> void:
+	## SHOW displays a held item without transferring it.
+	var item_name: String = cmd.get("item", "")
+	var item_id: String = item_name.to_lower()
+	var target_name: String = cmd.get("target", "")
+	if item_id == "" or target_name == "":
+		return
+	if not (inventory and inventory.has(item_id)):
+		npc_log("SHOW FAILED (don't have): %s" % item_name)
+		return
+
+	npc_log("SHOW: %s to %s" % [item_id, target_name])
+	if memory:
+		memory.add_tagged_event(
+			"Showed %s to %s" % [item_id, target_name], 0.35,
+			["inventory", "show", "social"], "direct", "social"
+		)
+	# Brief display pose — observe with no movement
+	var pos: Vector2 = _resolve_entity_position(target_name)
+	if pos != Vector2.ZERO:
+		_set_override({
+			"type": "observe",
+			"target": pos,
+			"reason": "CMD: SHOW %s TO %s" % [item_name, target_name],
+			"speed_mul": 0.0,
+			"social_act": "show",
+		}, 3.0)
+
+func _handle_rest() -> void:
+	npc_log("REST")
+	# Drive recovery: rest pulls energy up, costs alertness (safety drops slightly)
+	if layer1:
+		layer1.energy = clampf(layer1.energy + 18.0, 0.0, 100.0)
+		layer1.safety = clampf(layer1.safety - 5.0, 0.0, 100.0)
+	# Somatic: settled, heavy, warm — felt rest
+	_nudge_qualities({
+		"q_settled": 22.0,
+		"q_heavy": 12.0,
+		"q_warm": 8.0,
+		"q_loose": 10.0,
+	})
+	if memory:
+		memory.add_tagged_event("Rested", 0.25, ["rest", "body", "recovery"], "direct", "rest")
+	# Phase 1: REST in safe context = rest_recovered. "Safe" = not currently
+	# fleeing AND safety drive isn't critically low.
+	if layer1 and layer1.flee < 0.3 and layer1.safety > 30.0:
+		layer1.signal_reward("reward_rest_recovered")
+	# Phase 4: REST has no target (it's an internal action). Empty target_eid
+	# means action_success_rest fires but no distance sample is recorded; the
+	# verb still gets the transient signal for downstream Hebbian gating.
+	if layer1:
+		layer1.signal_action_success("rest", "")
+	_set_override({
+		"type": "pause",
+		"reason": "CMD: REST",
+		"speed_mul": 0.0,
+		"posture": "rest",
+	}, 8.0)
+
+func _handle_hide() -> void:
+	npc_log("HIDE")
+	# Defensive crouch: safety nudges up (the act itself reassures), but the
+	# body coils — quality activations should reflect held breath, watching
+	if layer1:
+		layer1.safety = clampf(layer1.safety + 4.0, 0.0, 100.0)
+	_nudge_qualities({
+		"q_coiled": 18.0,
+		"q_dry": 8.0,
+		"q_tight": 6.0,
+		"q_settled": -8.0,  # actively un-settled
+	})
+	if memory:
+		memory.add_tagged_event("Hid from view", 0.5, ["hide", "safety", "defense"], "direct", "hide")
+	_set_override({
+		"type": "pause",
+		"reason": "CMD: HIDE",
+		"speed_mul": 0.0,
+		"posture": "hide",
+		"hidden": true,  # marker for future visibility/perception system
+	}, 8.0)
 
 func _handle_motor_command(cmd_str: String, target: Variant) -> void:
 	## Convert a motor_command string into a timed action override or intention.
@@ -682,6 +1056,43 @@ func update_layer1(delta: float, world_pos: Vector2, nearby_npcs: int) -> void:
 		layer1.apply_emotion_feedback(layer2.emotion_vector)
 
 	layer1.update(delta)
+
+	# Phase 2/3: per-entity sensory neurogenesis. Builds a unified visible
+	# list (entities + objects) with id + exposure + distance_tiles, then
+	# spawns / refreshes sense_visible_{eid} and sense_dist_{eid} per item.
+	# Cheap to call every tick (short-circuits when nothing visible); GC runs
+	# every 60 ticks (~1s).
+	if layer1 and layer1._network and perception:
+		var visible_payload: Array = []
+		for ent in perception.visible_entities:
+			visible_payload.append({
+				"id": ent.get("id", ""),
+				"exposure": ent.get("exposure", 0.0),
+				"distance_tiles": float(ent.get("distance", 0.0)) / 32.0,
+			})
+		for obj in perception.visible_objects:
+			visible_payload.append({
+				"id": obj.get("id", ""),
+				"exposure": obj.get("exposure", 1.0),
+				"distance_tiles": float(obj.get("distance", 0.0)) / 32.0,
+			})
+		layer1._network.update_per_entity_sensory(visible_payload)
+		# Phase 4: receptive-field update for q_*able compounds. Cheap when
+		# no compounds exist; reads visible sense_dist_* and sets compound
+		# activation by gaussian over (current_dist - receptive_center).
+		layer1._network.update_qable_activations()
+		# Phase 10: temporal-texture tracking + activation refresh. Reads
+		# dwell/rate channels already updated above, so must follow
+		# update_per_entity_sensory; update_temporal_activations refreshes
+		# compound firing from parent channels (stale tick otherwise).
+		# dt follows the real physics delta so accelerated-sim (Phase 1.5)
+		# still advances the sustained-time counters in lockstep with
+		# substrate activity.
+		layer1._network.update_temporal_textures(delta)
+		layer1._network.update_temporal_activations()
+		_per_entity_gc_tick = (_per_entity_gc_tick + 1) % 60
+		if _per_entity_gc_tick == 0:
+			layer1._network.gc_per_entity_sensory()
 
 	# Update familiarity
 	if current_location != "" and current_location != "unknown":
@@ -965,8 +1376,12 @@ func _action_to_behavior(selected: String, delta: float) -> Dictionary:
 			if not threat.is_empty():
 				var away: Vector2 = (_last_world_pos - threat["position"]).normalized()
 				memory.add_tagged_event("Fled from " + threat["name"], 0.5, ["flee", "danger"], "direct", "threat_response")
+				_track_threat_avoid(threat["name"], float(threat.get("distance", 0.0)))
 				return {"type": "flee_from", "target": _last_world_pos + away * 128.0, "entity": threat["name"], "reason": "Fleeing from " + threat["name"], "speed_mul": 1.4}
-			# No visible threat but flee won — seek safety
+			# No visible threat but flee won — seek safety. If we were tracking
+			# an active threat-avoid, that threat is no longer in vision: count
+			# it as a successful avoid.
+			_resolve_threat_avoid_if_pending(true)
 			return {"type": "move_toward", "target": _safest_familiar_location(), "speed_mul": 1.2, "reason": "Seeking safety"}
 
 		"avoid":
@@ -1073,6 +1488,17 @@ func _build_action_from_override(override: Dictionary) -> Dictionary:
 		_:
 			return {"type": "pause", "reason": "Server: " + action_type, "speed_mul": 0.0}
 
+func _resolve_entity_id_for_name(target_name: String) -> String:
+	## Phase 4 / F9 — look up the canonical entity_id for a display name by
+	## scanning currently-visible entities. Returns "" if not in vision.
+	## Used by action handlers that have target_name but not target_id.
+	if target_name == "" or perception == null:
+		return ""
+	for ent in perception.visible_entities:
+		if str(ent.get("name", "")) == target_name:
+			return str(ent.get("id", ""))
+	return ""
+
 func _find_threat() -> Dictionary:
 	## Find a visible entity we distrust enough to flee from.
 	for entity in perception.visible_entities:
@@ -1080,6 +1506,32 @@ func _find_threat() -> Dictionary:
 		if trust_val < 0.2:
 			return entity
 	return {}
+
+# Phase 1 reward_threat_avoided tracking. Records the initial threat distance
+# when a flee/hide starts; the next flee tick (or successful escape) compares.
+var _threat_avoid: Dictionary = {}  # {entity_name: String, initial_distance: float}
+const _THREAT_AVOID_DELTA_PIXELS: float = 32.0  # one tile; meaningful escape
+
+func _track_threat_avoid(entity_name: String, current_distance: float) -> void:
+	if _threat_avoid.get("entity_name", "") == entity_name:
+		# Re-encountered the same threat mid-flee. If we've put a tile of
+		# distance between us and the start, the avoid succeeded.
+		var start: float = float(_threat_avoid.get("initial_distance", 0.0))
+		if current_distance >= start + _THREAT_AVOID_DELTA_PIXELS:
+			if layer1:
+				layer1.signal_reward("reward_threat_avoided")
+			_threat_avoid = {"entity_name": entity_name, "initial_distance": current_distance}
+		return
+	_threat_avoid = {"entity_name": entity_name, "initial_distance": current_distance}
+
+func _resolve_threat_avoid_if_pending(escaped_from_view: bool) -> void:
+	if _threat_avoid.is_empty():
+		return
+	if escaped_from_view and layer1:
+		# Threat no longer visible while we were avoiding it — the cleanest
+		# success signal we have at L1.
+		layer1.signal_reward("reward_threat_avoided")
+	_threat_avoid = {}
 
 func _find_interesting_entity() -> Dictionary:
 	## Find a visible entity worth observing.
@@ -1188,6 +1640,23 @@ func _force_replan(reason: String, hour: float) -> void:
 	layer3.update_plan_from_packet(packet, _inference_client)
 
 func on_chunk_completed() -> void:
+	# Phase 1: any chunk reaching this point is a successful action.
+	# Reward magnitude scales down with frustration (struggling success
+	# isn't as good a teacher as smooth success).
+	if layer1:
+		var struggle_factor: float = 1.0 - clampf(layer1.frustration, 0.0, 0.7)
+		layer1.signal_reward("reward_action_succeeded",
+			0.2 * struggle_factor)
+	# Phase 4: emit a verb-specific action-success pulse so distance-action
+	# compound neurogenesis can build q_{verb}able receptive fields. The verb
+	# we know at chunk completion is the chunk's purpose ("approach", "rest",
+	# etc.) — close enough to seed compound emergence.
+	if layer1 and layer3:
+		var chunk: Dictionary = layer3.get_current_chunk()
+		var purpose: String = str(chunk.get("purpose", "")).to_lower()
+		if purpose != "":
+			# No specific entity target at chunk granularity; pass empty.
+			layer1.signal_action_success(purpose, "")
 	if layer3:
 		var old_chunk: Dictionary = layer3.get_current_chunk()
 		npc_log("CHUNK done: %s" % old_chunk.get("purpose", "?"))
@@ -1285,12 +1754,17 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 	perception.set_facing(facing)
 	perception.clear_vision_queries()
 
-	# Build entity list — everything with a position that isn't us
+	# Build entity list — everything with a position that isn't us.
+	# Phase 2: each entry carries `id` (canonical UUID per F9). Per-entity
+	# Hebbian neurons (Phase 2.3) key on this, not on `name`, so renames
+	# don't fragment the neuron family.
 	var entities: Array = []
 	for npc in all_npcs:
 		if npc.npc_name == npc_name:
 			continue
+		var npc_eid: String = npc.entity_id() if npc.has_method("entity_id") else ""
 		entities.append({
+			"id": npc_eid,
 			"name": npc.npc_name,
 			"position": npc.global_position,
 			"doing": npc.brain.get_current_action() if npc.brain else "",
@@ -1298,6 +1772,7 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 		})
 	if player and is_instance_valid(player):
 		entities.append({
+			"id": "ent_player",
 			"name": "Player",
 			"position": player.global_position,
 			"doing": "exploring",
@@ -1323,6 +1798,7 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 
 			if vr.get("visible", false):
 				perception.visible_entities.append({
+					"id": entity.get("id", ""),
 					"name": entity["name"],
 					"position": target_pos,
 					"distance": vr.get("distance", 0.0),
@@ -1382,10 +1858,17 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 			for sid in expired:
 				_heard_stimulus_ids.erase(sid)
 
+		# Phase 9 — accumulate per-eid hearing activation across this tick's
+		# stimuli so each unique emitter's heard-sense neuron is refreshed
+		# once with its strongest perceived_volume. The cross-modal binding
+		# rule consumes the aggregated map at the end of the loop.
+		var heard_by_eid: Dictionary = {}
+
 		for hr in hearing_results:
 			var stim_id: String = hr.get("stimulus_id", "")
 			var stim_type: String = hr.get("stimulus_type", "")
 			var emitter: String = hr.get("emitter_id", "")
+			var emitter_eid: String = hr.get("emitter_eid", "")
 			var tags: Array = hr.get("tags", [])
 			var vol: float = hr.get("perceived_volume", 0.0)
 			var clarity: float = hr.get("clarity", 0.0)
@@ -1400,6 +1883,15 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 				continue
 			if stim_id != "":
 				_heard_stimulus_ids[stim_id] = now_tick
+
+			# Phase 9 — accumulate by eid for cross-modal binding. Entries
+			# without an emitter_eid (wind, generic impact) are skipped from
+			# per-entity hearing — they correctly don't participate in
+			# binding. Track max volume per eid so multiple simultaneous
+			# stimuli from the same entity don't under-count activation.
+			if emitter_eid != "":
+				var prev: float = float(heard_by_eid.get(emitter_eid, 0.0))
+				heard_by_eid[emitter_eid] = maxf(prev, vol)
 
 			# Record for debug visualization
 			perception.record_hearing_result(hr)
@@ -1454,6 +1946,16 @@ func update_perception(facing: String, my_pos: Vector2, all_npcs: Array, player:
 						["heard", "uncertain"],
 						"", "impact_uncertain", clarity
 					)
+
+		# Phase 9 — feed accumulated per-eid hearing into the Hebbian cross-
+		# modal pipeline. update_per_entity_heard refreshes sense_heard_{eid}
+		# and, if sense_visible_{eid} is also active, logs co-activation and
+		# may spawn bind_{eid}.
+		if layer1 and layer1._network and not heard_by_eid.is_empty():
+			var heard_list: Array = []
+			for eid in heard_by_eid.keys():
+				heard_list.append({"id": eid, "strength": float(heard_by_eid[eid])})
+			layer1._network.update_per_entity_heard(heard_list)
 	else:
 		# Fallback: process anything heard via direct perception.hear() calls
 		var heard: Array = perception.consume_heard()

@@ -14,6 +14,10 @@ var npc_role: String = ""
 # Optional log callback — set by brain to pipe events to per-NPC log
 var on_tagged_event: Callable
 
+# Optional discovery callback — set by brain to forward to layer1.signal_reward
+# (Phase 1 reward_explore_discovered). Receives (location_name: String).
+var on_discovery: Callable
+
 # Raw observations: structured dicts with kind, subtype, text, source_type, confidence
 var observations: Array[Dictionary] = []
 
@@ -162,6 +166,8 @@ func discover_location(location_name: String, state: String) -> void:
 	# Fire discovery event when a glimpsed building becomes visited
 	if was_glimpsed and state == "visited":
 		add_tagged_event("Discovered %s" % location_name, 0.6, ["discovery", "exploration"])
+		if on_discovery.is_valid():
+			on_discovery.call(location_name)
 
 func get_discovery_state(location_name: String) -> String:
 	var entry: Dictionary = discovered_locations.get(location_name, {})

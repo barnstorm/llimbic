@@ -846,9 +846,11 @@ class Layer3Model:
         else:
             feel_str = "body:settled"
 
+        # Phase 6: visible is pre-ranked/pre-capped (top-K by propagation weight).
+        # No hand cap here — what survives the ranking is the being's attention.
         visible = context.get("visible", [])
         perception_lines = []
-        for v in visible[:6]:
+        for v in visible:
             exposure = v.get("exposure", 1.0)
             clarity = "clearly" if exposure > 0.7 else "partially" if exposure > 0.3 else "barely"
             perception_lines.append(
@@ -858,9 +860,10 @@ class Layer3Model:
         if not perception_lines:
             perception_lines.append("  No one nearby. Just the town around you.")
 
+        # Phase 9 — heard is pre-ranked by the unified top-K path now; no cap.
         heard = context.get("heard", [])
         if heard:
-            for h in heard[:3]:
+            for h in heard:
                 src = h.get("source", "unknown")
                 text = h.get("text", "")
                 dist = h.get("distance", 0)

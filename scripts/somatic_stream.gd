@@ -40,6 +40,9 @@ func emit() -> Array:
 	# 4. Check for compound quality neurogenesis
 	_network.check_quality_neurogenesis()
 
+	# 5. Check for appraisal neurogenesis (3+ quality constellation sustained)
+	_network.check_appraisal_neurogenesis()
+
 	last_tags = tags
 	return tags
 
@@ -97,18 +100,12 @@ func _apply_conditioning() -> void:
 		_nudge("q_settled", comfort_memory * 2.0)
 		_nudge("q_warm", comfort_memory * 1.5)
 
-	# Entity-specific threat conditioning (the short circuit)
-	# When a threatening entity is nearby, the body reacts before the mind decides.
-	# These phantom activations feed into vagal_sympathetic via quality→vagal connections.
-	if _memory.has_method("get_entity_threat_levels"):
-		var entity_threats: Dictionary = _memory.get_entity_threat_levels()
-		for entity_name in entity_threats:
-			var threat_val: float = entity_threats[entity_name]
-			if threat_val > 0.15:
-				_nudge("q_prickling", threat_val * 4.0)
-				_nudge("q_tight", threat_val * 3.0)
-				_nudge("q_coiled", threat_val * 2.0)
-				_nudge("q_churning", threat_val * 1.5)
+	# Phase 7 §7.2 — entity-specific phantom activation now flows from
+	# identity-appraisal decoded tokens (Python side) via `nudge_quality`
+	# push commands handled in npc_brain.process_server_commands. The old
+	# memory-lookup path (`get_entity_threat_levels` over hand-authored
+	# threat levels) is retired: emergent appraisal state replaces an
+	# authored table, which is the core premise of draft-3 (§7.2).
 
 # =========================================================================
 # DEBUG

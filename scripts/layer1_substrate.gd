@@ -4,6 +4,13 @@ extends RefCounted
 ## trust, familiarity all accessible as before. Internals are now emergent.
 
 var _network: RefCounted = null  # HebbianNetwork
+
+# Phase 1 reward bookkeeping (drive-crossing detection per spec §2.7).
+# Per drive: previous level (for crossing detection) and sustained-safe-band timer.
+var _prev_drive_levels: Dictionary = {}        # drive_name -> last sampled value
+var _drive_safe_band_seconds: Dictionary = {}  # drive_name -> seconds sustained in safe band
+var _drive_thresholds_cache: Dictionary = {}   # lazy from PerceptionConstants
+var _reward_magnitudes_cache: Dictionary = {}  # lazy from PerceptionConstants
 var _somatic: RefCounted = null  # SomaticStream
 
 # --- Timers ---
@@ -155,6 +162,9 @@ func update(delta: float) -> void:
 	# 4. Reorientation timer
 	if reorientation_timer > 0.0:
 		reorientation_timer = maxf(reorientation_timer - delta, 0.0)
+
+	# 4b. Drive-crossing reward detection (Phase 1 — spec §2.7)
+	_check_drive_crossings(delta)
 
 	# 5. Day cycle energy boost
 	if _hour >= 21.0 or _hour < 6.0:
@@ -411,3 +421,241 @@ func get_network_debug() -> Dictionary:
 	if _network == null:
 		return {}
 	return _network.get_debug_state()
+
+# =========================================================================
+# APPRAISAL HANDSHAKE — feeds Python AppraisalEmbeddingManager
+# =========================================================================
+
+# =========================================================================
+# REWARD WIRING (Phase 1 — spec §2.7)
+# =========================================================================
+
+func signal_reward(source_tag: String, magnitude: float = -1.0) -> void:
+	## Wrapper so engine-side callers don't need a direct _network handle.
+	## If magnitude < 0, look up the default for source_tag from
+	## perception_constants.json:reward_magnitudes.
+	if _network == null:
+		return
+	var m: float = magnitude
+	if m < 0.0:
+		m = float(_load_reward_magnitudes().get(source_tag, 0.5))
+	_network.signal_reward(source_tag, m)
+
+func signal_action_success(verb: String, target_eid: String = "") -> void:
+	## Phase 4 wrapper. Pass through to the Hebbian network's action-success
+	## hook so callers don't need a direct _network handle.
+	if _network == null:
+		return
+	_network.signal_action_success(verb, target_eid)
+
+func _load_reward_magnitudes() -> Dictionary:
+	if not _reward_magnitudes_cache.is_empty():
+		return _reward_magnitudes_cache
+	var pc: Node = null
+	var tree: SceneTree = Engine.get_main_loop() as SceneTree
+	if tree != null and tree.root != null:
+		pc = tree.root.get_node_or_null("/root/PerceptionConstants")
+	if pc != null:
+		var v: Variant = pc.call("get_value", "reward_magnitudes", {})
+		if typeof(v) == TYPE_DICTIONARY:
+			_reward_magnitudes_cache = v
+	if _reward_magnitudes_cache.is_empty():
+		# Spec defaults — keeps headless tests working without the autoload.
+		_reward_magnitudes_cache = {
+			"reward_drive_satisfaction": 0.7,
+			"reward_drive_stabilization": 0.3,
+			"reward_social_accepted": 0.6,
+			"reward_rest_recovered": 0.4,
+			"reward_explore_discovered": 0.5,
+			"reward_threat_avoided": 0.8,
+			"reward_action_succeeded": 0.2,
+		}
+	return _reward_magnitudes_cache
+
+func _load_drive_thresholds() -> Dictionary:
+	if not _drive_thresholds_cache.is_empty():
+		return _drive_thresholds_cache
+	var pc: Node = null
+	var tree: SceneTree = Engine.get_main_loop() as SceneTree
+	if tree != null and tree.root != null:
+		pc = tree.root.get_node_or_null("/root/PerceptionConstants")
+	if pc != null:
+		var v: Variant = pc.call("get_value", "drive_thresholds", {})
+		if typeof(v) == TYPE_DICTIONARY:
+			_drive_thresholds_cache = v
+	if _drive_thresholds_cache.is_empty():
+		# Spec defaults — keeps headless tests working without the autoload.
+		_drive_thresholds_cache = {
+			"energy":      {"urgency": 30.0, "safe_band": 60.0, "inverted": true},
+			"hunger":      {"urgency": 70.0, "safe_band": 40.0, "inverted": false},
+			"social_need": {"urgency": 70.0, "safe_band": 40.0, "inverted": false},
+			"safety":      {"urgency": 40.0, "safe_band": 70.0, "inverted": true},
+			"stabilization_sustained_seconds": 5.0,
+		}
+	return _drive_thresholds_cache
+
+func _check_drive_crossings(delta: float) -> void:
+	## Detect drive transitions per spec §2.7:
+	##   - Crossing FROM urgent INTO safe → reward_drive_satisfaction
+	##   - Sustained in safe band for stabilization_sustained_seconds
+	##                                  → reward_drive_stabilization (one-shot)
+	##
+	## "Inverted" drives (energy, safety) treat HIGH as good. The check
+	## inverts comparisons accordingly so the same logic handles both kinds.
+	if _network == null:
+		return
+	var thresholds: Dictionary = _load_drive_thresholds()
+	if thresholds.is_empty():
+		return
+	var sustained_required: float = float(thresholds.get("stabilization_sustained_seconds", 5.0))
+
+	# Map JSON drive names to the actual neuron IDs. drive_social_need would
+	# look up "drive_social_need" but the neuron is named "drive_social".
+	const NEURON_ID_MAP: Dictionary = {
+		"energy": "drive_energy",
+		"hunger": "drive_hunger",
+		"social_need": "drive_social",
+		"safety": "drive_safety",
+	}
+	for drive_name in thresholds.keys():
+		if drive_name.begins_with("_") or drive_name == "stabilization_sustained_seconds":
+			continue
+		var spec: Dictionary = thresholds[drive_name]
+		var inverted: bool = bool(spec.get("inverted", false))
+		var urgency: float = float(spec.get("urgency", 50.0))
+		var safe_band: float = float(spec.get("safe_band", 60.0))
+		var neuron_id: String = NEURON_ID_MAP.get(drive_name, "drive_" + drive_name)
+		var current: float = _network.get_activation(neuron_id)
+		if current < 0.0:
+			continue
+		var prev: float = float(_prev_drive_levels.get(drive_name, current))
+
+		# Crossing detection.
+		var was_urgent: bool
+		var is_urgent: bool
+		if inverted:
+			# Inverted drives (energy, safety): low value = urgent.
+			was_urgent = prev <= urgency
+			is_urgent = current <= urgency
+		else:
+			# Normal drives (hunger, social): high value = urgent.
+			was_urgent = prev >= urgency
+			is_urgent = current >= urgency
+
+		if was_urgent and not is_urgent:
+			signal_reward("reward_drive_satisfaction")
+
+		# Sustained-safe-band detection.
+		var in_safe: bool
+		if inverted:
+			in_safe = current >= safe_band
+		else:
+			in_safe = current <= safe_band
+		var sec: float = float(_drive_safe_band_seconds.get(drive_name, 0.0))
+		if in_safe:
+			sec += delta
+			if sec >= sustained_required:
+				signal_reward("reward_drive_stabilization")
+				sec = -1e9  # latch — won't re-fire until drive leaves safe band
+		else:
+			sec = 0.0
+		_drive_safe_band_seconds[drive_name] = sec
+
+		_prev_drive_levels[drive_name] = current
+
+func drain_recent_reward_events() -> Array:
+	## Forwarded to network; keeps callers single-rooted on layer1.
+	if _network == null:
+		return []
+	return _network.drain_recent_reward_events()
+
+func get_per_entity_channels() -> Dictionary:
+	## Phase 3 — surface continuous distance/rate/dwell channels for snapshot
+	## and trace recording. Empty dict if the network isn't available.
+	if _network == null:
+		return {}
+	return _network.get_per_entity_channels()
+
+func get_perception_salience(entity_ids: Array) -> Dictionary:
+	## Phase 6 — {eid: summed outgoing propagation weight of sense_visible_{eid}}.
+	## The Hebbian graph's own weights drive the ranking; there is no separate
+	## salience function. Empty dict if the network isn't available.
+	if _network == null:
+		return {}
+	return _network.get_perception_salience(entity_ids)
+
+func get_compound_state() -> Dictionary:
+	## Phase 7 — snapshot-ready compound-neuron state:
+	##   {"active": {compound_id: activation}, "count": int}
+	## Active compounds gate affordance verbs (§7.3); count drives the F4
+	## fallback-decay coefficient.
+	if _network == null:
+		return {"active": {}, "count": 0}
+	return {
+		"active": _network.get_active_compounds(),
+		"count": _network.get_compound_count(),
+	}
+
+func get_cross_modal_state() -> Dictionary:
+	## Phase 9 — snapshot-ready cross-modal state:
+	##   {"heard": {eid: activation},
+	##    "bind_active": {eid: activation},
+	##    "new_bind_neurons": [ ... ]}
+	## Heard activations drive Phase 6's ranking (unified with visible).
+	## Bind activations surface for trace diagnostics + §9.4 probes.
+	## new_bind_neurons is drained — one-shot per spawn for the trace.
+	if _network == null:
+		return {"heard": {}, "bind_active": {}, "new_bind_neurons": []}
+	return {
+		"heard": _network.get_active_heard_activations(),
+		"bind_active": _network.get_active_bind_activations(),
+		"new_bind_neurons": _network.drain_new_bind_neurons(),
+	}
+
+func get_temporal_state() -> Dictionary:
+	## Phase 10 — snapshot-ready temporal-texture state:
+	##   {"active": {eid: {kind: activation}},
+	##    "new_neurons": [ ... ]}
+	## `active` feeds the Phase 7 renderer's inline-tokens slot so "lingering"
+	## / "approaching_fast" appear on the prompt line for the matching entity.
+	## `new_neurons` is drained per tick for trace v2.
+	if _network == null:
+		return {"active": {}, "new_neurons": []}
+	return {
+		"active": _network.get_active_temporal_textures(),
+		"new_neurons": _network.drain_new_temporal_textures(),
+	}
+
+func get_perception_salience_all(entity_ids: Array) -> Dictionary:
+	## Phase 9 — per-eid salience combining visible + heard outgoing-weight
+	## sums. Phase 6 covered visible only; Phase 9 brings heard into the
+	## unified rank by summing the outgoing weights of both sense-neuron
+	## families for each eid. Missing-sense-neuron entries contribute 0,
+	## preserving Phase 6's cold-start behaviour.
+	if _network == null:
+		return {}
+	var visible_map: Dictionary = _network.get_perception_salience(entity_ids)
+	var out: Dictionary = {}
+	for eid in entity_ids:
+		var s: String = String(eid)
+		if s == "":
+			continue
+		var v: float = float(visible_map.get(s, 0.0))
+		var h: float = _network.get_outgoing_weight_sum("sense_heard_" + s)
+		out[s] = v + h
+	return out
+
+func get_appraisal_payload() -> Dictionary:
+	## Per-snapshot payload for the cortical feedback bridge.
+	##
+	## - "new_neurons": appraisal neurons that spawned since the last drain.
+	##   Each carries id + embedding_seed (concept→activation) for Python-side
+	##   AppraisalEmbeddingManager.initialize().
+	## - "active":   {appraisal_id: activation} for currently-firing appraisals.
+	##   Cortical feedback drifts each of these toward the generated thought.
+	if _network == null:
+		return {"new_neurons": [], "active": {}}
+	return {
+		"new_neurons": _network.drain_new_appraisal_neurons(),
+		"active": _network.get_active_appraisal_activations(),
+	}

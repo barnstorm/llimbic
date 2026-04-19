@@ -5,6 +5,14 @@
   "spawn_position": [2096, 624],
   "home_location": "inn",
   "work_location": "inn",
+  "sensor_profile": {
+    "vision_range": 96.0,
+    "vision_arc_deg": 100.0,
+    "eye_offset": [0.0, -6.0],
+    "hearing_threshold": 0.07,
+    "hearing_sensitivity": 1.3,
+    "ear_offset": [0.0, 0.0]
+  },
   "personality": {
     "traits": ["jovial", "shrewd", "hospitable"],
     "speech_style": "warm but transactional, always steering toward the inn",
@@ -20,7 +28,9 @@
   "emotion_baseline": {"amusement": 0.3, "joy": 0.3},
   "drive_defaults": {"energy": 70.0, "hunger": 20.0, "social": 15.0, "safety": 80.0},
   "neural_biases": [
-    {"src": "sense_nearby_npcs", "dst": "action_help", "weight": 0.03}
+    {"src": "sense_nearby_npcs", "dst": "action_help", "weight": 0.03},
+    {"src": "sense_nearby_npcs", "dst": "vagal_ventral", "weight": 0.04},
+    {"src": "sense_at_home", "dst": "vagal_ventral", "weight": 0.02}
   ],
   "night_behavior": {"go_home_hour": 23.0, "override": null},
   "starting_inventory": ["bread", "ale"],

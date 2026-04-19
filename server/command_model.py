@@ -20,6 +20,7 @@ import requests
 
 from command_parser import parse_command_output
 from command_grammar import build_gbnf_from_context
+from perception import render as render_perception
 
 log = logging.getLogger("layer3")
 
@@ -54,39 +55,22 @@ def _format_perception(context: dict) -> str:
         else:
             feel_str = _fallback_feel_from_drives(context.get("drives", {}))
 
-    location = context.get("location", "unknown")
+    # `location` now always holds the nearest Burg named-location (16-name
+    # vocabulary, no "unknown" — threshold removed in layer3_executive.gd).
+    # `scene` is the WorldLabels prose label but currently contains raw
+    # Smallville dataset names (Arthur Burton's apartment, etc.), so we do NOT
+    # surface it to the LLM until a Burg-native arena map is authored.
+    location = context.get("location", "").strip()
+    place_str = location if location else "somewhere in the village"
     current_action = context.get("current_action", "idle")
 
-    # Visible entities
-    visible = context.get("visible", [])
-    see_lines = []
-    for v in visible[:6]:
-        name = v.get("name", "someone")
-        dist = v.get("distance", 0)
-        direction = v.get("direction", "nearby")
-        action = v.get("action", "standing")
-        see_lines.append(f"  {name} -- {dist:.0f} tiles {direction}, {action}")
-    see_str = "\n".join(see_lines) if see_lines else "  (no one)"
-
-    # Heard
-    heard = context.get("heard", [])
-    hear_lines = []
-    for h in heard[:3]:
-        src = h.get("source", "unknown")
-        text = h.get("text", "")
-        dist = h.get("distance", 0)
-        if text:
-            hear_lines.append(f"  {src}: \"{text}\" ({dist:.0f} tiles {h.get('direction', 'away')})")
-    hear_str = "\n".join(hear_lines) if hear_lines else "  (nothing)"
-
-    # Nearby objects
-    visible_objects = context.get("visible_objects", [])
-    obj_lines = []
-    for obj in visible_objects[:4]:
-        obj_name = obj.get("name", "something")
-        obj_state = obj.get("state", "")
-        obj_lines.append(f"  {obj_name}" + (f" ({obj_state})" if obj_state else ""))
-    obj_str = "\n".join(obj_lines) if obj_lines else "  (none)"
+    # Phase 7 — flat perception rendering per spec §6.4. Percepts arrive
+    # pre-ranked (Phase 6 top-K by propagation weight) and pre-capped; the
+    # renderer in `server/perception.py` produces the "You see:" / "You hear:"
+    # blocks without category distinction. Inline tokens come from Phase 5
+    # identity-appraisal decoded tokens — meaning flows from emergent state,
+    # not authored structure.
+    perception_block, _rendered_percepts = render_perception(context)
 
     # Recent events
     events = context.get("recent_events", [])
@@ -124,18 +108,23 @@ def _format_perception(context: dict) -> str:
         glimpse_parts.append(f"building ({direction}, {dist_label})")
     glimpse_str = ", ".join(glimpse_parts) if glimpse_parts else ""
 
+    # Phase 7 drops:
+    # (a) the hand-enumerated "Commands: ..." line — the GBNF grammar gates
+    #     verbs on active compound neurons and only admits the ones the
+    #     being's substrate says are affordable (§7.3).
+    # (b) the "TOUCH grounds the body..." verb-hint paragraph — per §11.4
+    #     the model learns verb meaning from training on traces, not from
+    #     hand-authored instruction text in the prompt.
     return (
         f"BEING: {role}\n"
-        f"LOCATION: {location}\n"
-        f"DOING: {current_action}\n"
+        f"You are in: {place_str}\n"
+        f"You are: {current_action}\n"
         f"\n"
         f"You feel: {feel_str}\n"
-        f"Carrying: {carry_str}\n"
-        f"{f'Available here: {avail_str}' + chr(10) if avail_str else ''}"
+        f"You are carrying: {carry_str}\n"
+        f"{f'Within reach: {avail_str}' + chr(10) if avail_str else ''}"
         f"\n"
-        f"You see:\n{see_str}\n"
-        f"You hear:\n{hear_str}\n"
-        f"Nearby objects:\n{obj_str}\n"
+        f"{perception_block}\n"
         f"\n"
         f"Recent: {events_str}\n"
         f"Goal: {intentions}\n"
@@ -144,11 +133,6 @@ def _format_perception(context: dict) -> str:
         f"\n"
         f"Known places: {places_str}\n"
         f"{f'You can see: {glimpse_str}' + chr(10) if glimpse_str else ''}"
-        f"\n"
-        f"Commands: GO TO place, LOOK AT target, SAY \"words\" TO target, "
-        f"APPROACH target, FLEE FROM target, EXAMINE object, WANDER, WAIT"
-        f"{', TAKE item, CONSUME item, DROP item' if carried or available else ''}"
-        f"{', GIVE item TO person' if carried and see_lines else ''}\n"
         f"\n"
         f"Think about your situation, then choose ONE action."
     )
@@ -225,6 +209,7 @@ class CommandModel:
                 "--ctx-size", "2048",
                 "-t", "8",
                 "-np", "2",
+                "--embedding", "--pooling", "mean",
                 "--log-disable",
             ],
             stdout=subprocess.DEVNULL,
@@ -319,12 +304,20 @@ class CommandModel:
 
         result = parse_command_output(raw, context)
 
+        # Phase 7 — always build the grammar so we record fallback metrics in
+        # the trace regardless of whether pass-2 constrained decode fires.
+        grammar_result = build_gbnf_from_context(context)
+        result["fallback_coefficient"] = grammar_result.fallback_coefficient
+        result["fallback_contribution"] = grammar_result.fallback_contribution
+        result["verbs_via_compound"] = grammar_result.verbs_via_compound
+        result["verbs_via_fallback"] = grammar_result.verbs_via_fallback
+        result["verbs_blocked"] = grammar_result.verbs_blocked
+
         # If no command was parsed, try pass 2 with GBNF grammar
         if not result["command"] and result["thoughts"]:
             log.info(f"CommandModel: pass 1 had no valid command, trying GBNF constrained")
-            grammar = build_gbnf_from_context(context)
             raw2 = self._generate(prompt, max_tokens=60, temperature=0.3,
-                                  grammar=grammar)
+                                  grammar=grammar_result.gbnf)
             if raw2:
                 # Parse the constrained output as just a command (no think block)
                 result2 = parse_command_output(raw2, context)

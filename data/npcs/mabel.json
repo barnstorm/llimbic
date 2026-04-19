@@ -3,8 +3,16 @@
   "role": "Gossip",
   "sprite_sheet": "res://assets/characters/Character_RM_007.png",
   "spawn_position": [2768, 592],
-  "home_location": "home_south",
+  "home_location": "home_east",
   "work_location": "town_square",
+  "sensor_profile": {
+    "vision_range": 112.0,
+    "vision_arc_deg": 135.0,
+    "eye_offset": [0.0, -6.0],
+    "hearing_threshold": 0.06,
+    "hearing_sensitivity": 1.4,
+    "ear_offset": [0.0, 0.0]
+  },
   "personality": {
     "traits": ["curious", "dramatic", "sociable"],
     "speech_style": "animated and conspiratorial, leans in when talking, speaks as if sharing secrets",
@@ -16,13 +24,15 @@
     {"location": "town_square", "duration": 3.0, "priority": 0.8, "purpose": "Share stories"},
     {"location": "inn", "duration": 2.0, "priority": 0.6, "purpose": "Listen to travelers"},
     {"location": "bakery", "duration": 1.0, "priority": 0.5, "purpose": "Visit baker for gossip"},
-    {"location": "well", "duration": 2.0, "priority": 0.6, "purpose": "Chat at the well"}
+    {"location": "well", "duration": 2.0, "priority": 0.6, "purpose": "Chat at the well", "object_id": "well_bucket_01", "object_action": "examine"}
   ],
   "emotion_baseline": {"curiosity": 0.5, "surprise": 0.3},
   "drive_defaults": {"energy": 80.0, "hunger": 20.0, "social": 10.0, "safety": 80.0},
   "neural_biases": [
     {"src": "drive_social", "dst": "action_observe", "weight": 0.03},
-    {"src": "drive_social", "dst": "action_approach", "weight": -0.02}
+    {"src": "drive_social", "dst": "action_approach", "weight": -0.02},
+    {"src": "sense_nearby_npcs", "dst": "vagal_ventral", "weight": 0.04},
+    {"src": "drive_social", "dst": "vagal_dorsal", "weight": 0.02}
   ],
   "night_behavior": {"go_home_hour": 21.0, "override": null},
   "starting_inventory": [],

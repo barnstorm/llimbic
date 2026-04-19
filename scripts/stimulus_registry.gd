@@ -9,10 +9,16 @@ var _stimuli: Dictionary = {}  # id -> stimulus dict
 var _next_id: int = 0
 var _grid: Dictionary = {}  # Vector2i -> Array of stimulus ids
 
-func emit(type: String, position: Vector2, radius: float, strength: float, duration: float, tags: Array = [], emitter_id: String = "") -> String:
+func emit(type: String, position: Vector2, radius: float, strength: float, duration: float, tags: Array = [], emitter_id: String = "", emitter_eid: String = "") -> String:
 	## Create a new stimulus in the world.
 	## type: visual_presence / speech / footstep / impact
 	## duration: seconds, -1 for persistent (must be removed manually or refreshed each tick)
+	## emitter_id: display name (Hugo/Mabel) — kept for speech attribution.
+	## emitter_eid: canonical entity_id (F9). Phase 9 cross-modal binding keys
+	##   `sense_heard_{eid}` on this field — leaving it empty means the stimulus
+	##   is not per-entity-attributable (e.g. wind, generic impact), and it
+	##   won't participate in cross-modal binding. Name must never substitute
+	##   for eid here: rename-on-bind (F9) would fragment the heard-neuron family.
 	## Returns the stimulus id.
 	var id: String = "stim_%d" % _next_id
 	_next_id += 1
@@ -25,6 +31,7 @@ func emit(type: String, position: Vector2, radius: float, strength: float, durat
 		"duration": duration,
 		"tags": tags,
 		"emitter_id": emitter_id,
+		"emitter_eid": emitter_eid,
 		"created_at": Time.get_ticks_msec(),
 		"_elapsed": 0.0,
 	}

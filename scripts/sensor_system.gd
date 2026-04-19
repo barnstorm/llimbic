@@ -182,6 +182,7 @@ func query_hearing(listener_pos: Vector2, profile: Dictionary, stimulus: Diction
 		"stimulus_id": stimulus.get("id", ""),
 		"stimulus_type": stimulus.get("type", ""),
 		"emitter_id": stimulus.get("emitter_id", ""),
+		"emitter_eid": stimulus.get("emitter_eid", ""),
 		"tags": stimulus.get("tags", []),
 	}
 

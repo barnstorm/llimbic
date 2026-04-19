@@ -5,6 +5,14 @@
   "spawn_position": [816, 592],
   "home_location": "courier_office",
   "work_location": "courier_office",
+  "sensor_profile": {
+    "vision_range": 128.0,
+    "vision_arc_deg": 110.0,
+    "eye_offset": [0.0, -8.0],
+    "hearing_threshold": 0.08,
+    "hearing_sensitivity": 1.2,
+    "ear_offset": [0.0, 0.0]
+  },
   "personality": {
     "traits": ["restless", "cheerful", "nosy"],
     "speech_style": "fast and breathless, always sounds like he just ran here",
@@ -23,7 +31,9 @@
   "emotion_baseline": {"excitement": 0.3, "optimism": 0.3},
   "drive_defaults": {"energy": 85.0, "hunger": 20.0, "social": 40.0, "safety": 80.0},
   "neural_biases": [
-    {"src": "drive_energy", "dst": "action_approach", "weight": 0.02}
+    {"src": "drive_energy", "dst": "action_approach", "weight": 0.02},
+    {"src": "drive_energy", "dst": "vagal_sympathetic", "weight": 0.02},
+    {"src": "sense_nearby_npcs", "dst": "vagal_ventral", "weight": 0.03}
   ],
   "night_behavior": {"go_home_hour": 21.0, "override": null},
   "starting_inventory": ["letter"],
@@ -33,5 +43,5 @@
     "gossip": "Heard something interesting on the east road today.",
     "busy": "Gotta run — next stop is the blacksmith!"
   },
-  "relationships": {"Edith": 0.55, "Greta": 0.55, "Hugo": 0.5}
+  "relationships": {"Edith": 0.55, "Greta": 0.55, "Hugo": 0.5, "Roland": 0.5}
 }

@@ -6,6 +6,29 @@ extends CharacterBody2D
 @export var speed: float = 80.0
 @export var character_sheet_path: String = ""
 
+# Phase 2 / F9 — canonical entity_id (data/entity_id_protocol.md). Stable
+# UUID-like identifier independent of display name. Per-entity Hebbian neurons
+# (sense_visible_{entity_id}, appr_identity_{entity_id}) key off this, so
+# renames (stranger → "Mabel") don't fragment the neuron family.
+#
+# For now: deterministic SHA256-prefix of npc_name. This gives a stable id
+# without needing save-file infrastructure: same npc_name → same id, every
+# run, every machine. Real save-persisted UUIDs become the source of truth in
+# a future PR; consumers don't change because they always read .entity_id.
+var _entity_id_cache: String = ""
+
+func entity_id() -> String:
+	if _entity_id_cache != "":
+		return _entity_id_cache
+	if npc_name == "":
+		return ""
+	var hashed: PackedByteArray = npc_name.sha256_buffer()
+	var hex: String = ""
+	for i in range(8):
+		hex += "%02x" % hashed[i]
+	_entity_id_cache = "ent_" + hex
+	return _entity_id_cache
+
 @onready var sprite: AnimatedSprite2D = $AnimatedSprite2D
 @onready var name_label: Label = $NameLabel
 
@@ -15,6 +38,7 @@ var _nav_manager: Node = null
 var _game_manager: Node = null
 var _inference_client: Node = null
 var _world_object_registry: Node = null
+var _world_labels: Node = null
 var _stimulus_registry: Node = null
 var _nav_ready: bool = false
 var _facing: String = "down"
@@ -65,6 +89,8 @@ func _ready() -> void:
 			_inference_client = child
 		elif child.name == "WorldObjectRegistry":
 			_world_object_registry = child
+		elif child.name == "WorldLabelSystem":
+			_world_labels = child
 		elif child.name == "StimulusRegistry":
 			_stimulus_registry = child
 
@@ -274,6 +300,31 @@ func _execute_action(action: Dictionary, delta: float) -> void:
 			_play_idle()
 			move_and_slide()
 
+		"give":
+			# OFFER / SHOW / GIVE — display the gesture and emit a social
+			# stimulus so the recipient (and bystanders) can perceive it.
+			var item_name: String = action.get("item_name", action.get("item_id", "something"))
+			var social_target: String = action.get("target", "")
+			var social_act: String = action.get("social_act", "give")
+			var verb: String = "gives"
+			match social_act:
+				"offer": verb = "offers"
+				"show": verb = "shows"
+				_: verb = "gives"
+			var gesture: String = "%s %s %s to %s" % [npc_name, verb, item_name, social_target]
+			if _action_type != "give":
+				show_speech("*" + gesture + "*")
+				if _stimulus_registry:
+					var my_eid_soc: String = entity_id() if has_method("entity_id") else ""
+					_stimulus_registry.emit(
+						"speech", global_position, 160.0, 0.7, 3.0,
+						["social", social_act, item_name.to_lower(), social_target, gesture],
+						npc_name, my_eid_soc,
+					)
+			velocity = Vector2.ZERO
+			_play_idle()
+			move_and_slide()
+
 		"wander":
 			_do_wander(delta, action)
 
@@ -439,11 +490,15 @@ func end_conversation() -> void:
 func speak(text: String) -> void:
 	## Say something out loud. Shows bubble and emits a speech stimulus.
 	## Nearby NPCs hear via StimulusRegistry + SensorSystem hearing pipeline.
+	## Phase 9: emitter_eid carries the canonical F9 entity_id so cross-modal
+	## binding can key `sense_heard_{eid}` without fragmenting on display-name
+	## changes (stranger→named rebinding).
 	show_speech(text)
+	var my_eid: String = entity_id() if has_method("entity_id") else ""
 	if _stimulus_registry:
 		_stimulus_registry.emit(
 			"speech", global_position, 160.0, 0.8, 4.0,
-			["speech", "dialogue", text.substr(0, 60)], npc_name
+			["speech", "dialogue", text.substr(0, 60)], npc_name, my_eid
 		)
 	else:
 		# Fallback: direct hearing broadcast (no stimulus system)
@@ -455,10 +510,12 @@ func speak(text: String) -> void:
 
 func emit_footstep() -> void:
 	## Emit a low-strength footstep stimulus while moving.
+	## Phase 9: emitter_eid forwarded so sense_heard_{eid} keys on footsteps too.
+	var my_eid: String = entity_id() if has_method("entity_id") else ""
 	if _stimulus_registry:
 		_stimulus_registry.emit(
 			"footstep", global_position, 48.0, 0.15, 0.5,
-			["footstep"], npc_name
+			["footstep"], npc_name, my_eid
 		)
 
 # --- Thought loop: server push + state snapshots ---
@@ -496,6 +553,7 @@ func _send_state_snapshot() -> void:
 			var dir: Vector2 = entity.get("position", global_position) - global_position
 			var cardinal: String = _direction_name(dir)
 			visible.append({
+				"id": entity.get("id", ""),
 				"name": entity.get("name", "someone"),
 				"distance": snapped(entity.get("distance", 0.0) / 32.0, 0.1),
 				"direction": cardinal,
@@ -508,20 +566,50 @@ func _send_state_snapshot() -> void:
 		for h in brain.perception.heard_events:
 			heard.append({
 				"source": h.get("source", "unknown"),
+				# Phase 9 — forward emitter_eid so the server can rank/trace
+				# heard percepts per-entity alongside visible. Missing fields
+				# fall back to "", which Python treats as "non-entity sound".
+				"emitter_eid": h.get("emitter_eid", ""),
 				"text": h.get("text", "").substr(0, 80),
 				"distance": snapped(h.get("distance", 0.0) / 32.0, 0.1),
 			})
 
 	# Visible objects (for adventure-command noun grounding)
+	# v2 trace schema preserves state/position/distance/exposure (was lossy in v1).
 	var visible_objects: Array = []
 	if brain.perception:
 		for obj in brain.perception.visible_objects:
+			var obj_pos: Vector2 = obj.get("position", Vector2.ZERO)
 			visible_objects.append({
 				"name": obj.get("name", ""),
 				"id": obj.get("id", ""),
 				"state": obj.get("state", ""),
 				"distance": snapped(obj.get("distance", 0.0) / 32.0, 0.1),
+				"position": [obj_pos.x, obj_pos.y],
+				"exposure": obj.get("exposure", 1.0),
 			})
+
+	# Phase 6/9 — per-entity perception salience. Keyed on eid for every
+	# visible entity, visible object, AND heard emitter (Phase 9 brings
+	# heard into the unified rank). Missing eids (no sense neuron yet)
+	# map to 0.0; Python treats those as tiebreak-fallback via stable
+	# ordering.
+	var salience_eids: Array = []
+	for v in visible:
+		var eid: String = String(v.get("id", ""))
+		if eid != "":
+			salience_eids.append(eid)
+	for v in visible_objects:
+		var eid2: String = String(v.get("id", ""))
+		if eid2 != "":
+			salience_eids.append(eid2)
+	for h in heard:
+		var heid: String = String(h.get("emitter_eid", ""))
+		if heid != "" and not salience_eids.has(heid):
+			salience_eids.append(heid)
+	var perception_salience: Dictionary = {}
+	if brain.layer1:
+		perception_salience = brain.layer1.get_perception_salience_all(salience_eids)
 
 	var snapshot: Dictionary = {
 		"npc_name": npc_name,
@@ -532,6 +620,7 @@ func _send_state_snapshot() -> void:
 		"vagal_state": brain.layer1.get_vagal_state() if brain.layer1 else {},
 		"emotion_vector": brain.layer2.emotion_vector if brain.layer2 else [],
 		"location": brain.layer3.location_name_from_position(global_position) if brain.layer3 else "",
+		"scene": _world_labels.describe_location(global_position) if _world_labels else "",
 		"current_action": brain.get_current_action(),
 		"visible": visible,
 		"visible_objects": visible_objects,
@@ -542,6 +631,13 @@ func _send_state_snapshot() -> void:
 		"available_items": _get_location_items(),
 		"known_locations": brain.memory.get_known_location_names() if brain.memory else [],
 		"glimpsed_buildings": _get_glimpsed_buildings(),
+		"appraisal": brain.layer1.get_appraisal_payload() if brain.layer1 else {"new_neurons": [], "active": {}},
+		"reward_events": brain.layer1.drain_recent_reward_events() if brain.layer1 else [],
+		"per_entity_channels": brain.layer1.get_per_entity_channels() if brain.layer1 else {},
+		"perception_salience": perception_salience,
+		"compounds": brain.layer1.get_compound_state() if brain.layer1 else {"active": {}, "count": 0},
+		"cross_modal": brain.layer1.get_cross_modal_state() if brain.layer1 else {"heard": {}, "bind_active": {}},
+		"temporal": brain.layer1.get_temporal_state() if brain.layer1 else {"active": {}, "new_neurons": []},
 	}
 	_inference_client.send_state_snapshot(snapshot)
 

@@ -9,7 +9,238 @@ var _item_counter: int = 0  # for generating unique IDs when dropping items
 func _ready() -> void:
 	_populate_initial_objects()
 	_populate_world_items()
+	_populate_affordances()
 	print("[WorldObjectRegistry] Registered %d world objects (incl. items)." % objects.size())
+
+func _populate_affordances() -> void:
+	## Attach `affordance` (INTERACT outcome) and `tactile` (TOUCH signature)
+	## to selected objects. Both are open-ended dicts so the world can grow
+	## new effects without touching the npc_brain handler.
+	##
+	## affordance fields:
+	##   description: short felt text ("drew water from the well")
+	##   drive_effects: {drive_name: delta} — applied to layer1
+	##   quality_nudges: {quality_id: amount} — applied to Hebbian net
+	##   memory_tags: array of tag strings for memory event
+	##   state: optional new state to set after interact
+	##
+	## tactile fields:
+	##   description: short text ("the iron is cold")
+	##   quality_nudges: {quality_id: amount} — fires somatic qualities directly
+	##
+	# --- Bakery ---
+	_set_affordance("bakery_oven_01", {
+		"description": "warmth pours out of the oven, the air shimmers",
+		"quality_nudges": {"q_warm": 35.0, "q_open": 8.0},
+		"memory_tags": ["interact", "warmth"],
+	})
+	_set_tactile("bakery_oven_01", {
+		"description": "the oven mouth is fierce hot — almost burning",
+		"quality_nudges": {"q_warm": 45.0, "q_pressure": 8.0},
+	})
+	_set_affordance("bakery_basket_01", {
+		"description": "the basket holds soft warm loaves",
+		"quality_nudges": {"q_warm": 6.0, "q_settled": 5.0},
+		"memory_tags": ["interact"],
+	})
+	_set_tactile("bakery_basket_01", {
+		"description": "warm wicker, slightly rough",
+		"quality_nudges": {"q_warm": 8.0, "q_settled": 4.0},
+	})
+	_set_tactile("bakery_flour_01", {
+		"description": "the sack is soft and dry, flour sifts through the weave",
+		"quality_nudges": {"q_dry": 15.0, "q_settled": 4.0},
+	})
+
+	# --- Guard Post ---
+	_set_affordance("guard_weapon_rack_01", {
+		"description": "you handle the swords — heavy, edge cold",
+		"quality_nudges": {"q_cold": 12.0, "q_heavy": 8.0, "q_coiled": 5.0},
+		"memory_tags": ["interact", "weapon"],
+	})
+	_set_tactile("guard_weapon_rack_01", {
+		"description": "iron — cold, hard, unforgiving",
+		"quality_nudges": {"q_cold": 25.0, "q_heavy": 6.0},
+	})
+	_set_affordance("guard_lantern_01", {
+		"description": "the lantern hisses — flame steady, metal warm",
+		"quality_nudges": {"q_warm": 10.0, "q_clear": 5.0},
+		"memory_tags": ["interact"],
+	})
+	_set_tactile("guard_lantern_01", {
+		"description": "warm metal, faintly oiled",
+		"quality_nudges": {"q_warm": 12.0},
+	})
+
+	# --- Herbalist Shop ---
+	_set_affordance("herb_drying_rack_01", {
+		"description": "the herbs release their dry green scent",
+		"quality_nudges": {"q_dry": 8.0, "q_settled": 5.0, "q_clear": 4.0},
+		"memory_tags": ["interact", "herbal"],
+	})
+	_set_tactile("herb_drying_rack_01", {
+		"description": "papery dry leaves, brittle stems",
+		"quality_nudges": {"q_dry": 18.0},
+	})
+	_set_affordance("herb_mortar_01", {
+		"description": "you grind — the pestle rasps, the bowl heats slightly",
+		"quality_nudges": {"q_warm": 4.0, "q_pressure": 5.0, "q_clear": 3.0},
+		"memory_tags": ["interact", "craft"],
+	})
+	_set_tactile("herb_mortar_01", {
+		"description": "stone — cold, smooth-worn",
+		"quality_nudges": {"q_cold": 12.0, "q_settled": 5.0},
+	})
+	_set_affordance("herb_remedy_shelf_01", {
+		"description": "you sort the small jars — tinctures, balms",
+		"quality_nudges": {"q_settled": 6.0},
+		"memory_tags": ["interact"],
+	})
+
+	# --- Blacksmith ---
+	_set_affordance("smith_anvil_01", {
+		"description": "you strike — a clean ringing tone, vibration up the arm",
+		"quality_nudges": {"q_pounding": 12.0, "q_buzzing": 6.0},
+		"memory_tags": ["interact", "craft"],
+	})
+	_set_tactile("smith_anvil_01", {
+		"description": "iron — cold, dense, immovable",
+		"quality_nudges": {"q_cold": 30.0, "q_heavy": 8.0},
+	})
+	_set_affordance("smith_forge_01", {
+		"description": "the forge breathes hot — even broken, embers smolder",
+		"quality_nudges": {"q_warm": 25.0, "q_pressure": 8.0},
+		"memory_tags": ["interact", "warmth"],
+	})
+	_set_tactile("smith_forge_01", {
+		"description": "scorching — the forge throws heat in waves",
+		"quality_nudges": {"q_warm": 50.0, "q_pressure": 10.0, "q_prickling": 8.0},
+	})
+	_set_tactile("smith_ingots_01", {
+		"description": "iron and copper — cold, heavy, inert",
+		"quality_nudges": {"q_cold": 18.0, "q_heavy": 10.0},
+	})
+
+	# --- Inn ---
+	_set_affordance("inn_pantry_01", {
+		"description": "you peer in — sacks, jars, smoked things hung",
+		"quality_nudges": {"q_settled": 6.0, "q_full": 5.0},
+		"memory_tags": ["interact"],
+	})
+	_set_affordance("inn_ledger_01", {
+		"description": "the ledger lists guests — names, dates, notes",
+		"quality_nudges": {"q_clear": 5.0, "q_settled": 4.0},
+		"memory_tags": ["interact", "read"],
+	})
+	_set_tactile("inn_ledger_01", {
+		"description": "smooth aged wood, paper soft from many hands",
+		"quality_nudges": {"q_settled": 10.0, "q_warm": 4.0},
+	})
+	_set_affordance("inn_ale_barrel_01", {
+		"description": "you tap the barrel — empty, hollow knock",
+		"quality_nudges": {"q_hollow": 6.0},
+		"memory_tags": ["interact"],
+	})
+
+	# --- Farm ---
+	_set_affordance("farm_plow_01", {
+		"description": "the plow handles fit your hands — wood worn smooth",
+		"quality_nudges": {"q_settled": 6.0, "q_heavy": 4.0},
+		"memory_tags": ["interact", "tool"],
+	})
+	_set_tactile("farm_plow_01", {
+		"description": "old wood, smoothed by use",
+		"quality_nudges": {"q_settled": 12.0, "q_warm": 4.0},
+	})
+	_set_affordance("farm_seed_storage_01", {
+		"description": "you scoop seed — small, hard, cool through the fingers",
+		"quality_nudges": {"q_cold": 8.0, "q_settled": 5.0},
+		"memory_tags": ["interact"],
+	})
+	_set_affordance("farm_trough_01", {
+		"description": "you dip — cold water, surface breaking",
+		"drive_effects": {"hunger": -3.0, "energy": 4.0},
+		"quality_nudges": {"q_cold": 20.0, "q_clear": 6.0},
+		"memory_tags": ["interact", "drink", "water"],
+	})
+	_set_tactile("farm_trough_01", {
+		"description": "the water is cold, almost biting",
+		"quality_nudges": {"q_cold": 30.0, "q_clear": 8.0},
+	})
+
+	# --- Market ---
+	_set_affordance("market_stall_01", {
+		"description": "you handle the goods — testing, weighing in the hand",
+		"quality_nudges": {"q_settled": 4.0, "q_clear": 3.0},
+		"memory_tags": ["interact"],
+	})
+	_set_affordance("market_goods_01", {
+		"description": "trade goods — cloth, tools, small wares",
+		"quality_nudges": {"q_settled": 4.0, "q_clear": 3.0},
+		"memory_tags": ["interact"],
+	})
+
+	# --- Town Square ---
+	_set_affordance("square_well_bucket_01", {
+		"description": "you draw water — bucket comes up cold and full",
+		"drive_effects": {"hunger": -5.0, "energy": 5.0},
+		"quality_nudges": {"q_cold": 25.0, "q_clear": 8.0, "q_settled": 5.0},
+		"memory_tags": ["interact", "drink", "water"],
+	})
+	_set_tactile("square_well_bucket_01", {
+		"description": "wet rope, cold wood, water sloshing",
+		"quality_nudges": {"q_cold": 30.0, "q_clear": 6.0},
+	})
+	_set_affordance("square_notice_board_01", {
+		"description": "the notices: posted by hand, the town's voice",
+		"quality_nudges": {"q_clear": 6.0, "q_settled": 3.0},
+		"memory_tags": ["interact", "read"],
+	})
+
+	# --- Item tactile signatures ---
+	# Bread is warm, ale cold, apples cool, remedies bitter-sharp
+	for id in objects.keys():
+		var obj: Dictionary = objects[id]
+		if obj.get("type", "") != "item":
+			continue
+		var iid: String = obj.get("item_id", "")
+		match iid:
+			"bread":
+				_set_tactile(id, {
+					"description": "warm crust, soft yielding center",
+					"quality_nudges": {"q_warm": 18.0, "q_settled": 6.0},
+				})
+			"ale":
+				_set_tactile(id, {
+					"description": "cool jug, faintly damp",
+					"quality_nudges": {"q_cold": 14.0, "q_settled": 4.0},
+				})
+			"apple":
+				_set_tactile(id, {
+					"description": "cool, smooth-skinned, firm",
+					"quality_nudges": {"q_cold": 8.0, "q_settled": 5.0, "q_clear": 3.0},
+				})
+			"remedy":
+				_set_tactile(id, {
+					"description": "small bottle, cool glass, bitter-sharp scent",
+					"quality_nudges": {"q_cold": 6.0, "q_clear": 8.0, "q_dry": 5.0},
+				})
+
+func _set_affordance(id: String, affordance: Dictionary) -> void:
+	if objects.has(id):
+		objects[id]["affordance"] = affordance
+
+func _set_tactile(id: String, tactile: Dictionary) -> void:
+	if objects.has(id):
+		objects[id]["tactile"] = tactile
+
+func get_affordance(id: String) -> Dictionary:
+	## Returns affordance dict for an object, or empty if none.
+	return objects.get(id, {}).get("affordance", {})
+
+func get_tactile(id: String) -> Dictionary:
+	## Returns tactile dict for an object, or empty if none.
+	return objects.get(id, {}).get("tactile", {})
 
 func _populate_world_items() -> void:
 	## Place actual takeable items in the world near relevant fixtures.
