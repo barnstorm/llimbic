@@ -542,7 +542,7 @@ class ThoughtLoop:
                     "location": context.get("location", ""),
                     "carried_items": context.get("carried_items", []),
                     "current_thought": thought_result["thoughts"][0][:200] if thought_result.get("thoughts") else "",
-                }, {"utterance": trigger["text"]}, elapsed * 1000)
+                }, {"utterance": trigger["text"]}, (time.time() - t0) * 1000)
             elif ttype == "examine":
                 commands.append({
                     "cmd": "examine",
@@ -653,9 +653,9 @@ class ThoughtLoop:
             for nid, act in state.last_active_appraisals.items()
             if str(nid).startswith("appr_identity_")
         }
-        if identity_activations and identity_decoded:
+        if identity_activations and pre_prompt_identity_decoded:
             phantom_cmds = build_phantom_nudges(
-                identity_decoded=identity_decoded,
+                identity_decoded=pre_prompt_identity_decoded,
                 active_identity_activations=identity_activations,
                 visible_eids=list(state.visible_eid_to_name.keys()),
             )
