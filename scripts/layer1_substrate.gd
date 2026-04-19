@@ -626,6 +626,21 @@ func get_temporal_state() -> Dictionary:
 		"new_neurons": _network.drain_new_temporal_textures(),
 	}
 
+func pulse_intention_context(neuron_ids: Array) -> void:
+	## Phase 11 — forward the pulse call to the Hebbian network.
+	if _network == null:
+		return
+	_network.pulse_intention_context(neuron_ids)
+
+func get_intention_state() -> Dictionary:
+	## Phase 11 — snapshot-ready intention-attention state:
+	##   {"context_neurons": {id: activation},
+	##    "amplification":  {sense_id: multiplier},
+	##    "bootstrap_variance": {intention_id: cv}}
+	if _network == null:
+		return {"context_neurons": {}, "amplification": {}, "bootstrap_variance": {}}
+	return _network.get_intention_state()
+
 func get_perception_salience_all(entity_ids: Array) -> Dictionary:
 	## Phase 9 — per-eid salience combining visible + heard outgoing-weight
 	## sums. Phase 6 covered visible only; Phase 9 brings heard into the

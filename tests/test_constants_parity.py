@@ -69,6 +69,8 @@ REQUIRED_NESTED_KEYS: dict[str, set[str]] = {
         "cross_modal_co_fire_count", "cross_modal_window_seconds",
         "temporal_persistence_seconds",
         "temporal_dwell_min", "temporal_rate_min",
+        "bootstrap_intention_seed", "intention_top_k_concepts",
+        "intention_amp_cap",
     },
     "sensors": {
         "fov_pixels", "hearing_pixels", "distance_tau_tiles", "tracker_expiry_ticks",

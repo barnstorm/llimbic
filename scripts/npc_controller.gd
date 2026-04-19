@@ -638,6 +638,7 @@ func _send_state_snapshot() -> void:
 		"compounds": brain.layer1.get_compound_state() if brain.layer1 else {"active": {}, "count": 0},
 		"cross_modal": brain.layer1.get_cross_modal_state() if brain.layer1 else {"heard": {}, "bind_active": {}},
 		"temporal": brain.layer1.get_temporal_state() if brain.layer1 else {"active": {}, "new_neurons": []},
+		"intention": brain.layer1.get_intention_state() if brain.layer1 else {"context_neurons": {}, "amplification": {}, "bootstrap_variance": {}},
 	}
 	_inference_client.send_state_snapshot(snapshot)
 

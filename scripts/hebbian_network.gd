@@ -114,6 +114,20 @@ var _temporal_tracker: Dictionary = {}
 var _temporal_spawned: Dictionary = {}          # "{kind}:{eid}" -> true (dedup)
 var _new_temporal_textures: Array = []          # drain for trace v2
 
+# Phase 11 — active perception via intention-attention coupling (spec §5.6).
+# `_intention_context_neurons` maps neuron_id → last_pulse_tick. A neuron in
+# this map is a current intention-context neuron — pulsed to activation
+# floor each cycle by the server based on the embedded Goal. Bootstrap
+# edges from intention → sense are seeded uniformly at
+# `bootstrap_intention_seed`; Hebbian learning reshapes them as I × S
+# co-fire under reward. `_intention_amp_cache` is recomputed each propagate
+# tick so sense neurons' outgoing contributions scale by the current
+# top-down amplification map.
+var _intention_context_neurons: Dictionary = {}
+var _intention_edges_seeded: Dictionary = {}    # intention_id -> tick when seed refreshed
+var _intention_amp_cache: Dictionary = {}       # sense_id -> multiplier (transient, per-tick)
+var _intention_consts_cache: Dictionary = {}
+
 # Phase 4 — distance × action-success compound emergence (spec §5.1).
 # - signal_action_success(verb, target_eid) emits a transient "action_success_{verb}"
 #   neuron at activation 50; it decays over ACTION_SUCCESS_DECAY_SECONDS.
@@ -609,13 +623,28 @@ func propagate(delta: float) -> void:
 	# DECAY_PER_FRAME (~0.998) is too slow to give the spec's transient feel.
 	_decay_action_success(delta)
 
+	# Phase 11: refresh per-sense intention amplification for this tick.
+	# When an intention-context neuron is firing AND has a learned (or
+	# bootstrapped-uniform) I→S edge, the sense neuron's outgoing influence
+	# is scaled by (1 + Σ_I I_act × w_{I→S}). At cold-start all edges are
+	# uniform so net amplification is effectively scene-wide (no attention
+	# bias); Hebbian reshapes specific pairs with reward history, and
+	# goal-relevant senses gain outsized downstream influence.
+	_intention_amp_cache = get_intention_amplification_map()
+
 	# Accumulate connection contributions
 	var contributions: Dictionary = {}
 	for conn in connections:
-		var src_n: Dictionary = _neuron_map.get(conn["src"], {})
+		var src_id: String = conn["src"]
+		var src_n: Dictionary = _neuron_map.get(src_id, {})
 		if src_n.is_empty():
 			continue
 		var contribution: float = src_n["activation"] * conn["weight"] * PROPAGATION_SCALE
+		# Phase 11 top-down amplification applies to outgoing FROM a sense
+		# neuron. Using the cached map avoids recomputing per-edge; missing
+		# entries default to 1.0 (no amplification).
+		if _intention_amp_cache.has(src_id):
+			contribution *= float(_intention_amp_cache[src_id])
 		if not contributions.has(conn["dst"]):
 			contributions[conn["dst"]] = 0.0
 		contributions[conn["dst"]] += contribution
@@ -2352,6 +2381,177 @@ func drain_new_temporal_textures() -> Array:
 		return []
 	var out: Array = _new_temporal_textures.duplicate()
 	_new_temporal_textures.clear()
+	return out
+
+# =========================================================================
+# PHASE 11 — INTENTION-ATTENTION COUPLING
+# (perception_implementation_plan.md Phase 11, perception_spec.md §5.6)
+# =========================================================================
+
+const _SENSE_PREFIXES: Array = ["sense_visible_", "sense_heard_", "sense_dist_"]
+
+func _intention_consts() -> Dictionary:
+	if not _intention_consts_cache.is_empty():
+		return _intention_consts_cache
+	var pc: Node = null
+	if Engine.has_singleton("PerceptionConstants"):
+		pc = Engine.get_singleton("PerceptionConstants")
+	else:
+		var tree: SceneTree = Engine.get_main_loop() as SceneTree
+		if tree != null and tree.root != null:
+			pc = tree.root.get_node_or_null("/root/PerceptionConstants")
+	var lookup := func(key: String, default_value: Variant) -> Variant:
+		if pc == null:
+			return default_value
+		var v: Variant = pc.call("get_value", key, default_value)
+		return v if v != null else default_value
+	_intention_consts_cache = {
+		"bootstrap_seed": float(lookup.call("neurogenesis_thresholds.bootstrap_intention_seed", 0.005)),
+		"top_k_concepts": int(lookup.call("neurogenesis_thresholds.intention_top_k_concepts", 3)),
+		"amp_cap": float(lookup.call("neurogenesis_thresholds.intention_amp_cap", 5.0)),
+	}
+	return _intention_consts_cache
+
+func _is_sense_neuron(neuron_id: String) -> bool:
+	for p in _SENSE_PREFIXES:
+		if neuron_id.begins_with(p):
+			return true
+	return false
+
+func pulse_intention_context(neuron_ids: Array, boost: float = 40.0) -> void:
+	## Phase 11 — pulse the listed concept neurons as intention context.
+	## Called from server push each thought cycle with the top-K neurons
+	## whose embedding is nearest the current goal. Also ensures bootstrap
+	## intention→sense edges exist for each newly-pulsed intention (so
+	## Hebbian learning has somewhere to reshape from).
+	##
+	## `boost` defaults to 40 — just above the "active" floor (30) so
+	## intention-context neurons reliably participate in propagation +
+	## Hebbian updates without saturating.
+	if neuron_ids.is_empty():
+		return
+	var now: int = Time.get_ticks_msec()
+	# Fade any previously-pulsed intention neurons that AREN'T in the new
+	# list — their goal is no longer active. Set their recorded pulse tick
+	# to 0 so _ensure_bootstrap_intention_edges doesn't re-seed stale ones.
+	var new_set: Dictionary = {}
+	for nid in neuron_ids:
+		new_set[String(nid)] = true
+	var stale_keys: Array = []
+	for prev_id in _intention_context_neurons.keys():
+		if not new_set.has(prev_id):
+			stale_keys.append(prev_id)
+	for k in stale_keys:
+		_intention_context_neurons.erase(k)
+
+	for nid in neuron_ids:
+		var s: String = String(nid)
+		if not _neuron_map.has(s):
+			continue
+		var cur: float = float(_neuron_map[s].get("activation", 0.0))
+		_neuron_map[s]["activation"] = clampf(maxf(cur, boost), 0.0, 100.0)
+		_intention_context_neurons[s] = now
+		_ensure_bootstrap_intention_edges(s)
+
+func _ensure_bootstrap_intention_edges(intention_id: String) -> void:
+	## Seed uniform I→sense edges at `bootstrap_intention_seed` for any
+	## sense neuron that doesn't already have an incoming edge from this
+	## intention. Re-runs cheap each cycle because new per-entity sense
+	## neurons keep spawning (Phase 2/9). Existing learned weights are NOT
+	## overwritten — only missing edges get the bootstrap seed.
+	var seed: float = float(_intention_consts().get("bootstrap_seed", 0.005))
+	for n in neurons:
+		var nid: String = String(n.get("id", ""))
+		if not _is_sense_neuron(nid):
+			continue
+		if _find_connection(intention_id, nid) >= 0:
+			continue
+		_add_connection(intention_id, nid, seed)
+	_intention_edges_seeded[intention_id] = Time.get_ticks_msec()
+
+func get_intention_amplification_map() -> Dictionary:
+	## For each sense neuron, compute `1 + Σ_I (I_act × w_{I→S})`. This is
+	## the multiplier applied to that sense neuron's outgoing propagation
+	## in propagate(). At cold-start (all I→S edges at seed): uniform small
+	## amplification across all sense neurons (~no net attention bias). As
+	## Hebbian learning reshapes I→S for goal-relevant I×S pairs, the map
+	## becomes non-uniform — goal-relevant senses gain attention.
+	var out: Dictionary = {}
+	if _intention_context_neurons.is_empty():
+		return out
+	var active_intentions: Dictionary = {}
+	for iid in _intention_context_neurons.keys():
+		var n: Dictionary = _neuron_map.get(iid, {})
+		if n.is_empty():
+			continue
+		var act: float = float(n.get("activation", 0.0))
+		# "Active" floor = same 30 the substrate uses everywhere else.
+		if act >= 30.0:
+			active_intentions[iid] = act
+	if active_intentions.is_empty():
+		return out
+	for c in connections:
+		var src: String = String(c.get("src", ""))
+		if not active_intentions.has(src):
+			continue
+		var dst: String = String(c.get("dst", ""))
+		if not _is_sense_neuron(dst):
+			continue
+		var contrib: float = float(active_intentions[src]) * float(c.get("weight", 0.0))
+		var base: float = float(out.get(dst, 1.0))
+		out[dst] = base + contrib
+	# Defensive amplification cap from constants.neurogenesis_thresholds.
+	# If a being's I→S weights reshape past this during learning, the cap
+	# applies at runtime; F6 (attention-entropy gate) picks up the trace-
+	# level signal that intention learning has over-tuned.
+	var max_amp: float = float(_intention_consts().get("amp_cap", 5.0))
+	for k in out.keys():
+		out[k] = clampf(float(out[k]), 0.0, max_amp)
+	return out
+
+func get_intention_bootstrap_variance() -> Dictionary:
+	## Per-intention coefficient of variation (stddev / mean) of the I→S
+	## weight distribution. At cold-start: ~0 (all at seed). As Hebbian
+	## reshapes: > 0. The Phase 11 "bootstrap decay" gate verifies this
+	## grows over time — authored uniformity fading into learned specificity.
+	var out: Dictionary = {}
+	for iid in _intention_edges_seeded.keys():
+		var weights: Array = []
+		for c in connections:
+			if String(c.get("src", "")) != iid:
+				continue
+			var dst: String = String(c.get("dst", ""))
+			if _is_sense_neuron(dst):
+				weights.append(float(c.get("weight", 0.0)))
+		if weights.size() < 2:
+			continue
+		var mean: float = 0.0
+		for w in weights:
+			mean += float(w)
+		mean /= float(weights.size())
+		var var_sum: float = 0.0
+		for w in weights:
+			var_sum += (float(w) - mean) * (float(w) - mean)
+		var stddev: float = sqrt(var_sum / float(weights.size()))
+		var denom: float = maxf(abs(mean), 1e-6)
+		out[iid] = float(stddev / denom)
+	return out
+
+func get_intention_state() -> Dictionary:
+	## Snapshot-ready intention state:
+	##   {"context_neurons": {id: activation},
+	##    "amplification":  {sense_id: multiplier},
+	##    "bootstrap_variance": {intention_id: cv}}
+	## The trace records all three per-tick so F11 decay + F6 regression
+	## CLIs have the full signal without re-running the sim.
+	var out: Dictionary = {"context_neurons": {}, "amplification": {}, "bootstrap_variance": {}}
+	for iid in _intention_context_neurons.keys():
+		var n: Dictionary = _neuron_map.get(iid, {})
+		if n.is_empty():
+			continue
+		out["context_neurons"][iid] = float(n.get("activation", 0.0))
+	out["amplification"] = get_intention_amplification_map()
+	out["bootstrap_variance"] = get_intention_bootstrap_variance()
 	return out
 
 func get_active_temporal_textures(floor: float = 30.0) -> Dictionary:

@@ -232,6 +232,14 @@ func process_server_commands(commands: Array) -> void:
 					var cur: float = layer1._network.get_activation(qid)
 					if cur >= 0.0:  # neuron exists
 						layer1._network.set_activation(qid, clampf(cur + amt, 0.0, 100.0))
+			"pulse_intention":
+				# Phase 11 §5.6 — server pushes the list of concept neurons
+				# whose embeddings are nearest the current Goal. Pulse +
+				# seed bootstrap I→sense edges. Existing learned weights
+				# are NOT overwritten; only missing edges get seeded.
+				var nids: Array = cmd.get("neuron_ids", [])
+				if layer1:
+					layer1.pulse_intention_context(nids)
 			"set_thought":
 				current_thought = cmd.get("text", "")
 				npc_log("THOUGHT: " + current_thought)

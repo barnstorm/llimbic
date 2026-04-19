@@ -25,6 +25,7 @@ import numpy as np
 from npc_state import NPCState
 from perception_rank import attention_entropy, h_floor
 from identity_phantom import build_phantom_nudges
+from intention_attention import IntentionAttention
 from trace_logger import trace_thought, trace_speech
 
 # Optional appraisal bridge (Phase 0). Both imports are guarded so the server
@@ -179,6 +180,7 @@ class ThoughtLoop:
         # picks up whatever seed values are current at startup. Disabled if
         # the embedding bridge is off (needs the source for F2 cosine match).
         self.identity_tracker = None
+        self.intention_attention = None
         if (_IDENTITY_AVAILABLE
                 and self.embedding_source is not None
                 and self.appraisal_manager is not None):
@@ -197,9 +199,23 @@ class ThoughtLoop:
                 log.info("ThoughtLoop: identity-appraisal tracker ENABLED "
                          "(encounter_threshold=%d, bind_threshold=%.2f)",
                          _enc_thr, _bind_thr)
+                # Phase 11 — intention-attention selector. Reuses the same
+                # embedding source + appraisal manager; no new infrastructure.
+                _topk = int(_consts["neurogenesis_thresholds"]["intention_top_k_concepts"])
+                _bootstrap_concepts = list(_consts["embedding_bridge"]["bootstrap_concepts"])
+                self.intention_attention = IntentionAttention(
+                    self.embedding_source,
+                    self.appraisal_manager,
+                    _bootstrap_concepts,
+                    _topk,
+                )
+                log.info("ThoughtLoop: intention-attention ENABLED "
+                         "(top_k=%d, bootstrap_concepts=%d)",
+                         _topk, len(_bootstrap_concepts))
             except Exception as e:
-                log.warning("ThoughtLoop: identity-appraisal tracker failed to init: %s", e)
+                log.warning("ThoughtLoop: identity/intention init failed: %s", e)
                 self.identity_tracker = None
+                self.intention_attention = None
 
     def set_websocket(self, ws):
         """Set the shared WebSocket for push delivery."""
@@ -645,6 +661,37 @@ class ThoughtLoop:
             )
             commands.extend(phantom_cmds)
 
+        # Phase 11 §5.6 — embed current goal, select top-K nearest concept
+        # neurons, and push a pulse_intention command to the client. The
+        # client's Hebbian graph activates those neurons and seeds bootstrap
+        # I→sense edges; subsequent propagate() ticks apply the attention
+        # amplification. No action taken if there's no goal to embed.
+        intention_ctx_record: dict = {"goal_text": "", "neuron_ids": [], "scores": [], "sources": []}
+        if self.intention_attention is not None:
+            goal_text = ""
+            top_intention = state.get_top_intention()
+            if top_intention:
+                goal_text = f"{top_intention.get('goal', '')} {top_intention.get('location', '')}".strip()
+            try:
+                ictx = self.intention_attention.select_intention_context(
+                    npc=npc_name,
+                    goal_text=goal_text,
+                    active_appraisal_ids=list(state.last_active_appraisals.keys()),
+                )
+                if ictx.neuron_ids:
+                    commands.append({
+                        "cmd": "pulse_intention",
+                        "neuron_ids": ictx.neuron_ids,
+                    })
+                intention_ctx_record = {
+                    "goal_text": ictx.goal_text,
+                    "neuron_ids": list(ictx.neuron_ids),
+                    "scores": list(ictx.scores),
+                    "sources": list(ictx.sources),
+                }
+            except Exception as e:
+                log.warning("[INTENTION] select failed for %s: %s", npc_name, e)
+
         # Step 5: Push to client
         await self._push_commands(npc_name, commands)
 
@@ -751,6 +798,8 @@ class ThoughtLoop:
             appraisal_drift_counts=appraisal_drift_counts,
             cross_modal_state=context.get("cross_modal"),
             temporal_state=context.get("temporal"),
+            intention_state=context.get("intention"),
+            intention_context=intention_ctx_record,
         )
         # Drain so we don't double-attribute to the next thought cycle.
         state.last_reward_events = []

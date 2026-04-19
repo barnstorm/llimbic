@@ -484,6 +484,8 @@ class NPCState:
             "cross_modal": snap.get("cross_modal", {"heard": {}, "bind_active": {}}),
             # Phase 10 — temporal-texture state (lingering/approaching compounds).
             "temporal": snap.get("temporal", {"active": {}, "new_neurons": []}),
+            # Phase 11 — intention-attention state (context neurons + amp map).
+            "intention": snap.get("intention", {"context_neurons": {}, "amplification": {}, "bootstrap_variance": {}}),
             # identity_appraisal_decoded is populated by thought_loop right
             # before prompt render; we leave it out of the default context so
             # callers that don't compute it don't emit empty inline tokens.

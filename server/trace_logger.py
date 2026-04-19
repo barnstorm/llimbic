@@ -64,7 +64,9 @@ def trace_thought(npc_name: str, context: dict, thought_result: dict,
                   verbs_via_fallback: list[str] | None = None,
                   appraisal_drift_counts: dict[str, int] | None = None,
                   cross_modal_state: dict | None = None,
-                  temporal_state: dict | None = None):
+                  temporal_state: dict | None = None,
+                  intention_state: dict | None = None,
+                  intention_context: dict | None = None):
     """Record a complete thought cycle.
 
     active_appraisals: {neuron_id: activation} — the appraisal neurons that
@@ -180,6 +182,14 @@ def trace_thought(npc_name: str, context: dict, thought_result: dict,
         # {eid: {kind: activation}} for lingering/approaching compounds;
         # `new_neurons` drains per-tick spawns. Feeds §9.4 temporal probes.
         "temporal_state": dict(temporal_state or {"active": {}, "new_neurons": []}),
+        # v2 Phase 11: intention-attention state. `context_neurons` are the
+        # concepts the goal embedding selected; `amplification` is the
+        # per-sense multiplier applied during propagate; `bootstrap_variance`
+        # is the per-intention CV of outgoing I→S weights — starts ~0
+        # (uniform seed) and grows as Hebbian reshapes, which the F11 CLI
+        # verifies as substrate-native decay of authored uniformity.
+        "intention_state": dict(intention_state or {"context_neurons": {}, "amplification": {}, "bootstrap_variance": {}}),
+        "intention_context": dict(intention_context or {"goal_text": "", "neuron_ids": [], "scores": [], "sources": []}),
         # v2 Phase 1: reward signals fired by the engine since last snapshot.
         "reward_events_this_tick": list(reward_events or []),
         # v2 Phase 3: continuous per-entity channels (visible level, distance

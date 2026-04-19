@@ -106,7 +106,7 @@ GPU under Runtime → Change runtime type before continuing.
 # 2. Clone the repo. Replace REMOTE_URL and BRANCH with yours.
 !git clone https://github.com/<YOU>/burg.git /content/burg
 %cd /content/burg
-!git checkout main   # or whichever branch carries Phase 8 tooling
+!git checkout master   # carries Phase 8 tooling (origin/master @ b60f7ac or later)
 ```
 
 ```python

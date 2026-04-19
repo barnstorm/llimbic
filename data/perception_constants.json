@@ -42,7 +42,10 @@
     "cross_modal_window_seconds": 30,
     "temporal_persistence_seconds": 8,
     "temporal_dwell_min": 30.0,
-    "temporal_rate_min": 0.5
+    "temporal_rate_min": 0.5,
+    "bootstrap_intention_seed": 0.005,
+    "intention_top_k_concepts": 3,
+    "intention_amp_cap": 5.0
   },
 
   "sensors": {
