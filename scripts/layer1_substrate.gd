@@ -641,6 +641,13 @@ func get_intention_state() -> Dictionary:
 		return {"context_neurons": {}, "amplification": {}, "bootstrap_variance": {}}
 	return _network.get_intention_state()
 
+func dump_graph_summary() -> Dictionary:
+	## Phase 13 — learned-weight structure snapshot for capstone metrics.
+	## Empty dict if the Hebbian network isn't available.
+	if _network == null:
+		return {}
+	return _network.dump_graph_summary()
+
 func get_perception_salience_all(entity_ids: Array) -> Dictionary:
 	## Phase 9 — per-eid salience combining visible + heard outgoing-weight
 	## sums. Phase 6 covered visible only; Phase 9 brings heard into the

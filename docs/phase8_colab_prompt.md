@@ -57,9 +57,12 @@ on" — that applies here too.
 2. **Produce an accelerated-sim trace** — on Windows/WSL host, this is:
 
     ```bash
+    # NOTE: --duration is WALL-CLOCK. At --accel 30 you need 48 wall-clock
+    # minutes to produce the plan floor of 24 simulated hours.
     BURG_ACCEL=30 ./scripts/run_accelerated.sh \
         --npcs hugo,mabel,ivy \
-        --duration 24h \
+        --accel 30 \
+        --duration 48m \
         --seed 42 \
         --out /tmp/trace_phase8.jsonl
     ```

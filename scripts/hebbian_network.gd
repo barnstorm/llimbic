@@ -2537,6 +2537,81 @@ func get_intention_bootstrap_variance() -> Dictionary:
 		out[iid] = float(stddev / denom)
 	return out
 
+func dump_graph_summary() -> Dictionary:
+	## Phase 13 — snapshot-time graph summary for the capstone.
+	##
+	## Serializes the minimal set of fields the capstone metric battery
+	## needs WITHOUT the transient activation state:
+	##   {
+	##     "version": 1,
+	##     "neuron_count": N,
+	##     "connection_count": M,
+	##     "dynamic_count": int,
+	##     "protected_count": int,
+	##     "compound_count": int,
+	##     "neurons": {
+	##       neuron_id: {
+	##         "category": str, "type": str, "protected": bool,
+	##         "entity_id": str_or_empty, "tag_text": str_or_empty,
+	##         "out_count": int, "in_count": int,
+	##         "out_abs_sum": float,
+	##       }
+	##     },
+	##     "connections": [{src, dst, weight}, ...]
+	##   }
+	##
+	## Written via layer1 at end-of-run. Capstone reads it to compute
+	## sensory-propagation cosine distance (§9.2.7) and dynamic-vs-protected
+	## ratio (§9.4.13). Does NOT include activation (transient) or age — the
+	## capstone treats a being as its learned-weight structure, not a tick.
+	var out_counts: Dictionary = {}
+	var in_counts: Dictionary = {}
+	var out_abs_sums: Dictionary = {}
+	for c in connections:
+		var src: String = String(c.get("src", ""))
+		var dst: String = String(c.get("dst", ""))
+		var w: float = absf(float(c.get("weight", 0.0)))
+		out_counts[src] = int(out_counts.get(src, 0)) + 1
+		in_counts[dst] = int(in_counts.get(dst, 0)) + 1
+		out_abs_sums[src] = float(out_abs_sums.get(src, 0.0)) + w
+
+	var neurons_dump: Dictionary = {}
+	var protected_count: int = 0
+	for n in neurons:
+		var nid: String = String(n.get("id", ""))
+		var is_protected: bool = bool(n.get("protected", false))
+		if is_protected:
+			protected_count += 1
+		neurons_dump[nid] = {
+			"category": String(n.get("category", "")),
+			"type": String(n.get("type", "")),
+			"protected": is_protected,
+			"entity_id": String(n.get("entity_id", "")),
+			"tag_text": String(n.get("tag_text", "")),
+			"out_count": int(out_counts.get(nid, 0)),
+			"in_count": int(in_counts.get(nid, 0)),
+			"out_abs_sum": float(out_abs_sums.get(nid, 0.0)),
+		}
+
+	var conns_dump: Array = []
+	for c in connections:
+		conns_dump.append({
+			"src": String(c.get("src", "")),
+			"dst": String(c.get("dst", "")),
+			"weight": float(c.get("weight", 0.0)),
+		})
+
+	return {
+		"version": 1,
+		"neuron_count": neurons.size(),
+		"connection_count": connections.size(),
+		"dynamic_count": int(_dynamic_count),
+		"protected_count": protected_count,
+		"compound_count": int(_compound_quality_count),
+		"neurons": neurons_dump,
+		"connections": conns_dump,
+	}
+
 func get_intention_state() -> Dictionary:
 	## Snapshot-ready intention state:
 	##   {"context_neurons": {id: activation},

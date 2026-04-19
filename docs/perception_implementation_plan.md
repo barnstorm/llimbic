@@ -423,6 +423,8 @@ mean_drift_count_per_appraisal >= 50
 
 ## Phase 13 — Capstone validation (~1 wk) [NEW]
 
+**Status:** TOOLING SHIPPED. `tools/capstone_metrics.py` implements all twelve §9 acceptance metrics as pure-compute functions consuming trace jsonl + saves/ appraisal embeddings + saves/ graph_summary.json. `tools/run_capstone.py` orchestrates: loads artifacts, runs every metric, emits `green` or `red` verdict with per-metric pass/fail + threshold annotation. Every threshold is spec-sourced — no new authored numbers, no tunable knobs. `HebbianNetwork.dump_graph_summary` serializes the learned-weight structure (neurons + connections, sans transient activations) to `saves/{npc}/graph_summary.json` so the capstone analyzer can compute sensory-propagation distance and dynamic-vs-protected ratio without re-running the sim. Acceptance-test harness synthesizes a full "green" scenario (two beings with orthogonal sensory profiles, divergent verb distributions, distinct identity-appraisal embeddings, converged perturbations, matched seed-probe standard, high scene divergence) and confirms verdict=green; nudging any single input to break a metric correctly flips verdict=red. The runtime run is operator-gated — `docs/phase13_capstone_prompt.md` is the six-step runbook covering the five accelerated-sim traces (baseline A+B, perturbation ±20%, seed-probe standard+scrambled), persisted artifacts collection, F1 probe capture, and orchestrator invocation. Runtime cost: ~28 wall-clock hours at BURG_ACCEL=30 for all five 1-simulated-week runs. Depends on Phase 8 runtime (v3 GGUF deployed) before execution.
+
 **(F7) The test of the spec, per its closing paragraph.** Phase 12 built the tools; Phase 13 runs the trial.
 
 ### Setup
