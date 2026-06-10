@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from command_parser import parse_command_output
 from command_model import _format_perception, SYSTEM_PROMPT
+from emotion_coords import top_dimensions
 
 try:
     import websockets
@@ -276,6 +277,18 @@ class HumanController:
         for k, v in drives.items():
             bar = "█" * int(v / 5) + "░" * (20 - int(v / 5))
             print(f"  {k:15s} {bar} {v:.0f}")
+
+        emotion_vector = state.get("emotion_vector", [])
+        if emotion_vector:
+            active = [(name, val) for name, val in top_dimensions(emotion_vector, 5)
+                      if val > 0.05]
+            print(f"\n  Emotions:")
+            if active:
+                for name, val in active:
+                    bar = "█" * int(val * 20) + "░" * (20 - int(val * 20))
+                    print(f"  {name:15s} {bar} {val:.2f}")
+            else:
+                print(f"    (neutral)")
 
         intentions = state.get("active_intentions", [])
         if intentions:
