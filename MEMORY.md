@@ -352,3 +352,25 @@
 - Old wire methods (`plan`, `reflect`, `dialogue`, `chat`, `converse`) retained on server for backward compat.
 - Planning now skips LLM entirely when `replan_reason == "none"` — returns default schedule immediately. Previously it always assembled a summary string even when not replanning.
 - Prompt length logging added to all `_v2` model methods: `log.info(f"PLAN_V2 prompt len={len(prompt)} chars")`.
+
+## World rebuild: flat PNG → real tilemap (2026-07-03)
+
+### What changed
+- Retired the prerendered `assets/img/town_map.png` (one Sprite2D — the reason locations were "static blobs" and objects invisible). The town is now REAL tiles.
+- `tools/build_world_tilemap.gd` — one-shot SceneTree baker. Parses `assets/the_ville.tmx` (orthogonal, CSV layers, 140×100 @ 32px, 18 tilesets) → `tilesets/world_tileset.tres` (one TileSet, 18 TileSetAtlasSource) + `scenes/world.tscn` (10 TileMapLayer, one per visual layer). Run: `godot --headless --script res://tools/build_world_tilemap.gd`. Re-runnable/idempotent; self-verifies cell count after save.
+- `scripts/world_map.gd` repurposed into a container: instances `scenes/world.tscn` + `scripts/world_labels.gd` + `scripts/world_object_markers.gd`. Still `extends Sprite2D` (main.tscn types WorldMap that way) but sets NO texture — invisible container.
+- `scripts/world_labels.gd` — 16 `data/locations.json` location labels at world positions; toggle with `toggle_labels` input (default **L**). z_index -1.
+- `scripts/world_object_markers.gd` — colored diamond + label per `WorldObjectRegistry` object (35); group `world_objects`. z_index -1. Perception code untouched (still reads the registry).
+- `test/test_world_capture.gd` — QA harness that pins the camera (overrides follow) for `--write-movie` captures; env `BURG_SHOT_X/Y/Z`.
+
+### Technical details
+- Coordinate alignment UNCHANGED: TileMapLayer at (0,0), 32px tiles → identical grid to navigation_manager / world_label_system / OccluderSystem / camera limits. Nav + collision + perception all read `collision_map.png` (untouched). Zero gameplay-coordinate changes; NPCs still pathfind/see correctly.
+- TMX flip handling: GID high bits encode hflip(0x80000000)/vflip(0x40000000)/diagonal(0x20000000); mask raw GID with 0x1FFFFFFF. Godot has NO flip arg on `TileMapLayer.set_cell` — per-cell flip is encoded via ALTERNATIVE TILES (`TileSetAtlasSource.create_alternative_tile` + `TileData.flip_h/flip_v/transpose`). TMX diagonal == Godot transpose, with h/v swapped when transposed.
+- z-order: tile layers z = -20..-11 (Z_BASE + visual_index); labels/markers z = -1; actors z = 0. So tiles < labels < actors — NPCs never hidden.
+- No color-key processing needed: every VISUAL tileset is RGBA8 with real alpha (pixel(0,0) transparent). The only RGB8 (no-alpha) tilesets (`blocks_1/2/3`) are used solely by the SKIPPED system layers (Collisions / *Blocks / Spawning / Special Blocks Registry). The magenta `trans` attribute is vestigial.
+- TMX `<image source>` paths are obsolete `map_assets/...` subtrees; translate to `res://assets/tilesets/<basename>` (all 18 present, already have `.import` files so `load()` works).
+- `data/locations.json` `position` field is authoritative (NPCs spawn/navigate on it); some `tile` fields are stale, so compute nothing from tile.
+- `WorldLabelSystem` parses the REAL Smallville building names (Hobbs Cafe, The Rose and Crown Pub, Oak Hill College, Johnson Park, …) from the TMX — distinct from the burg gameplay locations in `locations.json`. We label `locations.json` (gameplay coords), not TMX sectors.
+- Godot 4.5: `TileMapLayer` is a separate node (TileMap-with-layers is deprecated); `TileSetAtlasSource.create_tile(atlas_coords)` must be called before a tile is usable; `ResourceSaver.save()` for the TileSet (.tres, references textures by path — no inline data) and `PackedScene.pack()` + save for the scene.
+- Capture on Windows: real GPU, no xvfb/DISPLAY (that's the Linux path). `godot --write-movie screenshots/<dir>/f.png --fixed-fps N --quit-after M` writes a `f000000NN.png` frame sequence via the built-in PNG movie writer.
+- Godot binary is NOT on PATH here: use `C:\Users\bill\Downloads\Godot_Standard\Godot_v4.5.1-stable_win64_console.exe` (console build → stdout).

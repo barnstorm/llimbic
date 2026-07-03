@@ -296,6 +296,19 @@
 
 ### WorldMap
 - **File:** res://scripts/world_map.gd
+- Container (Sprite2D with NO texture): instances `scenes/world.tscn` (the baked tilemap) + `scripts/world_labels.gd` + `scripts/world_object_markers.gd`. Retired the old flat `assets/img/town_map.png`. See `tools/build_world_tilemap.gd`.
+
+### WorldLabels
+- **File:** res://scripts/world_labels.gd
+- 16 location-name Labels at `data/locations.json` positions (z -1, above tiles / below actors). Toggle with `toggle_labels` input (default L).
+
+### WorldObjectMarkers
+- **File:** res://scripts/world_object_markers.gd
+- Colored diamond + label per `WorldObjectRegistry` object (35); group `world_objects`. z -1. Draw-only — perception still reads the registry.
+
+### build_world_tilemap (tool)
+- **File:** res://tools/build_world_tilemap.gd
+- One-shot SceneTree baker: `assets/the_ville.tmx` → `tilesets/world_tileset.tres` + `scenes/world.tscn` (10 TileMapLayer, one per visual layer, native 32px). Run headless; re-runnable.
 
 ### HUDTime
 - **File:** res://scripts/hud_time.gd
