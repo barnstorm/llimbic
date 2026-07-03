@@ -12,6 +12,15 @@ var _walkable: PackedByteArray  # 0=walkable, 255=blocked
 func _ready() -> void:
 	_build_nav_grid()
 	navigation_ready.emit()
+	# NOTE (2026-07-02): a physical-collider enforcement of the navgrid was
+	# tried and reverted — this world's own content contradicts "blocked =
+	# solid" (NPCs natively SPAWN inside blocked regions, e.g. the town-square
+	# plaza, and walk out; the navgrid is a routing layer, not a physical
+	# layer). The world-side bound on external control is therefore
+	# entry-denial in npc_controller._apply_velocity_and_progress: an
+	# externally-driven actor may never ENTER blocked ground from walkable
+	# ground — the invariant native pathing already maintains — while escape
+	# from blocked ground (spawns) stays possible, exactly as for natives.
 
 func _build_nav_grid() -> void:
 	astar = AStar2D.new()

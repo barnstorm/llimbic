@@ -29,6 +29,22 @@ func entity_id() -> String:
 	_entity_id_cache = "ent_" + hex
 	return _entity_id_cache
 
+# External-mind firewall: world-object ids (e.g. "bakery_oven_01") embed a
+# location name + object identity — static-world naming that must NOT cross the
+# measured-only wire (docs/PROTOCOL.md; LCAEC spec §8). Emit an opaque token
+# instead, using the exact same SHA256-prefix scheme as entity_id() so both
+# vision-id families are indistinguishable on the wire. The body keeps the
+# real id in _obj_id_by_hash for reverse-resolution of inbound primitive
+# target_ids (see _apply_mind_primitive).
+func _opaque_object_id(raw_id: String) -> String:
+	if raw_id == "":
+		return ""
+	var hashed: PackedByteArray = raw_id.sha256_buffer()
+	var hex: String = ""
+	for i in range(8):
+		hex += "%02x" % hashed[i]
+	return "obj_" + hex
+
 @onready var sprite: AnimatedSprite2D = $AnimatedSprite2D
 @onready var name_label: Label = $NameLabel
 
@@ -40,8 +56,32 @@ var _inference_client: Node = null
 var _world_object_registry: Node = null
 var _world_labels: Node = null
 var _stimulus_registry: Node = null
+var _mind: Node = null  # MindLink autoload (external-mind mode; null/dormant when unused)
 var _nav_ready: bool = false
 var _facing: String = "down"
+
+# --- External-mind mode (see scripts/mind_link.gd, docs/PROTOCOL.md) ---
+# Per-NPC monotonically increasing observation sequence. The mind echoes it back
+# on the matching act so lockstep can pair obs<->act. Instrumentation only —
+# never consumed as a control signal.
+var _obs_seq: int = 0
+# Last velocity we applied under external control, for the lockstep hold_last
+# timeout policy.
+var _mind_last_velocity: Vector2 = Vector2.ZERO
+# Distance actually moved on the last externally-controlled step (post-collision),
+# surfaced in the next obs's proprio.actual_movement — the stall/slip signal.
+var _mind_last_actual_movement: float = 0.0
+# Re-entrancy guard: because the lockstep branch `await`s inside
+# _physics_process, the engine keeps invoking _physics_process on subsequent
+# physics frames while a prior coroutine is still suspended. This flag enforces
+# the lockstep "one obs in flight per NPC" contract — new frames early-out
+# until the in-flight obs/act cycle resolves.
+var _mind_awaiting: bool = false
+# Reverse map obj_<hash> -> real world-object id, populated as objects are
+# emitted in vision. Lets an inbound primitive target_id (which the mind echoes
+# back as the opaque token it saw) resolve to the real id body-side. Bounded by
+# the number of distinct objects ever seen (world objects are a small fixed set).
+var _obj_id_by_hash: Dictionary = {}
 
 # Pathfinding state (used by move_toward, flee_from, wander)
 var _current_path: PackedVector2Array = PackedVector2Array()
@@ -93,6 +133,8 @@ func _ready() -> void:
 			_world_labels = child
 		elif child.name == "StimulusRegistry":
 			_stimulus_registry = child
+		elif child.name == "MindLink":
+			_mind = child
 
 	if _nav_manager:
 		if _nav_manager.has_signal("navigation_ready"):
@@ -200,6 +242,32 @@ func _setup_sprite_frames(sheet_path: String) -> void:
 func _physics_process(delta: float) -> void:
 	if not _nav_ready or brain == null:
 		return
+
+	# --- External-mind mode (structural firewall — see docs/PROTOCOL.md) ---
+	# For NPCs the mind controls, Godot is a pure I/O boundary: keep perception
+	# (a sensor, not cognition), emit a MEASURED observation, apply the MOTOR
+	# action the mind returns, and BYPASS the in-Godot cognitive stack
+	# (update_layer1/2/3 + select_action). Uncontrolled NPCs fall through to the
+	# normal brain path below unchanged.
+	if _mind and _mind.is_active() and _mind.is_controlled(npc_name):
+		# Lockstep: skip frames while a prior obs/act cycle is still awaiting, so
+		# we never have two observations in flight for this NPC at once.
+		if _mind_awaiting:
+			return
+		var ext_all_npcs: Array = get_tree().get_nodes_in_group("npcs")
+		var ext_player: Node = get_tree().get_first_node_in_group("player")
+		brain.update_perception(_facing, global_position, ext_all_npcs, ext_player)  # keep — sensor, not cognition
+		var obs: Dictionary = _build_clean_observation(delta)
+		_mind.send_obs(npc_name, obs)
+		var act: Dictionary
+		if _mind.sync_mode() == "lockstep":
+			_mind_awaiting = true
+			act = await _mind.await_act(npc_name, obs["seq"], _mind.deadline_ms())
+			_mind_awaiting = false
+		else:
+			act = _mind.latest_act(npc_name)
+		_apply_mind_action(act, delta)
+		return  # bypass brain.update_layer1/2/3 + select_action for controlled NPCs
 
 	# --- Update brain layers (unchanged cadences) ---
 
@@ -334,6 +402,293 @@ func _execute_action(action: Dictionary, delta: float) -> void:
 			move_and_slide()
 
 	_action_type = atype
+
+# --- External-mind mode: clean observation builder + motor-only applier ------
+#
+# These are the body's half of the frozen wire contract (docs/PROTOCOL.md). They
+# are used ONLY for NPCs the mind controls; uncontrolled NPCs never touch them.
+# The existing _send_state_snapshot() (the CURRENT, cognition-polluted snapshot)
+# is left intact for a later phase — controlled NPCs simply don't call it.
+
+# v2: a speech transcript crosses only when heard clearly enough (body-side
+# measurement gate; below this the utterance crosses as "").
+const TRANSCRIPT_CLARITY_MIN: float = 0.5
+
+func _build_clean_observation(delta: float) -> Dictionary:
+	## Whitelisting sibling of _send_state_snapshot(). Emits ONLY measured
+	## channels — no cognition-derived fields ever cross. This is the structural
+	## firewall: we build the dict key-by-key rather than spreading any brain
+	## state dict, so an emotion/appraisal/somatic field cannot leak in even by
+	## accident. The Python side rejects unknown keys, so a leak would fail loud.
+	_obs_seq += 1
+
+	# --- Kinematics (from the CharacterBody2D substrate) ---
+	var heading_vec: Vector2 = _facing_to_vector(_facing)
+	var kinematics: Dictionary = {
+		"pos": [global_position.x, global_position.y],
+		"vel": [velocity.x, velocity.y],
+		"heading": [heading_vec.x, heading_vec.y],
+	}
+
+	# --- Vision (raw numeric fields + v2 perceptual class token; DROP names) ---
+	# `kind` is a classifier output ("what class of thing"), never an identity:
+	# entities -> npc|player, world objects -> object:<category>. Objects were
+	# omitted in v1 as a simplification, not a firewall rule — merged here.
+	var vision: Array = []
+	if brain.perception:
+		for entity in brain.perception.visible_entities:
+			var epos: Vector2 = entity.get("position", global_position)
+			var to_ent: Vector2 = epos - global_position
+			var dir: Vector2 = to_ent.normalized() if to_ent.length() > 0.0001 else Vector2.ZERO
+			vision.append({
+				"id": entity.get("id", ""),
+				"dist": entity.get("distance", 0.0),
+				"dir": [dir.x, dir.y],
+				"exposure": entity.get("exposure", 1.0),
+				"confidence": entity.get("confidence", 1.0),
+				"kind": "player" if entity.get("id", "") == "ent_player" else "npc",
+			})
+		for obj in brain.perception.visible_objects:
+			var opos: Vector2 = obj.get("position", global_position)
+			var to_obj: Vector2 = opos - global_position
+			var odir: Vector2 = to_obj.normalized() if to_obj.length() > 0.0001 else Vector2.ZERO
+			var otype: String = str(obj.get("type", ""))
+			# Firewall: cross an opaque token, not the plaintext semantic id.
+			var oraw: String = str(obj.get("id", ""))
+			var ohash: String = _opaque_object_id(oraw)
+			if ohash != "":
+				_obj_id_by_hash[ohash] = oraw
+			vision.append({
+				"id": ohash,
+				"dist": obj.get("distance", 0.0),
+				"dir": [odir.x, odir.y],
+				"exposure": obj.get("exposure", 1.0),
+				"confidence": obj.get("confidence", 1.0),
+				"kind": "object:" + (otype if otype != "" else "unknown"),
+			})
+
+	# --- Hearing (read the raw HearingResults for this tick, which carry the
+	# numeric channels the persistent heard buffer lacks). v2 adds `transcript`:
+	# what a microphone+ASR measures of a speech stimulus — the text rides the
+	# stimulus tags ([type, "dialogue", text]) and is gated by clarity, so a
+	# barely-heard utterance crosses as "" (degraded measurement, like real ears).
+	var hearing: Array = []
+	if brain.perception:
+		for hr in brain.perception.last_hearing_results:
+			var hdir: Vector2 = hr.get("direction", Vector2.ZERO)
+			var est: Vector2 = hr.get("estimated_source_pos", Vector2.ZERO)
+			var est_src: Variant = null
+			if est != Vector2.ZERO:
+				est_src = [est.x, est.y]
+			var transcript: String = ""
+			if hr.get("stimulus_type", "") == "speech" and float(hr.get("clarity", 0.0)) >= TRANSCRIPT_CLARITY_MIN:
+				var tags: Array = hr.get("tags", [])
+				if tags.size() >= 3:
+					transcript = str(tags[2])
+			hearing.append({
+				"emitter_eid": hr.get("emitter_eid", ""),
+				"dir": [hdir.x, hdir.y],
+				"perceived_volume": hr.get("perceived_volume", 1.0),
+				"clarity": hr.get("clarity", 1.0),
+				"est_src": est_src,
+				"transcript": transcript,
+			})
+
+	# --- Drives: EXACTLY the four measured homeostatic channels. get_state_dict()
+	# also returns arousal/task_momentum/frustration/vagal_state/salience etc.,
+	# which are cognition-derived — we whitelist the four and remap social_need
+	# -> social. NEVER spread get_state_dict() wholesale. ---
+	var drives: Dictionary = {"energy": 0.0, "hunger": 0.0, "social": 0.0, "safety": 0.0}
+	if brain.layer1:
+		var l1: Dictionary = brain.layer1.get_state_dict()
+		drives = {
+			"energy": l1.get("energy", 0.0),
+			"hunger": l1.get("hunger", 0.0),
+			"social": l1.get("social_need", 0.0),  # key is social_need body-side
+			"safety": l1.get("safety", 0.0),
+		}
+
+	# --- Proprio / stall channel (from update_progress) ---
+	var proprio: Dictionary = {
+		"intended_speed": 0.0,
+		"actual_movement": 0.0,
+		"is_stalled": false,
+	}
+	if brain.layer1:
+		proprio["is_stalled"] = brain.layer1.is_stalled
+		proprio["intended_speed"] = _mind_last_velocity.length()
+		proprio["actual_movement"] = _mind_last_actual_movement
+
+	# --- Abort scaffold (readout only; not wired to a real bound yet) ---
+	var abort: Dictionary = {"active": false, "kind": ""}
+
+	# --- Clock (v2): game-world time — sun position / a wall clock is a sensor ---
+	var clock: Variant = null
+	if _game_manager:
+		clock = {
+			"hour": float(_game_manager.current_hour),
+			"day": int(_game_manager.current_day),
+		}
+
+	return {
+		"t": "obs",
+		"npc": npc_name,
+		"seq": _obs_seq,
+		"t_emit": Time.get_unix_time_from_system(),
+		"tick": Engine.get_physics_frames(),
+		"dt": delta,
+		"kinematics": kinematics,
+		"vision": vision,
+		"hearing": hearing,
+		"drives": drives,
+		"proprio": proprio,
+		"abort": abort,
+		"clock": clock,
+	}
+
+func _apply_mind_action(act: Dictionary, delta: float) -> void:
+	## Motor-only applier for controlled NPCs (replaces _execute_action). Applies
+	## a desired velocity and/or a body-side interaction primitive. Drive changes
+	## happen body-side as world side-effects of primitives — never via a wire
+	## value (there is no such wire field).
+	##
+	## On an empty/timeout act, apply the on_timeout policy (hold_last or
+	## zero_vel). The determinism contract is defined over (seq, applied-state),
+	## so an act-less frame still resolves to a well-defined applied velocity.
+	if act.is_empty():
+		var mode: String = _mind.on_timeout() if _mind else "hold_last"
+		if mode == "zero_vel":
+			velocity = Vector2.ZERO
+		else:  # hold_last
+			velocity = _mind_last_velocity
+		_apply_velocity_and_progress(delta)
+		return
+
+	# Velocity command (clamped to the NPC's own max speed as v_max). `vel` takes
+	# precedence; when it is absent, apply the first step of a receding horizon
+	# (the body applies horizon[0] and re-requests each step — docs/PROTOCOL.md).
+	if act.get("vel", null) != null:
+		var v: Array = act["vel"]
+		velocity = Vector2(v[0], v[1]).limit_length(speed)
+		_apply_velocity_and_progress(delta)
+	elif act.get("horizon", null) != null and act["horizon"] is Array and act["horizon"].size() > 0:
+		var h0: Variant = act["horizon"][0]
+		if h0 is Array and h0.size() == 2:
+			velocity = Vector2(h0[0], h0[1]).limit_length(speed)
+			_apply_velocity_and_progress(delta)
+
+	# Body-side interaction primitive (optional; may accompany a vel command).
+	var prim: Variant = act.get("primitive", null)
+	if prim != null and prim is Dictionary:
+		_apply_mind_primitive(prim)
+
+	# v3 actuation echo: this act (by seq) just actuated the body, so report
+	# t_apply on the body clock — the mind server pairs it with obs.t_emit for
+	# the true sensing->actuation delay (§10). MindLink dedupes re-applications;
+	# timeout/empty acts returned early above and correctly echo nothing.
+	if _mind and act.has("seq"):
+		_mind.report_applied(npc_name, int(act["seq"]))
+
+func _apply_velocity_and_progress(delta: float) -> void:
+	## Shared motor path: face + animate, move, then feed the proprioceptive/stall
+	## channel (reuses brain.layer1.update_progress, the same channel the normal
+	## _follow_path uses). Bypasses AStar and path jitter entirely.
+	if velocity.length() > 0.01:
+		_update_facing(velocity.normalized())
+		_play_walk()
+	else:
+		_play_idle()
+	var pos_before: Vector2 = global_position
+	# Capture the COMMANDED motion before the walkable-space revert can zero
+	# it: the stall channel is intended-vs-actual, so a reverted step must
+	# report intended > 0 with actual ~ 0 — that is what makes is_stalled
+	# assert (update_progress treats intended < 1.0 as a voluntary idle and
+	# RESETS the stall tracker) and what crosses the wire in proprio. Reading
+	# velocity after the revert silenced the stall channel exactly when it
+	# should fire: the mind saw a voluntary idle instead of a wall.
+	var commanded_velocity: Vector2 = velocity
+	move_and_slide()
+	# §5/§10 body-side safety bound, ENTRY-DENIAL semantics: externally-
+	# commanded motion may never do what native motion wouldn't. Natives only
+	# ever TARGET walkable tiles (AStar discipline) but can legitimately stand
+	# on / escape blocked ground (spawns sit inside blocked regions, e.g. the
+	# town-square plaza — the navgrid is a routing layer, not a physical one).
+	# So: deny entering a blocked tile FROM walkable ground (revert + stall,
+	# with intended speed reported so is_stalled asserts), but allow motion
+	# while already on blocked ground, exactly as natives escape their spawns.
+	# (Landed-tile check; per-step movement is << one tile because velocity is
+	# limit_length(speed)-capped, so this catches the wall-passing mode.)
+	if _nav_manager and _nav_manager.astar != null:
+		var was_walkable: bool = _nav_manager.is_walkable(_nav_manager.world_to_tile(pos_before))
+		var now_walkable: bool = _nav_manager.is_walkable(_nav_manager.world_to_tile(global_position))
+		if was_walkable and not now_walkable:
+			global_position = pos_before
+			velocity = Vector2.ZERO
+	var actual: float = global_position.distance_to(pos_before)
+	if brain and brain.layer1:
+		brain.layer1.update_progress(delta, commanded_velocity.length(), actual)
+	_mind_last_velocity = commanded_velocity
+	_mind_last_actual_movement = actual
+
+func _apply_mind_primitive(prim: Dictionary) -> void:
+	## Dispatch a motor-interaction primitive to the existing body-side effect
+	## functions. These mutate drives body-side (world side-effect), which is the
+	## permitted channel; the mind cannot write drive values directly.
+	var kind: String = prim.get("kind", "")
+	match kind:
+		"face_toward":
+			var d: Variant = prim.get("dir", null)
+			if d != null and d is Array and d.size() == 2:
+				var dir: Vector2 = Vector2(d[0], d[1])
+				if dir.length() > 0.0001:
+					face_toward(global_position + dir.normalized() * 32.0)
+		"consume":
+			# Body-side consume effects by item category, mirroring the brain's
+			# own path. target_id is the item token; map to a category if we can.
+			if brain and brain.has_method("_apply_consume_effects_by_category"):
+				# Reverse-resolve the opaque token the mind echoed back to the
+				# real world-object id (pass-through if it's already a real id
+				# the mind holds from its offline persona schedule).
+				var wire_id: String = str(prim.get("target_id", ""))
+				var target_id: String = str(_obj_id_by_hash.get(wire_id, wire_id))
+				var cat: String = ""
+				if brain.has_method("_get_item_category"):
+					cat = brain._get_item_category(target_id)
+				if cat == "":
+					cat = "food"  # default when the token isn't a known item
+				brain._apply_consume_effects_by_category(cat)
+		"rest":
+			if brain and brain.has_method("_handle_rest"):
+				brain._handle_rest()
+		"speak":
+			# v2 motor speech — refused unless this run's hello_ack enabled it
+			# (the mind server gates independently; both sides must agree).
+			if _mind and _mind.allow_speak():
+				var text: String = str(prim.get("text", ""))
+				if text != "":
+					speak(text.substr(0, 280))
+			else:
+				push_warning("npc_controller: 'speak' primitive refused (allow_speak=false this run)")
+		"interact":
+			# Generic interact: no dedicated body-side effect fn exists; the world
+			# side-effect (if any) is a future phase. Treated as a no-op motor
+			# gesture for now.
+			pass
+		_:
+			pass
+
+func _facing_to_vector(facing: String) -> Vector2:
+	match facing:
+		"up":
+			return Vector2.UP
+		"down":
+			return Vector2.DOWN
+		"left":
+			return Vector2.LEFT
+		"right":
+			return Vector2.RIGHT
+		_:
+			return Vector2.DOWN
 
 func _start_path_to(target: Vector2) -> void:
 	if _nav_manager == null:

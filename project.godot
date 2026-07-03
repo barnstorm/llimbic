@@ -26,6 +26,9 @@ OccluderSystem="*res://scripts/occluder_system.gd"
 StimulusRegistry="*res://scripts/stimulus_registry.gd"
 SensorSystem="*res://scripts/sensor_system.gd"
 WorldLabelSystem="*res://scripts/world_label_system.gd"
+MindLink="*res://scripts/mind_link.gd"
+ScenarioRunner="*res://scripts/scenario_runner.gd"
+BehaviorRecorder="*res://scripts/behavior_recorder.gd"
 
 [display]
 
